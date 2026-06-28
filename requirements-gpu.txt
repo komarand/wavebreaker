@@ -1,0 +1,4 @@
+# requirements-gpu.txt
+# Install only on Linux/WSL2 GPU environment.
+# vLLM does not support native Windows.
+vllm>=0.4.0

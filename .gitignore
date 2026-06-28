@@ -1,0 +1,148 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# =========================
+# Environment / secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+# Kaggle credentials
+kaggle.json
+.kaggle/
+**/kaggle.json
+
+# Local API keys / secrets
+secrets/
+*.pem
+*.key
+
+# =========================
+# Project data / caches
+# =========================
+data/
+!data/.gitkeep
+
+# If you want to keep folder structure, use:
+# data/pdfs/.gitkeep
+# data/postgres/.gitkeep
+# and uncomment:
+# !data/pdfs/
+# !data/pdfs/.gitkeep
+# !data/postgres/
+# !data/postgres/.gitkeep
+
+# PDF cache
+*.pdf
+
+# PostgreSQL local volume
+postgres/
+pgdata/
+data/postgres/
+
+# Generated reports and run artifacts
+reports/
+outputs/
+artifacts/
+*.docx
+research_run.json
+*_research_run.json
+
+# Temporary downloaded notebooks / kernels
+*.ipynb
+tmp/
+temp/
+.cache/
+.cache_kaggle/
+kaggle_cache/
+
+# =========================
+# Tests / coverage
+# =========================
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.pytest_cache/
+.tox/
+.nox/
+
+# pytest-socket / test artifacts
+test-results/
+junit.xml
+
+# =========================
+# Type checking / linting
+# =========================
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+
+# =========================
+# IDE / editors
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+debug.log
+
+# =========================
+# Docker / local runtime
+# =========================
+docker-compose.override.yml
+
+# =========================
+# OS-specific
+# =========================
+desktop.ini
+$RECYCLE.BIN/
+
+# =========================
+# Large model / embedding artifacts
+# =========================
+models/
+checkpoints/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+
+# =========================
+# Optional local docs exports
+# =========================
+*.bak
+*.tmp
