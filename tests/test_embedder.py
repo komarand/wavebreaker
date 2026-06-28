@@ -1,119 +1,81 @@
 from __future__ import annotations
 
-import asyncio
-import json
-from collections.abc import Callable
+from types import SimpleNamespace
 
-import httpx
 import pytest
 
-from kaggle_researcher.embedder import EmbedderError, embed_one, embed_texts
+from kaggle_researcher import embedder
 
 
-def run(coro):
-    return asyncio.run(coro)
+class FakeSentenceTransformer:
+    instances: list[FakeSentenceTransformer] = []
+
+    def __init__(self, model_name: str, device: str, model_kwargs: dict | None = None) -> None:
+        self.model_name = model_name
+        self.device = device
+        self.model_kwargs = model_kwargs or {}
+        self.encode_calls: list[dict] = []
+        FakeSentenceTransformer.instances.append(self)
+
+    def encode(self, texts: list[str], **kwargs) -> list[list[float]]:
+        self.encode_calls.append({"texts": texts, "kwargs": kwargs})
+        return [[float(index), float(len(text))] for index, text in enumerate(texts)]
 
 
-def patch_async_client(
-    monkeypatch: pytest.MonkeyPatch,
-    handler: Callable[[httpx.Request], httpx.Response],
-) -> None:
-    transport = httpx.MockTransport(handler)
-    real_async_client = httpx.AsyncClient
-
-    def async_client_factory(*args, **kwargs):
-        kwargs["transport"] = transport
-        return real_async_client(*args, **kwargs)
-
-    monkeypatch.setattr("kaggle_researcher.embedder.httpx.AsyncClient", async_client_factory)
-
-
-def test_shuffled_response_indexes_return_input_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    requests: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(
-            200,
-            json={
-                "data": [
-                    {"index": 2, "embedding": [2.0]},
-                    {"index": 0, "embedding": [0.0]},
-                    {"index": 1, "embedding": [1.0]},
-                ]
-            },
-        )
-
-    patch_async_client(monkeypatch, handler)
-
-    result = run(embed_texts(["a", "b", "c"], "http://vllm.test/v1", "embed-model"))
-
-    payload = json.loads(requests[0].content)
-    assert result == [[0.0], [1.0], [2.0]]
-    assert str(requests[0].url) == "http://vllm.test/v1/embeddings"
-    assert payload == {"model": "embed-model", "input": ["a", "b", "c"]}
+@pytest.fixture(autouse=True)
+def reset_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
+    FakeSentenceTransformer.instances = []
+    monkeypatch.setattr(embedder, "SentenceTransformer", FakeSentenceTransformer)
+    monkeypatch.setattr(
+        embedder,
+        "torch",
+        SimpleNamespace(
+            bfloat16="bf16",
+            cuda=SimpleNamespace(is_available=lambda: False, is_bf16_supported=lambda: False),
+        ),
+    )
+    monkeypatch.setattr(embedder, "_model", None)
+    monkeypatch.setattr(embedder, "_embedding_dim", None)
+    monkeypatch.delenv("EMBED_MODEL", raising=False)
+    monkeypatch.delenv("MAX_EMBED_BATCH_SIZE", raising=False)
 
 
-def test_hundred_texts_with_batch_size_64_makes_two_requests(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    batch_sizes: list[int] = []
+def test_embed_texts_preserves_order_and_batches() -> None:
+    result = embedder.embed_texts(["a", "bb", "ccc"], batch_size=2)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(request.content)
-        batch = payload["input"]
-        batch_sizes.append(len(batch))
-        return httpx.Response(
-            200,
-            json={
-                "data": [
-                    {"index": index, "embedding": [float(index)]}
-                    for index, _text in enumerate(batch)
-                ]
-            },
-        )
+    assert result == [[0.0, 1.0], [1.0, 2.0], [0.0, 3.0]]
+    model = FakeSentenceTransformer.instances[0]
+    assert [call["texts"] for call in model.encode_calls] == [["a", "bb"], ["ccc"]]
+    assert all(call["kwargs"]["normalize_embeddings"] is True for call in model.encode_calls)
 
-    patch_async_client(monkeypatch, handler)
 
-    result = run(
-        embed_texts(
-            [f"text-{index}" for index in range(100)],
-            "http://vllm.test/v1",
-            "embed-model",
-            batch_size=64,
-        )
+def test_embed_one_returns_single_embedding() -> None:
+    result = embedder.embed_one("query")
+
+    assert result == [0.0, 5.0]
+
+
+def test_empty_list_returns_empty_list() -> None:
+    assert embedder.embed_texts([]) == []
+    assert FakeSentenceTransformer.instances == []
+
+
+def test_get_embedding_dim_returns_detected_dimension() -> None:
+    assert embedder.get_embedding_dim() == 2
+
+
+def test_model_uses_cuda_bf16_when_supported(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        embedder,
+        "torch",
+        SimpleNamespace(
+            bfloat16="bf16",
+            cuda=SimpleNamespace(is_available=lambda: True, is_bf16_supported=lambda: True),
+        ),
     )
 
-    assert batch_sizes == [64, 36]
-    assert len(result) == 100
+    embedder.embed_one("query")
 
-
-def test_failed_final_batch_raises_embedder_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = 0
-
-    async def fake_sleep(delay: float) -> None:
-        return None
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(500, json={"error": "server error"})
-
-    patch_async_client(monkeypatch, handler)
-    monkeypatch.setattr("kaggle_researcher.embedder.asyncio.sleep", fake_sleep)
-
-    with pytest.raises(EmbedderError, match="retryable status 500"):
-        run(embed_texts(["a"], "http://vllm.test/v1", "embed-model"))
-
-    assert calls == 3
-
-
-def test_embed_one_returns_single_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [1.0, 2.0]}]})
-
-    patch_async_client(monkeypatch, handler)
-
-    result = run(embed_one("query", "http://vllm.test/v1", "embed-model"))
-
-    assert result == [1.0, 2.0]
+    model = FakeSentenceTransformer.instances[0]
+    assert model.device == "cuda"
+    assert model.model_kwargs == {"torch_dtype": "bf16"}

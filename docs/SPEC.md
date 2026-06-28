@@ -1,7 +1,7 @@
 # KaggleResearcher
 
 ### Спецификация v4
-DeepSeek V4 · Qwen3-Embedding-4B · PostgreSQL + pgvector · pdfplumber · Reasoning Chain  
+DeepSeek V4 · Qwen3-Embedding-0.6B · PostgreSQL + pgvector · pdfplumber · Reasoning Chain  
 2025
 
 > **Codex source of truth.** This Markdown file is the implementation-oriented version of `KaggleResearcher_spec_v4.docx`. Codex should prefer this file over the `.docx` when implementing.
@@ -23,18 +23,18 @@ notebooks, скачивает PDF статей и парсит их через p
 
 |                                                                                                                                                                                                                |
 |----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Вся обработка локальна — кроме DeepSeek API. GPU (RTX 5070) нагружается только для эмбеддингов через vLLM. PostgreSQL хранит и векторы, и метаданные, и память о паттернах прошлых соревнований в одном месте. |
+| Вся обработка локальна — кроме DeepSeek API. Эмбеддинги считаются локально через SentenceTransformers; CUDA опциональна, но рекомендуется. PostgreSQL хранит и векторы, и метаданные, и память о паттернах прошлых соревнований в одном месте. |
 
 ## Изменения: v1 → v2 (инфраструктура)
 
 |               |                                       |                                                 |
 |---------------|---------------------------------------|-------------------------------------------------|
 | **Компонент** | **v1**                                | **v2**                                          |
-| Embeddings    | nomic-embed-text (Ollama, CPU, 270MB) | Qwen3-Embedding-4B (vLLM, RTX 5070, топ MTEB)   |
+| Embeddings    | nomic-embed-text (Ollama, CPU, 270MB) | Qwen3-Embedding-0.6B (SentenceTransformers)     |
 | Векторная БД  | ChromaDB (файловая)                   | PostgreSQL + pgvector (SQL, надёжно)            |
 | Тип поиска    | только косинусный                     | гибридный: vector + tsvector + RRF              |
 | PDF статьи    | только abstract из API                | полный текст + таблицы через pdfplumber         |
-| Батчинг embed | по одному запросу                     | батч через vLLM OpenAI API                      |
+| Батчинг embed | по одному запросу                     | локальные батчи через SentenceTransformers      |
 | PDF кэш       | нет                                   | ./data/pdfs/ — повторный запуск не перекачивает |
 
 ## Изменения: v2 → v3 (reasoning-слой)
@@ -60,7 +60,7 @@ notebooks, скачивает PDF статей и парсит их через p
 | **Компонент**             | **Инструмент**                 | **Роль**                                                            |
 | LLM: планировщик + синтез | DeepSeek V4 Pro API            | Chain-of-thought, не грузит GPU                                     |
 | LLM: суммаризация         | DeepSeek V4 Flash API          | Дешевле V4 Pro для рутинной суммаризации                            |
-| Embeddings                | Qwen3-Embedding-4B (vLLM)      | Локально на RTX 5070, ~8-9GB VRAM                                   |
+| Embeddings                | Qwen3-Embedding-0.6B (SentenceTransformers) | Локально, CUDA опциональна                                            |
 | Векторная БД              | PostgreSQL 16 + pgvector       | Векторный + полнотекстовый поиск в SQL                              |
 | PDF парсинг               | pdfplumber                     | Текст + таблицы из arXiv PDF                                        |
 | Источник: ноутбуки        | Kaggle Python API              | Notebooks, writeups, сортировка по голосам                          |
@@ -92,8 +92,8 @@ notebooks, скачивает PDF статей и парсит их через p
 - Шаг 4 — Summarizer: DeepSeek V4 Flash сжимает каждый документ до 300
   токенов параллельно
 
-- Шаг 5 — Embedder: Qwen3-4B через vLLM — все документы батчем, ~8-9GB
-  VRAM
+- Шаг 5 — Embedder: Qwen3-Embedding-0.6B через SentenceTransformers — все документы батчем,
+  CUDA опциональна
 
 - Шаг 6 — pgvector upsert: записывает документы + эмбеддинги + tsvector
   в Postgres
@@ -126,7 +126,7 @@ kaggle_researcher/
 ├── schemas.py                # единые Pydantic-схемы
 ├── planner.py                # DeepSeek V4 Pro: декомпозиция
 ├── summarizer.py             # DeepSeek V4 Flash: сжатие документов
-├── embedder.py               # Qwen3-4B via vLLM: батч-эмбеддинги
+├── embedder.py               # Qwen3-Embedding-0.6B via SentenceTransformers: батч-эмбеддинги
 ├── retriever.py              # гибридный поиск + RRF
 ├── agents/
 │   ├── kaggle_agent.py       # поиск и скачивание notebooks
@@ -174,22 +174,15 @@ services:
     restart: unless-stopped
 ```
 
-### vLLM сервер — Qwen3-Embedding-4B
+### Local embeddings — Qwen3-Embedding-0.6B
 
-Запускается один раз, работает пока идёт обработка. В bfloat16 занимает
-~8-9GB VRAM из 12GB доступных на RTX 5070.
+Embeddings are computed directly inside Python with SentenceTransformers. CUDA is optional but recommended.
 
 ```bash
-pip install vllm
-
-vllm serve Qwen/Qwen3-Embedding-4B \
-  --task embed \
-  --dtype bfloat16 \
-  --max-model-len 8192 \
-  --port 8000
+pip install -r requirements.txt
 ```
 
-Сервер совместим с OpenAI API — замена модели без изменения кода.
+The default model is `Qwen/Qwen3-Embedding-0.6B`.
 
 ## Контракты модулей
 
@@ -235,15 +228,15 @@ PgStore.upsert и далее в reasoning-слой все объекты при�
 
 ### embedder.py
 
-Единственная точка взаимодействия с vLLM. Все остальные модули получают
+Единственная точка взаимодействия с SentenceTransformers. Все остальные модули получают
 эмбеддинги только через этот модуль. MAX_EMBED_BATCH_SIZE (из config)
 ограничивает размер одного запроса.
 
 |                    |                                                    |                                                                                      |                                                                                                                                                                                                                                                         |
 |--------------------|----------------------------------------------------|--------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **Функция**        | **Параметры**                                      | **Возврат**                                                                          | **Эффекты / инварианты**                                                                                                                                                                                                                                |
-| embed_texts(texts) | texts: list\[str\] — список строк для векторизации | list\[list\[float\]\] — список векторов размерности 2560, порядок совпадает с входом | Если len(texts) \> MAX_EMBED_BATCH_SIZE (default 64) — автоматически бьёт на батчи и конкатенирует. Сортировка по index гарантирует порядок внутри батча. Сетевая ошибка — retry с backoff, max 3 попытки. Частичный сбой батча не прерывает остальные. |
-| embed_one(text)    | text: str                                          | list\[float\] — один вектор 2560-dim                                                 | Обёртка над embed_texts(\[text\]). Используется в retriever для query-вектора.                                                                                                                                                                          |
+| embed_texts(texts) | texts: list\[str\] — список строк для векторизации | list\[list\[float\]\] — список векторов размерности EMBED_DIM, порядок совпадает с входом | Если len(texts) \> MAX_EMBED_BATCH_SIZE (default 8) — автоматически бьёт на батчи и конкатенирует. Эмбеддинги нормализуются. |
+| embed_one(text)    | text: str                                          | list\[float\] — один вектор EMBED_DIM                                                 | Обёртка над embed_texts(\[text\]). Используется в retriever для query-вектора.                                                                                                                                                                          |
 
 ### config.py
 
@@ -256,10 +249,9 @@ PgStore.upsert и далее в reasoning-слой все объекты при�
 | DEEPSEEK_API_KEY     | str     | env           | Ключ DeepSeek API                                                      |
 | DEEPSEEK_V4_PRO      | str     | hardcoded     | Model ID: deepseek-v4-pro (планировщик, синтез, reasoning-цепочка)     |
 | DEEPSEEK_V4_FLASH    | str     | hardcoded     | Model ID: deepseek-v4-flash (суммаризация — дешевле V4 Pro для рутины) |
-| VLLM_BASE_URL        | str     | env / default | http://localhost:8000/v1                                               |
-| EMBED_MODEL          | str     | hardcoded     | Qwen/Qwen3-Embedding-4B                                                |
-| EMBED_DIM            | int     | hardcoded     | 2560 — размерность вектора модели                                      |
-| MAX_EMBED_BATCH_SIZE | int     | hardcoded     | 64 — максимум строк в одном запросе к vLLM                             |
+| EMBED_MODEL          | str     | env / default | Qwen/Qwen3-Embedding-0.6B                                              |
+| EMBED_DIM            | int     | env / default | 1024 — размерность вектора модели                                      |
+| MAX_EMBED_BATCH_SIZE | int     | env / default | 8 — максимум строк в одном локальном батче                             |
 | PG_DSN               | str     | env / default | postgresql://researcher:researcher@localhost:5432/kaggle_research      |
 | TOP_K                | int     | hardcoded     | 10 — документов из pgvector на один retrieval-запрос                   |
 | MAX_NOTEBOOKS        | int     | hardcoded     | 20 — лимит notebooks с Kaggle                                          |
@@ -327,7 +319,7 @@ cell2 \| cell3' — попадают в эмбеддинг и FTS.
 
 ### store/pg_store.py — класс PgStore
 
-Одна таблица documents хранит текст, эмбеддинг (vector(2560)), tsvector
+Одна таблица documents хранит текст, эмбеддинг (vector(EMBED_DIM)), tsvector
 (вычисляемый из content), метаданные. Изоляция соревнований по полю
 competition_id.
 
@@ -400,7 +392,7 @@ CREATE TABLE IF NOT EXISTS competition_patterns (
     task_type            TEXT,            -- из plan_data.task_type
     domain               TEXT,            -- из plan_data.domain
     pattern_text         TEXT NOT NULL,    -- текст, из которого считан embedding
-    embedding            vector(2560),
+    embedding            vector(EMBED_DIM),
     typical_models       JSONB,           -- ["LightGBM", "CatBoost", ...]
     typical_features     JSONB,           -- ["bureau aggregations", ...]
     typical_validation   TEXT,            -- напр. 'time/group split'
@@ -575,16 +567,13 @@ docker compose up -d
 # 2. Зависимости
 pip install -r requirements.txt
 
-# 3. vLLM с Qwen3-Embedding-4B (держать запущенным)
-vllm serve Qwen/Qwen3-Embedding-4B --task embed --dtype bfloat16 --port 8000
-
-# 4. Переменные окружения
+# 3. Переменные окружения
 export DEEPSEEK_API_KEY='sk-...'
 export KAGGLE_USERNAME='username'
 export KAGGLE_KEY='key'
 export GITHUB_TOKEN='ghp_...'   # опционально
 
-# 5. Запуск
+# 4. Запуск
 python main.py \
   'https://www.kaggle.com/competitions/home-credit-credit-risk-model-stability' \
   'Предсказание дефолта по кредиту. Метрика: Gini. Табличные данные.'
@@ -600,13 +589,15 @@ asyncpg==0.29.0
 pgvector==0.3.2
 pdfplumber==0.11.0
 python-docx==1.1.2
-vllm>=0.4.0
+sentence-transformers
+torch
+transformers
+accelerate
 ```
 
 ## Ограничения
 
-- vLLM с Qwen3-4B (bfloat16) занимает ~8-9GB из 12GB VRAM — остаётся
-  ~3GB буфера
+- Qwen3-Embedding-0.6B runs locally through SentenceTransformers. CUDA is optional but recommended.
 
 - Kaggle API требует принятия правил соревнования для скачивания
   notebooks

@@ -13,6 +13,11 @@ typing-extensions==4.12.2
 kaggle==1.6.14
 arxiv==2.1.0
 
+sentence-transformers
+torch
+transformers
+accelerate
+
 asyncpg==0.29.0
 pgvector==0.3.2
 

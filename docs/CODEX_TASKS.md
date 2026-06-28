@@ -180,14 +180,13 @@ Requirements:
 - DEEPSEEK_API_KEY is required from env; no default; missing value raises ConfigError.
 - KAGGLE_USERNAME and KAGGLE_KEY are optional.
 - GITHUB_TOKEN is optional.
-- VLLM_BASE_URL default: http://localhost:8000/v1
 - PG_DSN default: postgresql://researcher:researcher@localhost:5432/kaggle_research
 - Constants/defaults:
   - DEEPSEEK_V4_PRO = deepseek-v4-pro
   - DEEPSEEK_V4_FLASH = deepseek-v4-flash
-  - EMBED_MODEL = Qwen/Qwen3-Embedding-4B
-  - EMBED_DIM = 2560
-  - MAX_EMBED_BATCH_SIZE = 64
+  - EMBED_MODEL = Qwen/Qwen3-Embedding-0.6B
+  - EMBED_DIM = 1024
+  - MAX_EMBED_BATCH_SIZE = 8
   - TOP_K = 10
   - MAX_NOTEBOOKS = 20
   - MAX_PAPERS = 15
@@ -353,25 +352,23 @@ tests/test_embedder.py
 Implement kaggle_researcher/embedder.py.
 
 Functions:
-- async embed_texts(texts: list[str], base_url: str, model: str, batch_size: int = 64) -> list[list[float]]
-- async embed_one(text: str, base_url: str, model: str) -> list[float]
+- embed_texts(texts: list[str], batch_size: int = 8) -> list[list[float]]
+- embed_one(text: str) -> list[float]
+- get_embedding_dim() -> int
 
 Requirements:
-- Endpoint: {base_url}/embeddings
-- Payload: {"model": model, "input": batch}
 - If len(texts) > batch_size, split into microbatches.
 - Preserve output order exactly.
-- Sort response["data"] by index inside each batch.
-- Retry/backoff max 3 for network/429/5xx.
-- If any batch finally fails, raise EmbedderError.
-- Tests use httpx.MockTransport; no real vLLM server required.
+- Load SentenceTransformer lazily.
+- Normalize embeddings.
+- Tests mock SentenceTransformer; no real model download required.
 ```
 
 ### Acceptance criteria
 
-- Mock response with shuffled indexes returns embeddings in input order.
-- 100 texts with batch_size=64 makes two requests.
-- Failed final batch raises EmbedderError.
+- Mock model returns embeddings in input order.
+- Empty input returns [].
+- get_embedding_dim returns the detected vector length.
 
 ---
 
@@ -603,7 +600,7 @@ Implement kaggle_researcher/retriever.py.
 
 Functions:
 - reciprocal_rank_fusion(vector_results: list[RetrievedDocument], fts_results: list[RetrievedDocument], k: int = 60) -> list[RetrievedDocument]
-- async hybrid_search(store: PgStore, query: str, base_url: str, model: str, top_k: int = 10) -> list[RetrievedDocument]
+- async hybrid_search(store: PgStore, query: str, top_k: int = 10) -> list[RetrievedDocument]
 
 Requirements:
 - RRF score = sum(1 / (k + rank + 1)).
@@ -989,7 +986,7 @@ tests/test_domain_memory_unit.py
 Implement store/domain_memory.py.
 
 Class DomainMemory:
-- __init__(dsn: str, vllm_base_url: str, embed_model: str)
+- __init__(dsn: str, embed_dim: int)
 - async init() -> None
 - async find_similar(task_type: str, domain: str, top_k: int = 5) -> list[dict]
 - async save_pattern(pattern: dict) -> None

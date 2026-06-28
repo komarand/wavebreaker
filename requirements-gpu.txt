@@ -1,4 +1,3 @@
 # requirements-gpu.txt
-# Install only on Linux/WSL2 GPU environment.
-# vLLM does not support native Windows.
-vllm>=0.4.0
+# Optional GPU acceleration uses the torch package from requirements.txt.
+# Install a CUDA-enabled torch build for your platform if the default wheel is CPU-only.

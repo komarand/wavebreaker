@@ -10,12 +10,12 @@ from kaggle_researcher.schemas import SourceDocument
 from kaggle_researcher.store.pg_store import PgStore
 from kaggle_researcher.store.sql import (
     CREATE_COMPETITION_PATTERNS_EMBEDDING_HNSW_INDEX_SQL,
-    CREATE_COMPETITION_PATTERNS_TABLE_SQL,
     CREATE_DOCUMENTS_COMPETITION_ID_INDEX_SQL,
     CREATE_DOCUMENTS_EMBEDDING_HNSW_INDEX_SQL,
-    CREATE_DOCUMENTS_TABLE_SQL,
     CREATE_DOCUMENTS_TS_CONTENT_GIN_INDEX_SQL,
     CREATE_VECTOR_EXTENSION_SQL,
+    create_competition_patterns_table_sql,
+    create_documents_table_sql,
 )
 
 
@@ -39,7 +39,7 @@ class FakeAcquire:
 
 
 def make_store_with_connection(connection: object) -> PgStore:
-    store = PgStore(competition_id="comp-123", dsn="postgresql://test")
+    store = PgStore(competition_id="comp-123", dsn="postgresql://test", embed_dim=2)
     store.pool = SimpleNamespace(acquire=lambda: FakeAcquire(connection), close=AsyncMock())
     return store
 
@@ -60,7 +60,7 @@ def test_upsert_len_mismatch_raises_error() -> None:
 
 
 def test_init_runs_expected_ddl(monkeypatch: pytest.MonkeyPatch) -> None:
-    connection = SimpleNamespace(execute=AsyncMock())
+    connection = SimpleNamespace(execute=AsyncMock(), fetchval=AsyncMock(return_value="vector(384)"))
     pool = SimpleNamespace(acquire=lambda: FakeAcquire(connection))
     create_pool = AsyncMock(return_value=pool)
 
@@ -68,20 +68,38 @@ def test_init_runs_expected_ddl(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(pg_store_module, "asyncpg", SimpleNamespace(create_pool=create_pool))
 
-    store = PgStore(competition_id="comp-123", dsn="postgresql://test")
+    store = PgStore(competition_id="comp-123", dsn="postgresql://test", embed_dim=384)
     asyncio.run(store.init())
 
     create_pool.assert_awaited_once_with(dsn="postgresql://test")
     executed_sql = [call.args[0] for call in connection.execute.await_args_list]
     assert executed_sql == [
         CREATE_VECTOR_EXTENSION_SQL,
-        CREATE_DOCUMENTS_TABLE_SQL,
-        CREATE_COMPETITION_PATTERNS_TABLE_SQL,
+        create_documents_table_sql(384),
+        create_competition_patterns_table_sql(384),
         CREATE_DOCUMENTS_EMBEDDING_HNSW_INDEX_SQL,
         CREATE_DOCUMENTS_TS_CONTENT_GIN_INDEX_SQL,
         CREATE_DOCUMENTS_COMPETITION_ID_INDEX_SQL,
         CREATE_COMPETITION_PATTERNS_EMBEDDING_HNSW_INDEX_SQL,
     ]
+    assert connection.fetchval.await_count == 2
+
+
+def test_init_rejects_existing_vector_column_with_wrong_dimension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = SimpleNamespace(execute=AsyncMock(), fetchval=AsyncMock(return_value="vector(1536)"))
+    pool = SimpleNamespace(acquire=lambda: FakeAcquire(connection))
+    create_pool = AsyncMock(return_value=pool)
+
+    from kaggle_researcher.store import pg_store as pg_store_module
+
+    monkeypatch.setattr(pg_store_module, "asyncpg", SimpleNamespace(create_pool=create_pool))
+
+    store = PgStore(competition_id="comp-123", dsn="postgresql://test", embed_dim=1024)
+
+    with pytest.raises(RuntimeError, match="Recreate the database volume or table"):
+        asyncio.run(store.init())
 
 
 def test_upsert_uses_single_transaction_and_executemany() -> None:
@@ -110,6 +128,25 @@ def test_upsert_uses_single_transaction_and_executemany() -> None:
     assert rows[0][0] == "doc-1"
     assert rows[0][1] == "comp-123"
     assert rows[0][6] == "short summary"
+
+
+def test_upsert_rejects_wrong_embedding_dimension() -> None:
+    connection = SimpleNamespace(
+        executemany=AsyncMock(),
+        transaction=lambda: FakeTransaction(),
+    )
+    store = make_store_with_connection(connection)
+    doc = SourceDocument(
+        id="doc-1",
+        competition_id="comp-123",
+        source="kaggle",
+        title="Notebook",
+        url="https://example.com/doc-1",
+        content="full content",
+    )
+
+    with pytest.raises(ValueError, match="does not match configured dimension 2"):
+        asyncio.run(store.upsert([doc], [[0.1, 0.2, 0.3]]))
 
 
 def test_vector_search_filters_by_competition_id_and_prefers_summary() -> None:

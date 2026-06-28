@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from kaggle_researcher.config import DEFAULT_EMBED_DIM
+
 
 CREATE_VECTOR_EXTENSION_SQL = "CREATE EXTENSION IF NOT EXISTS vector;"
 
 
-CREATE_DOCUMENTS_TABLE_SQL = """
+def create_documents_table_sql(embed_dim: int) -> str:
+    return f"""
 CREATE TABLE IF NOT EXISTS documents (
     id              TEXT PRIMARY KEY,
     competition_id  TEXT NOT NULL,
@@ -13,8 +16,8 @@ CREATE TABLE IF NOT EXISTS documents (
     url             TEXT,
     content         TEXT NOT NULL,
     summary         TEXT,
-    metadata        JSONB DEFAULT '{}'::jsonb,
-    embedding       vector(2560),
+    metadata        JSONB DEFAULT '{{}}'::jsonb,
+    embedding       vector({embed_dim}),
     ts_content      tsvector GENERATED ALWAYS AS (
         to_tsvector('english', coalesce(summary, content))
     ) STORED,
@@ -24,14 +27,15 @@ CREATE TABLE IF NOT EXISTS documents (
 """.strip()
 
 
-CREATE_COMPETITION_PATTERNS_TABLE_SQL = """
+def create_competition_patterns_table_sql(embed_dim: int) -> str:
+    return f"""
 CREATE TABLE IF NOT EXISTS competition_patterns (
     id                    TEXT PRIMARY KEY,
     competition_family    TEXT NOT NULL,
     task_type             TEXT,
     domain                TEXT,
     pattern_text          TEXT NOT NULL,
-    embedding             vector(2560),
+    embedding             vector({embed_dim}),
     typical_models        JSONB,
     typical_features      JSONB,
     typical_validation    TEXT,
@@ -41,6 +45,10 @@ CREATE TABLE IF NOT EXISTS competition_patterns (
     updated_at            TIMESTAMPTZ DEFAULT now()
 );
 """.strip()
+
+
+CREATE_DOCUMENTS_TABLE_SQL = create_documents_table_sql(DEFAULT_EMBED_DIM)
+CREATE_COMPETITION_PATTERNS_TABLE_SQL = create_competition_patterns_table_sql(DEFAULT_EMBED_DIM)
 
 
 CREATE_DOCUMENTS_EMBEDDING_HNSW_INDEX_SQL = """

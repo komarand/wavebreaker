@@ -1,104 +1,198 @@
 from __future__ import annotations
 
-import asyncio
-import json
+import logging
+import os
 from typing import Any
 
-import httpx
+from kaggle_researcher.config import DEFAULT_EMBED_MODEL, DEFAULT_MAX_EMBED_BATCH_SIZE
+
+logger = logging.getLogger(__name__)
+
+SentenceTransformer: Any | None = None
+torch: Any | None = None
+_model: Any | None = None
+_embedding_dim: int | None = None
 
 
 class EmbedderError(RuntimeError):
-    """Raised when vLLM embedding generation fails."""
+    """Raised when local embedding generation fails."""
 
 
-async def embed_texts(
-    texts: list[str],
-    base_url: str,
-    model: str,
-    batch_size: int = 64,
-) -> list[list[float]]:
+def embed_texts(texts: list[str], batch_size: int | None = None) -> list[list[float]]:
+    if batch_size is None:
+        batch_size = _get_batch_size()
+
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
 
     if not texts:
         return []
 
+    model = _get_model()
     embeddings: list[list[float]] = []
-    endpoint = f"{base_url.rstrip('/')}/embeddings"
 
+    logger.info("Embedding %s texts in batches of %s", len(texts), batch_size)
     for start in range(0, len(texts), batch_size):
         batch = texts[start : start + batch_size]
-        batch_embeddings = await _embed_batch(endpoint=endpoint, model=model, batch=batch)
+        encoded = model.encode(
+            batch,
+            batch_size=len(batch),
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )
+        batch_embeddings = _to_python_matrix(encoded)
+        if len(batch_embeddings) != len(batch):
+            raise EmbedderError(
+                "SentenceTransformer returned a different number of embeddings than inputs"
+            )
         embeddings.extend(batch_embeddings)
 
     return embeddings
 
 
-async def embed_one(text: str, base_url: str, model: str) -> list[float]:
-    embeddings = await embed_texts([text], base_url=base_url, model=model, batch_size=1)
+def embed_one(text: str) -> list[float]:
+    embeddings = embed_texts([text], batch_size=1)
     return embeddings[0]
 
 
-async def _embed_batch(endpoint: str, model: str, batch: list[str]) -> list[list[float]]:
-    payload = {"model": model, "input": batch}
-    data = await _post_embeddings(endpoint=endpoint, payload=payload)
+def get_embedding_dim() -> int:
+    global _embedding_dim
 
-    try:
-        raw_items = data["data"]
-    except (KeyError, TypeError) as exc:
-        raise EmbedderError("Embedding response did not contain data") from exc
+    if _embedding_dim is None:
+        _embedding_dim = len(embed_one("embedding dimension probe"))
+        logger.info("Detected embedding dimension: %s", _embedding_dim)
 
-    if not isinstance(raw_items, list):
-        raise EmbedderError("Embedding response data was not a list")
-
-    try:
-        sorted_items = sorted(raw_items, key=lambda item: item["index"])
-        embeddings = [item["embedding"] for item in sorted_items]
-    except (KeyError, TypeError) as exc:
-        raise EmbedderError("Embedding response items were malformed") from exc
-
-    if len(embeddings) != len(batch):
-        raise EmbedderError("Embedding response size did not match input batch size")
-
-    return embeddings
+    return _embedding_dim
 
 
-async def _post_embeddings(
-    endpoint: str,
-    payload: dict[str, Any],
-    timeout: float = 90,
-) -> dict[str, Any]:
-    max_attempts = 3
-    last_error: Exception | None = None
+def _get_model() -> Any:
+    global _model
 
-    for attempt in range(max_attempts):
+    if _model is None:
+        model_name = os.getenv("EMBED_MODEL", DEFAULT_EMBED_MODEL)
+        device = _get_device()
+        model_kwargs = _get_model_kwargs(device)
+        sentence_transformer = _get_sentence_transformer_class()
+
+        logger.info("Loading embedding model %s on %s", model_name, device)
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(endpoint, json=payload)
+            _model = sentence_transformer(
+                model_name,
+                device=device,
+                model_kwargs=model_kwargs,
+            )
+        except TypeError:
+            _model = sentence_transformer(model_name, device=device)
+        except Exception:
+            if not model_kwargs:
+                raise
+            logger.warning("Could not load embedding model with bf16; retrying without bf16")
+            _model = sentence_transformer(model_name, device=device)
 
-            if response.status_code == 429 or 500 <= response.status_code < 600:
-                if attempt < max_attempts - 1:
-                    await _sleep_before_retry(attempt)
-                    continue
-                raise EmbedderError(
-                    f"Embedding request failed with retryable status {response.status_code}"
-                )
-
-            if response.status_code >= 400:
-                raise EmbedderError(f"Embedding request failed with status {response.status_code}")
-
-            return response.json()
-        except httpx.RequestError as exc:
-            last_error = exc
-            if attempt < max_attempts - 1:
-                await _sleep_before_retry(attempt)
-                continue
-            raise EmbedderError("Embedding network request failed") from exc
-        except json.JSONDecodeError as exc:
-            raise EmbedderError("Embedding response body was not valid JSON") from exc
-
-    raise EmbedderError("Embedding request failed") from last_error
+    return _model
 
 
-async def _sleep_before_retry(attempt: int) -> None:
-    await asyncio.sleep(0.1 * (2**attempt))
+def _get_device() -> str:
+    torch_module = _get_torch_module()
+    try:
+        return "cuda" if torch_module.cuda.is_available() else "cpu"
+    except AttributeError:
+        return "cpu"
+
+
+def _get_model_kwargs(device: str) -> dict[str, Any]:
+    if device != "cuda":
+        return {}
+
+    torch_module = _get_torch_module()
+    try:
+        if not torch_module.cuda.is_bf16_supported():
+            return {}
+    except AttributeError:
+        return {}
+
+    logger.info("CUDA bf16 is supported; loading embedding model with bfloat16")
+    return {"torch_dtype": torch_module.bfloat16}
+
+
+def _get_sentence_transformer_class() -> Any:
+    global SentenceTransformer
+
+    if SentenceTransformer is None:
+        try:
+            from sentence_transformers import SentenceTransformer as imported_sentence_transformer
+        except ImportError as exc:
+            raise EmbedderError(
+                "sentence-transformers is required for local embeddings. "
+                "Install dependencies with: pip install -r requirements.txt"
+            ) from exc
+        SentenceTransformer = imported_sentence_transformer
+
+    return SentenceTransformer
+
+
+def _get_torch_module() -> Any:
+    global torch
+
+    if torch is None:
+        try:
+            import torch as imported_torch
+        except ImportError as exc:
+            raise EmbedderError(
+                "torch is required for local embeddings. "
+                "Install dependencies with: pip install -r requirements.txt"
+            ) from exc
+        torch = imported_torch
+
+    return torch
+
+
+def _get_batch_size() -> int:
+    raw_value = os.getenv("MAX_EMBED_BATCH_SIZE")
+    if raw_value is None:
+        return DEFAULT_MAX_EMBED_BATCH_SIZE
+
+    try:
+        batch_size = int(raw_value)
+    except ValueError as exc:
+        raise EmbedderError("MAX_EMBED_BATCH_SIZE must be a positive integer") from exc
+
+    if batch_size <= 0:
+        raise EmbedderError("MAX_EMBED_BATCH_SIZE must be a positive integer")
+
+    return batch_size
+
+
+def _to_python_matrix(value: Any) -> list[list[float]]:
+    if hasattr(value, "detach"):
+        value = value.detach().cpu().float().tolist()
+    elif hasattr(value, "tolist"):
+        value = value.tolist()
+
+    if not isinstance(value, list):
+        raise EmbedderError("SentenceTransformer returned embeddings in an unsupported format")
+
+    if not value:
+        return []
+
+    if _is_number(value[0]):
+        return [[float(item) for item in value]]
+
+    matrix: list[list[float]] = []
+    for row in value:
+        if hasattr(row, "tolist"):
+            row = row.tolist()
+        if not isinstance(row, list):
+            raise EmbedderError("SentenceTransformer returned a malformed embedding row")
+        matrix.append([float(item) for item in row])
+
+    return matrix
+
+
+def _is_number(value: Any) -> bool:
+    try:
+        float(value)
+    except (TypeError, ValueError):
+        return False
+    return True
