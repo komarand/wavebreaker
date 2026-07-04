@@ -109,6 +109,27 @@ def test_get_notebook_content_returns_empty_on_download_failure(
     assert get_notebook_content("missing/kernel") == ""
 
 
+def test_get_notebook_content_returns_empty_when_download_has_no_ipynb(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakeTemporaryDirectory:
+        def __enter__(self) -> str:
+            return str(tmp_path)
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        (tmp_path / "README.md").write_text("not a notebook", encoding="utf-8")
+        return completed()
+
+    monkeypatch.setattr(kaggle_agent.tempfile, "TemporaryDirectory", FakeTemporaryDirectory)
+    monkeypatch.setattr(kaggle_agent.subprocess, "run", fake_run)
+
+    assert get_notebook_content("alice/no-notebook") == ""
+
+
 def test_build_kaggle_documents_creates_valid_source_documents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

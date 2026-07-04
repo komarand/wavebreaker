@@ -51,6 +51,19 @@ def test_rrf_preserves_best_available_metadata() -> None:
     assert results[0].metadata == {"source_rank": 1}
 
 
+def test_rrf_handles_empty_inputs() -> None:
+    assert reciprocal_rank_fusion([], []) == []
+
+
+def test_rrf_ties_keep_first_seen_order() -> None:
+    vector_results = [make_doc("vector-only", 0.9)]
+    fts_results = [make_doc("fts-only", 0.9)]
+
+    results = reciprocal_rank_fusion(vector_results, fts_results, k=60)
+
+    assert [document.id for document in results] == ["vector-only", "fts-only"]
+
+
 def test_hybrid_search_calls_embedder_and_both_searches(monkeypatch) -> None:
     vector_results = [make_doc("vector", 0.9)]
     fts_results = [make_doc("fts", 0.8)]

@@ -100,3 +100,15 @@ def test_plan_does_not_silently_swallow_llm_failure() -> None:
 
     with pytest.raises(RuntimeError, match="llm unavailable"):
         run(plan("Any competition description", client, "deepseek-v4-pro"))
+
+
+def test_malformed_plan_response_fails_validation() -> None:
+    client = FakeDeepSeekClient(
+        {
+            "task_type": "classification",
+            "metric": "auc",
+        }
+    )
+
+    with pytest.raises(Exception, match="domain"):
+        run(plan("Classify tabular examples.", client, "deepseek-v4-pro"))

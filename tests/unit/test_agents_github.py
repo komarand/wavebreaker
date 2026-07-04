@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from typing import Any
 
 import httpx
@@ -123,6 +124,53 @@ def test_search_repos_adds_token_and_rate_limit_warning(monkeypatch) -> None:
     assert repos_without_token[0]["warning"] == "GitHub unauthenticated rate limit exhausted"
     assert "warning" not in repos_with_token[0]
     assert captured_requests[-2].headers["authorization"] == "Bearer secret"
+
+
+def test_search_repos_skips_failed_github_queries(monkeypatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, request=request, json={"message": "rate limited"})
+
+    real_async_client = httpx.AsyncClient
+    transport = httpx.MockTransport(handler)
+
+    def async_client_factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = transport
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr("kaggle_researcher.agents.github_agent.httpx.AsyncClient", async_client_factory)
+
+    assert run(search_repos(["query"], max_repos=1)) == []
+
+
+def test_search_repos_decodes_json_base64_readme(monkeypatch) -> None:
+    encoded = base64.b64encode(b"# JSON README").decode("ascii")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/search/repositories":
+            return httpx.Response(
+                200,
+                request=request,
+                json={"items": [{"full_name": "alice/repo", "stargazers_count": 1}]},
+            )
+        return httpx.Response(
+            200,
+            request=request,
+            headers={"content-type": "application/json"},
+            json={"encoding": "base64", "content": encoded},
+        )
+
+    real_async_client = httpx.AsyncClient
+    transport = httpx.MockTransport(handler)
+
+    def async_client_factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = transport
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr("kaggle_researcher.agents.github_agent.httpx.AsyncClient", async_client_factory)
+
+    repos = run(search_repos(["query"], max_repos=1))
+
+    assert repos[0]["readme"] == "# JSON README"
 
 
 def test_build_github_documents_creates_valid_documents_with_metadata() -> None:

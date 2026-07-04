@@ -96,6 +96,30 @@ def test_pdf_failure_falls_back_to_abstract(monkeypatch: pytest.MonkeyPatch, tmp
     assert enriched[0]["content"] == "fallback abstract"
 
 
+def test_enrich_without_pdf_url_reuses_abstract_without_download(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    async def fail_if_called(url: str, paper_id: str, cache_dir: str):
+        raise AssertionError("download_pdf should not be called without a pdf_url")
+
+    monkeypatch.setattr(arxiv_agent, "download_pdf", fail_if_called)
+
+    enriched = enrich_with_pdf(
+        [{"entry_id": "paper-1", "abstract": "abstract only"}],
+        cache_dir=str(tmp_path),
+    )
+
+    assert enriched[0]["content"] == "abstract only"
+
+
+def test_search_arxiv_requires_optional_arxiv_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(arxiv_agent, "arxiv", None)
+
+    with pytest.raises(RuntimeError, match="arxiv package is required"):
+        search_arxiv(["query"], max_papers=1)
+
+
 def test_search_papers_with_code_uses_mocked_http(monkeypatch: pytest.MonkeyPatch) -> None:
     requests: list[dict[str, Any]] = []
 

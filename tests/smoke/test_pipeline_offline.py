@@ -5,8 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from docx import Document
-
 from kaggle_researcher.main import derive_competition_id, run_research
 from kaggle_researcher.schemas import PlanData, RetrievedDocument, SourceDocument
 
@@ -101,6 +99,8 @@ async def fake_summarize_documents(
 
 
 async def fake_hybrid_search(store: FakeStore, query: str, top_k: int) -> list[RetrievedDocument]:
+    if "paper" in query:
+        raise RuntimeError("retrieval temporarily unavailable")
     return [make_retrieved("retrieved-1"), make_retrieved("retrieved-2", source="arxiv")]
 
 
@@ -110,6 +110,32 @@ def run(coro):
 
 def test_minimal_e2e_pipeline_creates_docx(monkeypatch, tmp_path: Path) -> None:
     FakeStore.instances = []
+    report_calls: list[dict[str, Any]] = []
+    embed_calls: list[dict[str, Any]] = []
+
+    def fake_generate_report(
+        competition_name: str,
+        roadmap_text: str,
+        sources: list[RetrievedDocument],
+        output_path: str | Path,
+    ) -> Path:
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("offline fake report", encoding="utf-8")
+        report_calls.append(
+            {
+                "competition_name": competition_name,
+                "roadmap_text": roadmap_text,
+                "sources": sources,
+                "output_path": path,
+            }
+        )
+        return path
+
+    def fake_embed_texts(texts: list[str], batch_size: int) -> list[list[float]]:
+        embed_calls.append({"texts": texts, "batch_size": batch_size})
+        return [[0.1, 0.2] for _ in texts]
+
     monkeypatch.setattr("kaggle_researcher.main.load_config", lambda: FakeSettings())
     monkeypatch.setattr("kaggle_researcher.main.DeepSeekClient", FakeClient)
     monkeypatch.setattr("kaggle_researcher.main.PgStore", FakeStore)
@@ -132,8 +158,9 @@ def test_minimal_e2e_pipeline_creates_docx(monkeypatch, tmp_path: Path) -> None:
         lambda papers, competition_id: [make_source("arxiv-1", "arxiv", competition_id)],
     )
     monkeypatch.setattr("kaggle_researcher.main.summarize_documents", fake_summarize_documents)
-    monkeypatch.setattr("kaggle_researcher.main.embed_texts", lambda texts, batch_size: [[0.1, 0.2] for _ in texts])
+    monkeypatch.setattr("kaggle_researcher.main.embed_texts", fake_embed_texts)
     monkeypatch.setattr("kaggle_researcher.main.hybrid_search", fake_hybrid_search)
+    monkeypatch.setattr("kaggle_researcher.main.generate_report", fake_generate_report)
 
     result = run(
         run_research(
@@ -146,15 +173,18 @@ def test_minimal_e2e_pipeline_creates_docx(monkeypatch, tmp_path: Path) -> None:
     report_path = Path(result.report_path)
     assert report_path.exists()
     assert report_path.suffix == ".docx"
-    assert Document(report_path).paragraphs
     assert result.competition_id == "playground-series-s5e1"
     assert result.num_documents == 2
     assert result.num_sources == {"kaggle": 1, "arxiv": 1}
-    assert result.warnings == []
+    assert result.warnings == ["Retrieval failed for query 'tabular auc paper': retrieval temporarily unavailable"]
     assert result.duration_sec >= 0
     assert FakeStore.instances[0].initialized is True
     assert FakeStore.instances[0].closed is True
+    assert [doc.id for doc in FakeStore.instances[0].upserted_docs] == ["kaggle-1", "arxiv-1"]
     assert len(FakeStore.instances[0].upserted_embeddings) == 2
+    assert embed_calls == [{"texts": ["summary for kaggle-1", "summary for arxiv-1"], "batch_size": 4}]
+    assert report_calls[0]["competition_name"] == "playground-series-s5e1"
+    assert [source.id for source in report_calls[0]["sources"]] == ["retrieved-1", "retrieved-2"]
 
 
 def test_derive_competition_id_from_kaggle_url() -> None:

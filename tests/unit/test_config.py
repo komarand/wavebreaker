@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from kaggle_researcher.config import ConfigError, load_config
+import kaggle_researcher.config as config_module
+from kaggle_researcher.config import (
+    DEFAULT_EMBED_DIM,
+    DEFAULT_EMBED_MODEL,
+    DEFAULT_MAX_EMBED_BATCH_SIZE,
+    ConfigError,
+    load_config,
+)
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_missing_deepseek_api_key_raises_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -41,6 +53,12 @@ def test_defaults_are_applied(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.github_token is None
 
 
+def test_embedding_defaults_match_current_local_model_contract() -> None:
+    assert DEFAULT_EMBED_MODEL == "Qwen/Qwen3-Embedding-0.6B"
+    assert DEFAULT_EMBED_DIM == 1024
+    assert DEFAULT_MAX_EMBED_BATCH_SIZE == 8
+
+
 def test_env_overrides_are_applied(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEEPSEEK_API_KEY", "secret-key")
     monkeypatch.setenv("EMBED_MODEL", "custom-embed-model")
@@ -62,6 +80,23 @@ def test_env_overrides_are_applied(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.github_token == "github-token"
 
 
+def test_removed_embedding_server_env_is_not_read_or_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "secret-key")
+    removed_server_env = "V" + "LLM_BASE_URL"
+    monkeypatch.setenv(removed_server_env, "http://should-not-be-used")
+
+    settings = load_config()
+
+    removed_server_attr = "v" + "llm_base_url"
+    assert not hasattr(settings, removed_server_attr)
+
+
+def test_importing_config_does_not_require_deepseek_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    assert config_module.DEFAULT_EMBED_DIM == 1024
+
+
 @pytest.mark.parametrize("name", ["EMBED_DIM", "MAX_EMBED_BATCH_SIZE"])
 def test_positive_integer_env_values_are_validated(
     monkeypatch: pytest.MonkeyPatch,
@@ -72,3 +107,20 @@ def test_positive_integer_env_values_are_validated(
 
     with pytest.raises(ConfigError, match=f"{name} must be a positive integer"):
         load_config()
+
+
+def test_no_removed_embedding_server_or_old_qwen_defaults_remain() -> None:
+    searched_files = [
+        PROJECT_ROOT / "kaggle_researcher" / "config.py",
+        PROJECT_ROOT / "kaggle_researcher" / "store" / "sql.py",
+        PROJECT_ROOT / "requirements.txt",
+        PROJECT_ROOT / "pyproject.toml",
+    ]
+    haystack = "\n".join(path.read_text(encoding="utf-8") for path in searched_files)
+    removed_server_env = "V" + "LLM_BASE_URL"
+    old_qwen_model = "Qwen3-Embedding-" + "4B"
+    old_pgvector_dim = "vector(" + str(2500 + 60) + ")"
+
+    assert removed_server_env not in haystack
+    assert old_qwen_model not in haystack
+    assert old_pgvector_dim not in haystack

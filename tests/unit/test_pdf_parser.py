@@ -50,6 +50,14 @@ def test_extract_tables_as_text_joins_cells_with_pipes() -> None:
     assert extract_tables_as_text(page) == "model | score\nlgbm | 0.91\ncatboost | "
 
 
+def test_extract_tables_as_text_returns_empty_when_table_extraction_fails() -> None:
+    class BrokenPage:
+        def extract_tables(self) -> list:
+            raise RuntimeError("broken table")
+
+    assert extract_tables_as_text(BrokenPage()) == ""
+
+
 def test_parse_pdf_returns_text_for_small_fixture_pdf(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -82,6 +90,23 @@ def test_parse_pdf_returns_text_for_small_fixture_pdf(
     assert "page 4" in text
 
 
+def test_parse_pdf_empty_pdf_returns_empty_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "empty.pdf"
+    pdf_path.write_bytes(b"%PDF fake")
+
+    class FakePdfPlumber:
+        @staticmethod
+        def open(path: Path) -> FakePdf:
+            return FakePdf([])
+
+    monkeypatch.setattr(pdf_parser, "pdfplumber", FakePdfPlumber)
+
+    assert parse_pdf(pdf_path) == ""
+
+
 def test_download_pdf_writes_to_cache_with_mocked_http(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -107,6 +132,16 @@ def test_download_pdf_writes_to_cache_with_mocked_http(
     assert requests[0].url == "https://example.com/paper.pdf"
 
 
+def test_download_pdf_reuses_existing_cache_without_http(tmp_path: Path) -> None:
+    cached_path = tmp_path / "paper.pdf"
+    cached_path.write_bytes(b"%PDF cached")
+
+    path = run(download_pdf("https://example.com/paper.pdf", "paper", str(tmp_path)))
+
+    assert path == cached_path
+    assert path.read_bytes() == b"%PDF cached"
+
+
 def test_download_pdf_failure_returns_none(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -121,3 +156,26 @@ def test_download_pdf_failure_returns_none(
     monkeypatch.setattr(pdf_parser.httpx, "AsyncClient", async_client_factory)
 
     assert run(download_pdf("https://example.com/missing.pdf", "missing", str(tmp_path))) is None
+
+
+def test_download_pdf_rejects_non_pdf_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            content=b"<html>not a pdf</html>",
+            headers={"content-type": "text/html"},
+        )
+    )
+    real_async_client = httpx.AsyncClient
+
+    def async_client_factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = transport
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(pdf_parser.httpx, "AsyncClient", async_client_factory)
+
+    assert run(download_pdf("https://example.com/not-pdf", "not-pdf", str(tmp_path))) is None
+    assert not (tmp_path / "not-pdf.pdf").exists()

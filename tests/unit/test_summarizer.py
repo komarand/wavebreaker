@@ -99,6 +99,13 @@ def test_summarize_all_preserves_order() -> None:
     assert [doc.summary for doc in results] == ["summary-1", "summary-2", "summary-3"]
 
 
+def test_summarize_all_empty_list_returns_empty_list_without_api_call() -> None:
+    client = FakeDeepSeekClient()
+
+    assert run(summarize_all(client, [], "deepseek-v4-flash")) == []
+    assert client.calls == []
+
+
 def test_summarize_all_rejects_invalid_concurrency() -> None:
     with pytest.raises(ValueError, match="concurrency must be positive"):
         run(summarize_all(FakeDeepSeekClient(), [], "deepseek-v4-flash", concurrency=0))

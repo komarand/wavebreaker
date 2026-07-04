@@ -102,6 +102,17 @@ def test_init_rejects_existing_vector_column_with_wrong_dimension(
         asyncio.run(store.init())
 
 
+def test_table_sql_uses_configured_embedding_dimension() -> None:
+    documents_sql = create_documents_table_sql(1024)
+    patterns_sql = create_competition_patterns_table_sql(1024)
+    old_pgvector_dim = "vector(" + str(2500 + 60) + ")"
+
+    assert "vector(1024)" in documents_sql
+    assert "vector(1024)" in patterns_sql
+    assert old_pgvector_dim not in documents_sql
+    assert old_pgvector_dim not in patterns_sql
+
+
 def test_upsert_uses_single_transaction_and_executemany() -> None:
     connection = SimpleNamespace(
         executemany=AsyncMock(),
@@ -209,3 +220,21 @@ def test_fts_search_filters_by_competition_id() -> None:
     assert top_k == 3
     assert len(results) == 1
     assert results[0].metadata["stars"] == 100
+
+
+def test_close_closes_pool_and_clears_reference() -> None:
+    pool = SimpleNamespace(close=AsyncMock())
+    store = PgStore(competition_id="comp-123", dsn="postgresql://test", embed_dim=2)
+    store.pool = pool
+
+    asyncio.run(store.close())
+
+    pool.close.assert_awaited_once()
+    assert store.pool is None
+
+
+def test_get_vector_column_dim_rejects_unfixed_or_missing_vector_type() -> None:
+    connection = SimpleNamespace(fetchval=AsyncMock(return_value="vector"))
+
+    with pytest.raises(RuntimeError, match="expected a pgvector column"):
+        asyncio.run(PgStore._get_vector_column_dim(connection, "documents", "embedding"))
