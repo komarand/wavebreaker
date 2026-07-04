@@ -8,6 +8,7 @@ __pycache__/
 .Python
 
 # Virtual environments
+.venv-win/
 .venv/
 venv/
 env/

@@ -1252,3 +1252,20 @@ python -m kaggle_researcher.main --help
 ```
 
 For integration-only tasks, keep real API tests behind explicit markers and never require credentials in default CI.
+
+
+# Development environment
+
+Use the project-local Windows virtual environment:
+
+`E:\wavebreaker\.venv-win\Scripts\python.exe`
+
+Do not use global Python:
+
+`C:\Python312\python.exe`
+
+Install dependencies with:
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe -m pip install -r requirements.txt
+E:\wavebreaker\.venv-win\Scripts\python.exe -m pip install -e .
