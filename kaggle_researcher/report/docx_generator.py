@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from docx import Document
@@ -7,13 +8,23 @@ from docx import Document
 from kaggle_researcher.schemas import RetrievedDocument
 
 
+VALID_NAMING_STRATEGIES = {"timestamp", "increment"}
+
+
 def generate_report(
     competition_name: str,
     roadmap_text: str,
     sources: list[RetrievedDocument],
     output_path: str | Path,
+    *,
+    overwrite: bool = False,
+    naming_strategy: str = "timestamp",
 ) -> Path:
-    path = Path(output_path)
+    path = resolve_report_path(
+        output_path=output_path,
+        overwrite=overwrite,
+        naming_strategy=naming_strategy,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
 
     document = Document()
@@ -32,8 +43,70 @@ def generate_report(
     else:
         document.add_paragraph("No retrieved sources.")
 
-    document.save(path)
+    try:
+        document.save(path)
+    except PermissionError as exc:
+        if overwrite:
+            raise RuntimeError(
+                f"Cannot overwrite report at {path}. "
+                "The file may be open in Word or locked by Windows. "
+                "Close it or run without --overwrite-report."
+            ) from exc
+
+        fallback_path = make_timestamped_path(path)
+        try:
+            document.save(fallback_path)
+        except PermissionError as fallback_exc:
+            raise RuntimeError(
+                f"Cannot save report at {path} or fallback path {fallback_path}. "
+                "The files may be open in Word or locked by Windows."
+            ) from fallback_exc
+        path = fallback_path
+
     return path
+
+
+def make_timestamped_path(path: Path) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    candidate = path.with_name(f"{path.stem}_{timestamp}{path.suffix}")
+    if not candidate.exists() and candidate != path:
+        return candidate
+
+    counter = 2
+    while True:
+        incremented = path.with_name(f"{path.stem}_{timestamp}_{counter:03d}{path.suffix}")
+        if not incremented.exists() and incremented != path:
+            return incremented
+        counter += 1
+
+
+def make_incremented_path(path: Path) -> Path:
+    counter = 2
+    while True:
+        candidate = path.with_name(f"{path.stem}_v{counter:03d}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def resolve_report_path(
+    output_path: str | Path,
+    overwrite: bool = False,
+    naming_strategy: str = "timestamp",
+) -> Path:
+    path = Path(output_path)
+    if naming_strategy not in VALID_NAMING_STRATEGIES:
+        raise ValueError(
+            "naming_strategy must be one of: "
+            f"{', '.join(sorted(VALID_NAMING_STRATEGIES))}"
+        )
+
+    if overwrite or not path.exists():
+        return path
+
+    if naming_strategy == "timestamp":
+        return make_timestamped_path(path)
+    return make_incremented_path(path)
 
 
 def _add_markdown_like_text(document: Document, text: str) -> None:

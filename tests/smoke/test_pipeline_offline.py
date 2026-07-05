@@ -94,6 +94,8 @@ async def fake_summarize_documents(
     client: Any,
     docs: list[SourceDocument],
     model: str,
+    *,
+    show_progress: bool = False,
 ) -> list[SourceDocument]:
     return [doc.model_copy(update={"summary": f"summary for {doc.id}"}) for doc in docs]
 
@@ -118,6 +120,9 @@ def test_minimal_e2e_pipeline_creates_docx(monkeypatch, tmp_path: Path) -> None:
         roadmap_text: str,
         sources: list[RetrievedDocument],
         output_path: str | Path,
+        *,
+        overwrite: bool = False,
+        naming_strategy: str = "timestamp",
     ) -> Path:
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -169,6 +174,7 @@ def test_minimal_e2e_pipeline_creates_docx(monkeypatch, tmp_path: Path) -> None:
             competition_url="https://www.kaggle.com/competitions/playground-series-s5e1",
             competition_desc="Classify tabular examples with AUC.",
             output_dir=tmp_path,
+            show_progress=False,
         )
     )
 
