@@ -23,7 +23,9 @@ async def analyze_metric(
             "You are the Metric Specialist. Explain metric implications. Guidance: "
             "AUC/Gini -> ranking and rank averaging; LogLoss -> calibration and clipping; "
             "F1/Dice -> threshold search; RMSE/RMSLE -> target transforms and clipping; "
-            "MAP@K/NDCG -> ranking and candidate generation. Do not claim dataset analysis."
+            "MAP@K/NDCG -> ranking and candidate generation. Do not claim dataset analysis. "
+            "Important metric claims must include provenance labels such as arxiv, kaggle, "
+            "heuristic, and not_verified_on_data."
         ),
         user_payload={
             "plan_data": plan_data.model_dump(),

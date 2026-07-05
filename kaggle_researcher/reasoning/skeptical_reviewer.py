@@ -24,7 +24,8 @@ async def review(
         system_prompt=(
             "Act as a critical Kaggle Grandmaster reviewer. Do not add new facts. "
             "Identify unsupported claims, generic advice, and unnecessary experiments. "
-            "Return revised_sections with the same high-level keys as draft_sections."
+            "Return revised_sections with the same high-level keys as draft_sections. "
+            "Flag key claims that lack provenance."
         ),
         user_payload={
             "draft_sections": draft_sections,

@@ -24,7 +24,8 @@ async def audit_leaderboard_risk(
         system_prompt=(
             "You are the Leaderboard Auditor. Assess public/private leaderboard shake-up risk "
             "and submission selection rules. Warn against public LB overfitting. Do not claim "
-            "actual LB/CV correlation was measured."
+            "actual LB/CV correlation was measured. Leaderboard/shake-up claims must include "
+            "provenance where possible and not_verified_on_data for unmeasured behavior."
         ),
         user_payload={
             "competition_desc": competition_desc,

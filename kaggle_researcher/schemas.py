@@ -74,6 +74,11 @@ class ValidationResult(ReasoningBaseResult):
     likely_split: str
     failure_modes: list[str] = Field(default_factory=list)
     reasoning: str
+    primary_validation: dict[str, Any] = Field(default_factory=dict)
+    secondary_validation: dict[str, Any] = Field(default_factory=dict)
+    do_not_use: list[str] = Field(default_factory=list)
+    policy_enforced: bool = False
+    policy_notes: list[str] = Field(default_factory=list)
 
 
 class LeakageRiskResult(ReasoningBaseResult):

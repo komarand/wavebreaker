@@ -14,6 +14,7 @@ class FakeSettings:
     deepseek_api_key: str = "secret"
     deepseek_v4_pro: str = "deepseek-v4-pro"
     deepseek_v4_flash: str = "deepseek-v4-flash"
+    embed_model: str = "Qwen/Qwen3-Embedding-4B"
     embed_dim: int = 2
     max_embed_batch_size: int = 4
     pg_dsn: str = "postgresql://example"

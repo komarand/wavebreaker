@@ -38,9 +38,11 @@ from kaggle_researcher.reasoning.experiment_planner import plan_experiments
 from kaggle_researcher.reasoning.leaderboard_auditor import audit_leaderboard_risk
 from kaggle_researcher.reasoning.leakage_risk_analyst import analyze_leakage_risk
 from kaggle_researcher.reasoning.metric_specialist import analyze_metric
+from kaggle_researcher.reasoning.provenance import attach_default_provenance, provenance_summary
 from kaggle_researcher.reasoning.report_composer import SECTION_HEADINGS, compose_report
 from kaggle_researcher.reasoning.skeptical_reviewer import review
 from kaggle_researcher.reasoning.validation_architect import design_validation
+from kaggle_researcher.retrieval.source_quality import rerank_by_source_quality, source_quality_summary
 from kaggle_researcher.retriever import hybrid_search
 from kaggle_researcher.schemas import PlanData, ResearchRunResult, RetrievedDocument, SourceDocument
 from kaggle_researcher.store.pg_store import PgStore
@@ -104,6 +106,8 @@ async def run_research(
     resolved_competition_id = competition_id or derive_competition_id(competition_url)
     warnings: list[str] = []
     run_dir = _create_run_dir(resolved_competition_id)
+    models_used = _models_used(settings)
+    _write_json_artifact(run_dir, "models_used.json", models_used)
     store = PgStore(
         competition_id=resolved_competition_id,
         dsn=settings.pg_dsn,
@@ -159,6 +163,8 @@ async def run_research(
         retrieved_documents = await _retrieve_documents(
             store=store,
             plan_data=plan_data,
+            competition_id=resolved_competition_id,
+            run_dir=run_dir,
             top_k=settings.top_k,
             warnings=warnings,
             show_progress=show_progress,
@@ -447,6 +453,8 @@ def _notebook_id(notebook: dict[str, object]) -> str | None:
 async def _retrieve_documents(
     store: PgStore,
     plan_data: PlanData,
+    competition_id: str,
+    run_dir: Path,
     top_k: int,
     warnings: list[str],
     show_progress: bool = True,
@@ -469,11 +477,18 @@ async def _retrieve_documents(
             if existing is None or document.rrf_score > existing.rrf_score:
                 retrieved_by_id[document.id] = document
 
-    return sorted(
+    fused_documents = sorted(
         retrieved_by_id.values(),
         key=lambda document: document.rrf_score,
         reverse=True,
     )
+    reranked = rerank_by_source_quality(
+        fused_documents,
+        competition_id=competition_id,
+        plan_data=plan_data.model_dump(),
+    )
+    _write_json_artifact(run_dir, "source_quality_summary.json", source_quality_summary(reranked))
+    return reranked
 
 
 def _retrieval_queries(plan_data: PlanData) -> list[str]:
@@ -552,6 +567,7 @@ async def _build_full_report_text(
 ) -> str:
     domain_patterns: list[dict[str, Any]] = []
     _write_json_artifact(run_dir, "domain_patterns.json", domain_patterns)
+    provenance_sections: dict[str, Any] = {}
 
     validation_result = await _run_reasoning_stage(
         "validation_architect",
@@ -565,6 +581,11 @@ async def _build_full_report_text(
         show_progress,
     )
     _write_json_artifact(run_dir, "validation_result.json", validation_result)
+    provenance_sections["validation"] = attach_default_provenance(
+        "validation",
+        validation_result.model_dump(mode="json"),
+        retrieved_documents,
+    )
 
     leakage_result = await _run_reasoning_stage(
         "leakage_risk_analyst",
@@ -578,6 +599,11 @@ async def _build_full_report_text(
         show_progress,
     )
     _write_json_artifact(run_dir, "leakage_result.json", leakage_result)
+    provenance_sections["leakage"] = attach_default_provenance(
+        "leakage",
+        leakage_result.model_dump(mode="json"),
+        retrieved_documents,
+    )
 
     metric_result = await _run_reasoning_stage(
         "metric_specialist",
@@ -590,6 +616,11 @@ async def _build_full_report_text(
         show_progress,
     )
     _write_json_artifact(run_dir, "metric_result.json", metric_result)
+    provenance_sections["metric"] = attach_default_provenance(
+        "metric",
+        metric_result.model_dump(mode="json"),
+        retrieved_documents,
+    )
 
     experiments = await _run_reasoning_stage(
         "experiment_planner",
@@ -604,6 +635,11 @@ async def _build_full_report_text(
         show_progress,
     )
     _write_json_artifact(run_dir, "experiments.json", experiments)
+    provenance_sections["experiments"] = attach_default_provenance(
+        "experiments",
+        [item.model_dump(mode="json") for item in experiments],
+        retrieved_documents,
+    )
 
     lb_audit = await _run_reasoning_stage(
         "leaderboard_auditor",
@@ -618,13 +654,18 @@ async def _build_full_report_text(
         show_progress,
     )
     _write_json_artifact(run_dir, "leaderboard_audit.json", lb_audit)
+    provenance_sections["leaderboard"] = attach_default_provenance(
+        "leaderboard",
+        lb_audit.model_dump(mode="json"),
+        retrieved_documents,
+    )
 
     draft_sections = {
-        "validation": _jsonable(validation_result),
-        "leakage": _jsonable(leakage_result),
-        "metric": _jsonable(metric_result),
-        "experiments": _jsonable(experiments),
-        "leaderboard": _jsonable(lb_audit),
+        "validation": provenance_sections["validation"],
+        "leakage": provenance_sections["leakage"],
+        "metric": provenance_sections["metric"],
+        "experiments": provenance_sections["experiments"],
+        "leaderboard": provenance_sections["leaderboard"],
     }
     review_result = await _run_reasoning_stage(
         "skeptical_reviewer",
@@ -637,6 +678,12 @@ async def _build_full_report_text(
         show_progress,
     )
     _write_json_artifact(run_dir, "review_result.json", review_result)
+    provenance_sections["review"] = attach_default_provenance(
+        "review",
+        review_result.model_dump(mode="json"),
+        retrieved_documents,
+    )
+    _write_json_artifact(run_dir, "provenance_summary.json", provenance_summary(provenance_sections))
 
     roadmap_text = await _run_reasoning_stage(
         "report_composer",
@@ -781,6 +828,22 @@ def _source_counts(documents: list[SourceDocument]) -> dict[str, int]:
     }
 
 
+def _models_used(settings: Any) -> dict[str, str]:
+    reasoning_model = settings.deepseek_v4_pro
+    return {
+        "planner": settings.deepseek_v4_pro,
+        "summarizer": settings.deepseek_v4_flash,
+        "validation_architect": reasoning_model,
+        "leakage_risk_analyst": reasoning_model,
+        "metric_specialist": reasoning_model,
+        "experiment_planner": reasoning_model,
+        "leaderboard_auditor": reasoning_model,
+        "skeptical_reviewer": reasoning_model,
+        "report_composer": reasoning_model,
+        "embedder": settings.embed_model,
+    }
+
+
 def _add_missing_source_warnings(num_sources: dict[str, int], warnings: list[str]) -> None:
     if num_sources.get("github", 0) == 0:
         warnings.append("GitHub source count is 0. Check GITHUB_TOKEN or query quality.")
@@ -822,6 +885,15 @@ async def run() -> int:
     for source, count in result.num_sources.items():
         print(f"  {source}: {count}")
     print(f"Retrieved evidence: {result.retrieved_evidence_count}")
+    if result.run_artifacts_path:
+        models_path = Path(result.run_artifacts_path) / "models_used.json"
+        if models_path.exists():
+            models_used = json.loads(models_path.read_text(encoding="utf-8"))
+            print("Models used:")
+            print(f"  planner: {models_used.get('planner')}")
+            print(f"  summarizer: {models_used.get('summarizer')}")
+            print(f"  reasoning/report: {models_used.get('report_composer')}")
+            print(f"  embedder: {models_used.get('embedder')}")
     print(f"Warnings: {len(result.warnings)}")
     for warning in result.warnings:
         print(f"  - {warning}")

@@ -39,7 +39,19 @@ def generate_report(
             paragraph.add_run(f" [{source.source}]")
             if source.url is not None:
                 paragraph.add_run(f" {source.url}")
-            paragraph.add_run(f" rrf_score={source.rrf_score:.4f}")
+            quality_score = source.metadata.get("quality_score")
+            final_score = source.metadata.get("final_score")
+            specificity = source.metadata.get("specificity")
+            evidence_type = source.metadata.get("evidence_type")
+            if quality_score is not None and final_score is not None:
+                paragraph.add_run(
+                    " "
+                    f"[{specificity or 'unknown'} | {evidence_type or 'unknown'} | "
+                    f"final_score={float(final_score):.4f} | rrf={source.rrf_score:.4f} | "
+                    f"quality={float(quality_score):.2f}]"
+                )
+            else:
+                paragraph.add_run(f" rrf_score={source.rrf_score:.4f}")
     else:
         document.add_paragraph("No retrieved sources.")
 

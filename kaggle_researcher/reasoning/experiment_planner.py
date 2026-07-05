@@ -29,7 +29,9 @@ async def plan_experiments(
         system_prompt=(
             "Return JSON only as an object with key 'experiments'. Each item must match "
             "ExperimentItem schema. Priorities must be P0, P1, P2, or P3. Include honest "
-            "validation and baseline near the top. Do not claim EDA or leakage detection ran."
+            "validation and baseline near the top. Do not claim EDA or leakage detection ran. "
+            "Key recommendations should include provenance where the schema permits it; otherwise "
+            "make source basis explicit in the why/risk text."
         ),
         user_prompt="\n\n".join(
             [

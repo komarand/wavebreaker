@@ -23,7 +23,8 @@ async def analyze_leakage_risk(
         system_prompt=(
             "You are the Leakage Risk Analyst. Produce hypotheses and recommended checks only. "
             "Forbid phrases like 'leakage found' or 'leakage confirmed'. Use language such as "
-            "'possible risk', 'hypothesis', and 'recommended check'."
+            "'possible risk', 'hypothesis', and 'recommended check'. Leakage hypotheses must "
+            "include provenance and not_verified_on_data."
         ),
         user_payload={
             "competition_desc": competition_desc,

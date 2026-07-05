@@ -18,6 +18,7 @@ class FakeSettings:
     deepseek_api_key: str = "secret"
     deepseek_v4_pro: str = "deepseek-v4-pro"
     deepseek_v4_flash: str = "deepseek-v4-flash"
+    embed_model: str = "Qwen/Qwen3-Embedding-4B"
     embed_dim: int = 2
     max_embed_batch_size: int = 2
     pg_dsn: str = "postgresql://example"
@@ -183,3 +184,26 @@ def test_minimal_mode_only_when_explicitly_requested(
 
     assert result.report_mode == "minimal"
     assert "Minimal Research Report" in report_texts[0]
+
+
+def test_models_used_artifact_contains_configured_model_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    install_pipeline_mocks(monkeypatch, tmp_path)
+
+    result = run(
+        run_research(
+            "https://www.kaggle.com/competitions/comp-1",
+            "Credit risk competition",
+            report_mode="minimal",
+            show_progress=False,
+        )
+    )
+
+    models_path = Path(result.run_artifacts_path) / "models_used.json"
+    payload = models_path.read_text(encoding="utf-8")
+    assert '"planner": "deepseek-v4-pro"' in payload
+    assert '"summarizer": "deepseek-v4-flash"' in payload
+    assert '"report_composer": "deepseek-v4-pro"' in payload
+    assert '"embedder": "Qwen/Qwen3-Embedding-4B"' in payload

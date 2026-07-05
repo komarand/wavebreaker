@@ -67,7 +67,14 @@ async def compose_report(
             "Compose the final Kaggle analyst v4 roadmap as markdown-like text. "
             "Use exactly the 15 required section headings in order. Include confidence "
             "where relevant. Include 'Чего не делать'. Do not claim real EDA, train/test "
-            "analysis, notebook execution, or confirmed leakage. Do not include chain-of-thought."
+            "analysis, notebook execution, or confirmed leakage. Do not include chain-of-thought. "
+            "In the validation section, when temporal/stability signals exist, write this policy: "
+            "Primary: out-of-time holdout on the latest periods plus rolling/expanding temporal CV. "
+            "Secondary: StratifiedGroupKFold only as a robustness check if it does not violate "
+            "chronological order. Explicitly say not to train on future periods and validate on "
+            "past periods. Include provenance markers for key claims using this style: "
+            "_Provenance: Kaggle + heuristic; not verified on data._ Tag validation, leakage, "
+            "metric, model, feature, leaderboard, and do-not-do claims."
         ),
         user_prompt=json.dumps(payload, ensure_ascii=False, indent=2),
         timeout=180,
