@@ -35,7 +35,7 @@ class PgStore:
         if asyncpg is None:
             raise RuntimeError("asyncpg is required to initialize PgStore")
 
-        self.pool = await asyncpg.create_pool(dsn=self.dsn)
+        self.pool = await asyncpg.create_pool(dsn=self.dsn, ssl=False)
         async with self.pool.acquire() as connection:
             await connection.execute(CREATE_VECTOR_EXTENSION_SQL)
             await connection.execute(create_documents_table_sql(self.embed_dim))
