@@ -2,18 +2,27 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import re
 import time
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Literal
 from urllib.parse import urlparse
 
+from pydantic import BaseModel
 from tqdm.auto import tqdm
 
 from kaggle_researcher.agents.arxiv_agent import (
     build_arxiv_documents,
     enrich_with_pdf,
     search_arxiv,
+    search_papers_with_code,
+)
+from kaggle_researcher.agents.github_agent import (
+    build_github_documents,
+    search_repos,
 )
 from kaggle_researcher.agents.kaggle_agent import (
     build_kaggle_documents,
@@ -25,6 +34,13 @@ from kaggle_researcher.config import load_config
 from kaggle_researcher.embedder import embed_texts
 from kaggle_researcher.planner import fallback_plan, plan
 from kaggle_researcher.report.docx_generator import generate_report
+from kaggle_researcher.reasoning.experiment_planner import plan_experiments
+from kaggle_researcher.reasoning.leaderboard_auditor import audit_leaderboard_risk
+from kaggle_researcher.reasoning.leakage_risk_analyst import analyze_leakage_risk
+from kaggle_researcher.reasoning.metric_specialist import analyze_metric
+from kaggle_researcher.reasoning.report_composer import SECTION_HEADINGS, compose_report
+from kaggle_researcher.reasoning.skeptical_reviewer import review
+from kaggle_researcher.reasoning.validation_architect import design_validation
 from kaggle_researcher.retriever import hybrid_search
 from kaggle_researcher.schemas import PlanData, ResearchRunResult, RetrievedDocument, SourceDocument
 from kaggle_researcher.store.pg_store import PgStore
@@ -33,7 +49,7 @@ from kaggle_researcher.store.pg_store import PgStore
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kaggle_researcher",
-        description="KaggleResearcher minimal research pipeline.",
+        description="KaggleResearcher research pipeline.",
     )
     parser.add_argument("competition_url", nargs="?", help="Kaggle competition URL")
     parser.add_argument("competition_desc", nargs="?", help="Competition description")
@@ -56,6 +72,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable progress bars and stage messages",
     )
+    parser.add_argument(
+        "--report-mode",
+        choices=("full", "minimal"),
+        default="full",
+        help="Report mode. Full is the default; minimal must be requested explicitly.",
+    )
+    parser.add_argument(
+        "--allow-minimal-fallback",
+        action="store_true",
+        help="Allow a minimal report if full reasoning fails.",
+    )
     return parser
 
 
@@ -69,11 +96,14 @@ async def run_research(
     overwrite_report: bool = False,
     report_naming_strategy: str = "timestamp",
     show_progress: bool = True,
+    report_mode: Literal["full", "minimal"] = "full",
+    allow_minimal_fallback: bool = False,
 ) -> ResearchRunResult:
     started_at = time.perf_counter()
     settings = load_config()
     resolved_competition_id = competition_id or derive_competition_id(competition_url)
     warnings: list[str] = []
+    run_dir = _create_run_dir(resolved_competition_id)
     store = PgStore(
         competition_id=resolved_competition_id,
         dsn=settings.pg_dsn,
@@ -90,6 +120,7 @@ async def run_research(
             model=settings.deepseek_v4_pro,
             warnings=warnings,
         )
+        _write_json_artifact(run_dir, "plan.json", plan_data)
         _stage("[2/8] Collecting Kaggle notebooks...", show_progress)
         source_documents = await _collect_sources(
             plan_data=plan_data,
@@ -100,6 +131,9 @@ async def run_research(
         )
         if not source_documents:
             raise RuntimeError("No source documents were collected")
+        num_sources = _source_counts(source_documents)
+        _add_missing_source_warnings(num_sources, warnings)
+        _write_json_artifact(run_dir, "source_counts.json", num_sources)
 
         _stage("[4/8] Summarizing documents...", show_progress)
         summarized_documents = await summarize_documents(
@@ -120,6 +154,7 @@ async def run_research(
 
         _stage("Indexing documents in pgvector...", show_progress)
         await store.upsert(summarized_documents, embeddings)
+        _write_json_artifact(run_dir, "documents_indexed.json", summarized_documents)
         _stage("[6/8] Retrieving evidence...", show_progress)
         retrieved_documents = await _retrieve_documents(
             store=store,
@@ -128,17 +163,25 @@ async def run_research(
             warnings=warnings,
             show_progress=show_progress,
         )
+        _write_json_artifact(run_dir, "retrieved_documents.json", retrieved_documents)
         _stage("[7/8] Running reasoning chain...", show_progress)
-        _stage("Skipping full reasoning chain in minimal pipeline.", show_progress)
         target_report_path = Path(report_path) if report_path is not None else _report_output_path(
             output_dir=output_dir,
             competition_id=resolved_competition_id,
         )
-        report_text = _build_minimal_report_text(
+        report_text = await _build_report_text(
+            report_mode=report_mode,
+            allow_minimal_fallback=allow_minimal_fallback,
             competition_desc=competition_desc,
             plan_data=plan_data,
             retrieved_documents=retrieved_documents,
+            client=client,
+            model=settings.deepseek_v4_pro,
+            run_dir=run_dir,
+            warnings=warnings,
+            show_progress=show_progress,
         )
+        _write_text_artifact(run_dir, "roadmap.md", report_text)
         _stage("[8/8] Generating DOCX report...", show_progress)
         actual_report_path = generate_report(
             competition_name=resolved_competition_id,
@@ -149,15 +192,22 @@ async def run_research(
             naming_strategy=report_naming_strategy,
         )
         _stage(f"Report saved to: {actual_report_path}", show_progress)
+        _write_json_artifact(run_dir, "warnings.json", warnings)
 
         return ResearchRunResult(
             competition_id=resolved_competition_id,
             report_path=str(actual_report_path),
             num_documents=len(summarized_documents),
-            num_sources=dict(Counter(document.source for document in summarized_documents)),
+            num_sources=num_sources,
             warnings=warnings,
             duration_sec=round(time.perf_counter() - started_at, 3),
+            report_mode=report_mode,
+            run_artifacts_path=str(run_dir),
+            retrieved_evidence_count=len(retrieved_documents),
         )
+    except Exception:
+        _write_json_artifact(run_dir, "warnings.json", warnings)
+        raise
     finally:
         await store.close()
 
@@ -252,6 +302,15 @@ async def _collect_sources(
             show_progress,
         )
     )
+    documents.extend(
+        await _collect_github_sources(
+            plan_data=plan_data,
+            competition_id=competition_id,
+            settings=settings,
+            warnings=warnings,
+            show_progress=show_progress,
+        )
+    )
     return documents
 
 
@@ -319,9 +378,37 @@ def _collect_arxiv_sources(
     try:
         papers = search_arxiv(plan_data.arxiv_queries, max_papers=settings.max_papers)
         enriched_papers = enrich_with_pdf(papers, cache_dir=settings.pdf_cache_dir)
-        return build_arxiv_documents(enriched_papers, competition_id=competition_id)
+        pwc_papers: list[dict[str, Any]] = []
+        for query in plan_data.arxiv_queries[:2]:
+            try:
+                pwc_papers.extend(search_papers_with_code(query))
+            except Exception as exc:
+                warnings.append(f"Papers with Code search failed for query {query!r}: {exc}")
+        return build_arxiv_documents([*enriched_papers, *pwc_papers], competition_id=competition_id)
     except Exception as exc:
         warnings.append(f"arXiv source collection failed: {exc}")
+        return []
+
+
+async def _collect_github_sources(
+    plan_data: PlanData,
+    competition_id: str,
+    settings: object,
+    warnings: list[str],
+    show_progress: bool,
+) -> list[SourceDocument]:
+    if not plan_data.github_queries:
+        return []
+    _stage("Collecting GitHub repos...", show_progress)
+    try:
+        raw_repos = await search_repos(
+            plan_data.github_queries,
+            token=settings.github_token,
+            max_repos=settings.max_repos,
+        )
+        return build_github_documents(raw_repos, competition_id=competition_id)
+    except Exception as exc:
+        warnings.append(f"GitHub source collection failed: {exc}")
         return []
 
 
@@ -403,6 +490,190 @@ def _stage(message: str, show_progress: bool) -> None:
         tqdm.write(message)
 
 
+async def _build_report_text(
+    report_mode: Literal["full", "minimal"],
+    allow_minimal_fallback: bool,
+    competition_desc: str,
+    plan_data: PlanData,
+    retrieved_documents: list[RetrievedDocument],
+    client: DeepSeekClient,
+    model: str,
+    run_dir: Path,
+    warnings: list[str],
+    show_progress: bool,
+) -> str:
+    if report_mode == "minimal":
+        return _build_minimal_report_text(competition_desc, plan_data, retrieved_documents)
+
+    try:
+        return await _build_full_report_text(
+            competition_desc=competition_desc,
+            plan_data=plan_data,
+            retrieved_documents=retrieved_documents,
+            client=client,
+            model=model,
+            run_dir=run_dir,
+            show_progress=show_progress,
+        )
+    except Exception as exc:
+        if allow_minimal_fallback:
+            warnings.append(f"Full report failed; generated minimal fallback: {exc}")
+            return _build_minimal_report_text(competition_desc, plan_data, retrieved_documents)
+        raise
+
+
+async def _build_full_report_text(
+    competition_desc: str,
+    plan_data: PlanData,
+    retrieved_documents: list[RetrievedDocument],
+    client: DeepSeekClient,
+    model: str,
+    run_dir: Path,
+    show_progress: bool,
+) -> str:
+    domain_patterns: list[dict[str, Any]] = []
+    _write_json_artifact(run_dir, "domain_patterns.json", domain_patterns)
+
+    validation_result = await _run_reasoning_stage(
+        "validation_architect",
+        lambda: design_validation(
+            competition_desc=competition_desc,
+            plan_data=plan_data,
+            retrieved_documents=retrieved_documents,
+            client=client,
+            model=model,
+        ),
+        show_progress,
+    )
+    _write_json_artifact(run_dir, "validation_result.json", validation_result)
+
+    leakage_result = await _run_reasoning_stage(
+        "leakage_risk_analyst",
+        lambda: analyze_leakage_risk(
+            competition_desc=competition_desc,
+            plan_data=plan_data,
+            retrieved_documents=retrieved_documents,
+            client=client,
+            model=model,
+        ),
+        show_progress,
+    )
+    _write_json_artifact(run_dir, "leakage_result.json", leakage_result)
+
+    metric_result = await _run_reasoning_stage(
+        "metric_specialist",
+        lambda: analyze_metric(
+            plan_data=plan_data,
+            retrieved_documents=retrieved_documents,
+            client=client,
+            model=model,
+        ),
+        show_progress,
+    )
+    _write_json_artifact(run_dir, "metric_result.json", metric_result)
+
+    experiments = await _run_reasoning_stage(
+        "experiment_planner",
+        lambda: plan_experiments(
+            validation_result=validation_result,
+            leakage_result=leakage_result,
+            metric_result=metric_result,
+            retrieved_documents=retrieved_documents,
+            client=client,
+            model=model,
+        ),
+        show_progress,
+    )
+    _write_json_artifact(run_dir, "experiments.json", experiments)
+
+    lb_audit = await _run_reasoning_stage(
+        "leaderboard_auditor",
+        lambda: audit_leaderboard_risk(
+            competition_desc=competition_desc,
+            plan_data=plan_data,
+            validation_result=validation_result,
+            retrieved_documents=retrieved_documents,
+            client=client,
+            model=model,
+        ),
+        show_progress,
+    )
+    _write_json_artifact(run_dir, "leaderboard_audit.json", lb_audit)
+
+    draft_sections = {
+        "validation": _jsonable(validation_result),
+        "leakage": _jsonable(leakage_result),
+        "metric": _jsonable(metric_result),
+        "experiments": _jsonable(experiments),
+        "leaderboard": _jsonable(lb_audit),
+    }
+    review_result = await _run_reasoning_stage(
+        "skeptical_reviewer",
+        lambda: review(
+            draft_sections=draft_sections,
+            retrieved_documents=retrieved_documents,
+            client=client,
+            model=model,
+        ),
+        show_progress,
+    )
+    _write_json_artifact(run_dir, "review_result.json", review_result)
+
+    roadmap_text = await _run_reasoning_stage(
+        "report_composer",
+        lambda: compose_report(
+            competition_desc=competition_desc,
+            plan_data=plan_data,
+            domain_patterns=domain_patterns,
+            validation_result=validation_result,
+            leakage_result=leakage_result,
+            metric_result=metric_result,
+            experiments=experiments,
+            lb_audit=lb_audit,
+            review=review_result,
+            client=client,
+            model=model,
+        ),
+        show_progress,
+    )
+    try:
+        validate_full_roadmap(roadmap_text)
+    except Exception as exc:
+        raise RuntimeError(f"Full report generation failed at stage 'roadmap_validation': {exc}") from exc
+    return roadmap_text
+
+
+async def _run_reasoning_stage(stage_name: str, factory: Any, show_progress: bool) -> Any:
+    _stage(f"Running {stage_name}...", show_progress)
+    try:
+        return await factory()
+    except RuntimeError as exc:
+        if str(exc).startswith("Full report generation failed at stage"):
+            raise
+        raise RuntimeError(
+            f"Full report generation failed at stage '{stage_name}': {exc}"
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"Full report generation failed at stage '{stage_name}': {exc}"
+        ) from exc
+
+
+def validate_full_roadmap(roadmap_text: str) -> None:
+    if "Minimal Research Report" in roadmap_text:
+        raise RuntimeError("report looks like a minimal/fallback report")
+    matched_sections = [
+        heading for heading in SECTION_HEADINGS if heading.lower() in roadmap_text.lower()
+    ]
+    if len(matched_sections) < 10:
+        raise RuntimeError(
+            "report is missing expected v4 sections "
+            f"({len(matched_sections)}/10 matched)"
+        )
+    if len(roadmap_text) < 4000:
+        raise RuntimeError("report is too short for a full v4 roadmap")
+
+
 def _build_minimal_report_text(
     competition_desc: str,
     plan_data: PlanData,
@@ -441,6 +712,59 @@ def _report_output_path(output_dir: str | Path, competition_id: str) -> Path:
     return Path(output_dir) / f"{competition_id}_research_report.docx"
 
 
+def _create_run_dir(competition_id: str) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path("runs") / f"{competition_id}_{timestamp}"
+    counter = 2
+    while run_dir.exists():
+        run_dir = Path("runs") / f"{competition_id}_{timestamp}_{counter:03d}"
+        counter += 1
+    run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
+
+
+def _write_json_artifact(run_dir: Path, filename: str, value: Any) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / filename).write_text(
+        json.dumps(_jsonable(value), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _write_text_artifact(run_dir: Path, filename: str, value: str) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / filename).write_text(value, encoding="utf-8")
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _source_counts(documents: list[SourceDocument]) -> dict[str, int]:
+    counts = Counter(document.source for document in documents)
+    return {
+        "kaggle": counts.get("kaggle", 0),
+        "arxiv": counts.get("arxiv", 0),
+        "papers_with_code": counts.get("papers_with_code", 0),
+        "github": counts.get("github", 0),
+    }
+
+
+def _add_missing_source_warnings(num_sources: dict[str, int], warnings: list[str]) -> None:
+    if num_sources.get("github", 0) == 0:
+        warnings.append("GitHub source count is 0. Check GITHUB_TOKEN or query quality.")
+    if num_sources.get("papers_with_code", 0) == 0:
+        warnings.append("Papers with Code source count is 0. Check PWC API call or query quality.")
+
+
 def _slugify(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", value.strip().lower()).strip("-")
     return slug or "unknown-competition"
@@ -462,8 +786,20 @@ async def run() -> int:
         overwrite_report=args.overwrite_report,
         report_naming_strategy=args.report_naming_strategy,
         show_progress=not args.no_progress,
+        report_mode=args.report_mode,
+        allow_minimal_fallback=args.allow_minimal_fallback,
     )
+    print("Research run complete.")
+    print(f"Report mode: {result.report_mode}")
     print(f"Report saved to: {result.report_path}")
+    print(f"Run artifacts saved to: {result.run_artifacts_path}")
+    print("Source counts:")
+    for source, count in result.num_sources.items():
+        print(f"  {source}: {count}")
+    print(f"Retrieved evidence: {result.retrieved_evidence_count}")
+    print(f"Warnings: {len(result.warnings)}")
+    for warning in result.warnings:
+        print(f"  - {warning}")
     print(result.model_dump_json(indent=2))
     return 0
 

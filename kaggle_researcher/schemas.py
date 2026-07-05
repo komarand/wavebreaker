@@ -51,6 +51,9 @@ class ResearchRunResult(BaseModel):
     num_sources: dict[str, int] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     duration_sec: float
+    report_mode: str = "full"
+    run_artifacts_path: str | None = None
+    retrieved_evidence_count: int = 0
 
 
 class ReasoningBaseResult(BaseModel):
