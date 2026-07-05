@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 
@@ -61,17 +62,26 @@ def test_upsert_len_mismatch_raises_error() -> None:
 
 def test_init_runs_expected_ddl(monkeypatch: pytest.MonkeyPatch) -> None:
     connection = SimpleNamespace(execute=AsyncMock(), fetchval=AsyncMock(return_value="vector(384)"))
+    bootstrap_connection = SimpleNamespace(execute=AsyncMock(), close=AsyncMock())
     pool = SimpleNamespace(acquire=lambda: FakeAcquire(connection))
+    connect = AsyncMock(return_value=bootstrap_connection)
     create_pool = AsyncMock(return_value=pool)
 
     from kaggle_researcher.store import pg_store as pg_store_module
 
-    monkeypatch.setattr(pg_store_module, "asyncpg", SimpleNamespace(create_pool=create_pool))
+    monkeypatch.setattr(
+        pg_store_module,
+        "asyncpg",
+        SimpleNamespace(connect=connect, create_pool=create_pool),
+    )
 
     store = PgStore(competition_id="comp-123", dsn="postgresql://test", embed_dim=384)
     asyncio.run(store.init())
 
-    create_pool.assert_awaited_once_with(dsn="postgresql://test")
+    connect.assert_awaited_once_with(dsn="postgresql://test", ssl=False)
+    bootstrap_connection.execute.assert_awaited_once_with(CREATE_VECTOR_EXTENSION_SQL)
+    bootstrap_connection.close.assert_awaited_once()
+    create_pool.assert_awaited_once_with(dsn="postgresql://test", ssl=False, init=ANY)
     executed_sql = [call.args[0] for call in connection.execute.await_args_list]
     assert executed_sql == [
         CREATE_VECTOR_EXTENSION_SQL,
@@ -89,12 +99,18 @@ def test_init_rejects_existing_vector_column_with_wrong_dimension(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connection = SimpleNamespace(execute=AsyncMock(), fetchval=AsyncMock(return_value="vector(1536)"))
+    bootstrap_connection = SimpleNamespace(execute=AsyncMock(), close=AsyncMock())
     pool = SimpleNamespace(acquire=lambda: FakeAcquire(connection))
+    connect = AsyncMock(return_value=bootstrap_connection)
     create_pool = AsyncMock(return_value=pool)
 
     from kaggle_researcher.store import pg_store as pg_store_module
 
-    monkeypatch.setattr(pg_store_module, "asyncpg", SimpleNamespace(create_pool=create_pool))
+    monkeypatch.setattr(
+        pg_store_module,
+        "asyncpg",
+        SimpleNamespace(connect=connect, create_pool=create_pool),
+    )
 
     store = PgStore(competition_id="comp-123", dsn="postgresql://test", embed_dim=1024)
 
@@ -139,6 +155,8 @@ def test_upsert_uses_single_transaction_and_executemany() -> None:
     assert rows[0][0] == "doc-1"
     assert rows[0][1] == "comp-123"
     assert rows[0][6] == "short summary"
+    assert rows[0][7] == json.dumps({"votes": 10})
+    assert rows[0][8] == [0.1, 0.2]
 
 
 def test_upsert_rejects_wrong_embedding_dimension() -> None:

@@ -13,7 +13,11 @@ from kaggle_researcher.agents.arxiv_agent import (
     enrich_with_pdf,
     search_arxiv,
 )
-from kaggle_researcher.agents.kaggle_agent import build_kaggle_documents, search_notebooks
+from kaggle_researcher.agents.kaggle_agent import (
+    build_kaggle_documents,
+    get_notebook_content,
+    search_notebooks,
+)
 from kaggle_researcher.clients.deepseek_client import DeepSeekClient
 from kaggle_researcher.config import load_config
 from kaggle_researcher.embedder import embed_texts
@@ -189,12 +193,46 @@ def _collect_kaggle_sources(
     settings: object,
     warnings: list[str],
 ) -> list[SourceDocument]:
-    try:
-        raw_notebooks = search_notebooks(plan_data.kaggle_queries, max_notebooks=settings.max_notebooks)
-        return build_kaggle_documents(raw_notebooks, competition_id=competition_id)
-    except Exception as exc:
-        warnings.append(f"Kaggle source collection failed: {exc}")
-        return []
+    raw_notebooks = search_notebooks(
+        plan_data.kaggle_queries,
+        competition_id=competition_id,
+        max_notebooks=settings.max_notebooks,
+    )
+    usable_notebooks: list[dict[str, object]] = []
+
+    for notebook in raw_notebooks:
+        notebook_id = _notebook_id(notebook)
+        if not notebook_id:
+            warnings.append(f"Kaggle notebook metadata missing id/ref: {notebook}")
+            continue
+
+        content = str(notebook.get("content") or "")
+        if not content:
+            try:
+                content = get_notebook_content(notebook_id)
+            except Exception as exc:
+                warnings.append(f"Kaggle notebook pull failed for {notebook_id}: {exc}")
+                continue
+
+        if not content.strip():
+            warnings.append(f"Kaggle notebook {notebook_id} produced empty extracted content")
+            continue
+
+        notebook_with_content = dict(notebook)
+        notebook_with_content["content"] = content
+        usable_notebooks.append(notebook_with_content)
+
+    if not usable_notebooks:
+        warnings.append(
+            "Kaggle agent returned 0 usable notebooks. CLI auth works, so check "
+            "kaggle_agent.py pull/content extraction."
+        )
+        raise RuntimeError(
+            "Kaggle retrieval returned 0 usable notebooks. "
+            "CLI auth works, so check Kaggle pull/content extraction."
+        )
+
+    return build_kaggle_documents(usable_notebooks, competition_id=competition_id)
 
 
 def _collect_arxiv_sources(
@@ -210,6 +248,19 @@ def _collect_arxiv_sources(
     except Exception as exc:
         warnings.append(f"arXiv source collection failed: {exc}")
         return []
+
+
+def _notebook_id(notebook: dict[str, object]) -> str | None:
+    for key in ("id", "kernel_ref", "ref", "kernelRef"):
+        value = notebook.get(key)
+        if value:
+            return str(value)
+    metadata = notebook.get("metadata")
+    if isinstance(metadata, dict):
+        ref = metadata.get("ref")
+        if ref:
+            return str(ref)
+    return None
 
 
 async def _retrieve_documents(

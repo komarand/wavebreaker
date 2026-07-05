@@ -1,37 +1,52 @@
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+
+from kaggle.api.kaggle_api_extended import KaggleApi
 
 from kaggle_researcher.logging_utils import get_logger
 from kaggle_researcher.schemas import SourceDocument
 
 
 logger = get_logger(__name__)
+MAX_NOTEBOOKS = 20
+CODE_CELL_MAX_CHARS = 800
 
 
-def search_notebooks(queries: list[str], max_notebooks: int) -> list[dict[str, Any]]:
+def search_notebooks(
+    queries: list[str],
+    competition_id: str | None = None,
+    max_notebooks: int = MAX_NOTEBOOKS,
+) -> list[dict[str, Any]]:
     if max_notebooks <= 0:
         return []
 
+    api = KaggleApi()
+    api.authenticate()
     notebooks_by_ref: dict[str, dict[str, Any]] = {}
 
-    for query in queries:
-        rows = _run_kaggle_kernel_search(query=query, max_notebooks=max_notebooks)
-        for row in rows:
-            normalized = _normalize_search_row(row)
-            kernel_ref = normalized.get("kernel_ref")
-            if not kernel_ref:
-                continue
+    if competition_id:
+        for kernel in api.kernels_list(
+            competition=competition_id,
+            page_size=max_notebooks,
+            sort_by="voteCount",
+            language="python",
+        ):
+            _add_kernel_result(notebooks_by_ref, kernel, competition_id=competition_id)
 
-            existing = notebooks_by_ref.get(kernel_ref)
-            if existing is None or normalized["total_votes"] > existing.get("total_votes", 0):
-                notebooks_by_ref[kernel_ref] = normalized
+    if not notebooks_by_ref:
+        for query in queries:
+            for kernel in api.kernels_list(
+                search=query,
+                page_size=max_notebooks,
+                sort_by="voteCount",
+                language="python",
+            ):
+                _add_kernel_result(notebooks_by_ref, kernel, competition_id=competition_id)
 
     return sorted(
         notebooks_by_ref.values(),
@@ -42,32 +57,107 @@ def search_notebooks(queries: list[str], max_notebooks: int) -> list[dict[str, A
 
 def get_notebook_content(kernel_ref: str, max_chars: int = 8000) -> str:
     if not kernel_ref:
-        logger.warning("Cannot download Kaggle notebook without kernel_ref")
-        return ""
+        raise RuntimeError("Cannot download Kaggle notebook without kernel_ref")
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        result = subprocess.run(
-            ["kaggle", "kernels", "pull", kernel_ref, "-p", temp_dir],
-            capture_output=True,
-            text=True,
-            check=False,
+    api = KaggleApi()
+    api.authenticate()
+
+    with tempfile.TemporaryDirectory(prefix="kaggle_kernel_") as temp_dir:
+        temp_path = Path(temp_dir)
+        _pull_kernel(api=api, kernel_ref=kernel_ref, temp_path=temp_path)
+
+        notebook_paths = sorted(temp_path.rglob("*.ipynb"))
+        if notebook_paths:
+            return _extract_notebook_text(notebook_paths[0])[:max_chars]
+
+        python_paths = sorted(temp_path.rglob("*.py"))
+        if python_paths:
+            return python_paths[0].read_text(encoding="utf-8", errors="replace")[:max_chars]
+
+        downloaded_files = sorted(
+            str(path.relative_to(temp_path))
+            for path in temp_path.rglob("*")
+            if path.is_file()
         )
-        if result.returncode != 0:
-            logger.warning("Failed to download Kaggle notebook %s: %s", kernel_ref, result.stderr.strip())
-            return ""
+        raise RuntimeError(
+            f"Kaggle pull for {kernel_ref} did not contain .ipynb or .py files. "
+            f"Downloaded files: {downloaded_files}"
+        )
 
-        notebook_paths = sorted(Path(temp_dir).rglob("*.ipynb"))
-        if not notebook_paths:
-            logger.warning("Downloaded Kaggle notebook %s did not contain an .ipynb file", kernel_ref)
-            return ""
 
+def _pull_kernel(api: KaggleApi, kernel_ref: str, temp_path: Path) -> None:
+    try:
         try:
-            content = _extract_notebook_text(notebook_paths[0])
-        except (OSError, json.JSONDecodeError, TypeError) as exc:
-            logger.warning("Failed to parse Kaggle notebook %s: %s", kernel_ref, exc)
-            return ""
+            api.kernels_pull(kernel_ref, path=str(temp_path), metadata=True, quiet=True)
+        except TypeError:
+            try:
+                api.kernels_pull(kernel_ref, path=str(temp_path), metadata=True)
+            except TypeError:
+                api.kernels_pull(kernel_ref, path=str(temp_path))
+    except Exception as exc:
+        raise RuntimeError(f"Kaggle pull failed for {kernel_ref}: {exc}") from exc
 
-    return content[:max_chars]
+
+def _add_kernel_result(
+    notebooks_by_ref: dict[str, dict[str, Any]],
+    kernel: Any,
+    competition_id: str | None,
+) -> None:
+    normalized = _normalize_kernel(kernel, competition_id=competition_id)
+    kernel_ref = normalized.get("id")
+    if not kernel_ref:
+        return
+
+    existing = notebooks_by_ref.get(kernel_ref)
+    if existing is None or normalized["total_votes"] > existing.get("total_votes", 0):
+        notebooks_by_ref[kernel_ref] = normalized
+
+
+def _normalize_kernel(kernel: Any, competition_id: str | None) -> dict[str, Any]:
+    kernel_ref = _get_kernel_value(kernel, "ref", "kernel_ref", "kernelRef", "id")
+    title = _get_kernel_value(kernel, "title", "kernelTitle") or kernel_ref or "Untitled Kaggle notebook"
+    votes = _parse_votes(
+        _get_kernel_value(kernel, "total_votes", "totalVotes", "votes", "voteCount", "totalVoteCount")
+    )
+    url = _get_kernel_value(kernel, "url", "kernelUrl") or (
+        f"https://www.kaggle.com/code/{kernel_ref}" if kernel_ref else None
+    )
+    raw_metadata = _get_kernel_value(kernel, "metadata")
+    metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+    metadata.update({"ref": kernel_ref, "competition_id": competition_id})
+
+    return {
+        "id": kernel_ref,
+        "kernel_ref": kernel_ref,
+        "ref": kernel_ref,
+        "title": title,
+        "url": url,
+        "total_votes": votes,
+        "source": "kaggle",
+        "metadata": metadata,
+    }
+
+
+def _get_kernel_value(kernel: Any, *names: str) -> Any:
+    if isinstance(kernel, dict):
+        return _get_first(kernel, *names)
+
+    for name in names:
+        if hasattr(kernel, name):
+            value = getattr(kernel, name)
+            if _has_value(value):
+                return value
+
+    normalized_names = {_normalize_key(name) for name in names}
+    for name in dir(kernel):
+        try:
+            value = getattr(kernel, name)
+        except Exception:
+            continue
+        if _normalize_key(name) in normalized_names and _has_value(value):
+            return value
+
+    return None
 
 
 def build_kaggle_documents(
@@ -82,7 +172,7 @@ def build_kaggle_documents(
         key=lambda item: _parse_votes(item.get("total_votes", item.get("totalVotes", 0))),
         reverse=True,
     ):
-        kernel_ref = _get_first(raw_result, "kernel_ref", "ref", "kernelRef")
+        kernel_ref = _get_first(raw_result, "id", "kernel_ref", "ref", "kernelRef")
         if not kernel_ref or kernel_ref in seen_refs:
             continue
         seen_refs.add(kernel_ref)
@@ -104,6 +194,7 @@ def build_kaggle_documents(
                 url=str(url),
                 content=content,
                 metadata={
+                    **dict(raw_result.get("metadata") or {}),
                     "kernel_ref": kernel_ref,
                     "total_votes": total_votes,
                 },
@@ -111,50 +202,6 @@ def build_kaggle_documents(
         )
 
     return documents
-
-
-def _run_kaggle_kernel_search(query: str, max_notebooks: int) -> list[dict[str, str]]:
-    result = subprocess.run(
-        [
-            "kaggle",
-            "kernels",
-            "list",
-            "--search",
-            query,
-            "--sort-by",
-            "voteCount",
-            "--page-size",
-            str(max_notebooks),
-            "--csv",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    if result.returncode != 0:
-        logger.warning("Kaggle notebook search failed for query %r: %s", query, result.stderr.strip())
-        return []
-
-    return list(csv.DictReader(result.stdout.splitlines()))
-
-
-def _normalize_search_row(row: dict[str, Any]) -> dict[str, Any]:
-    kernel_ref = _get_first(row, "ref", "kernel_ref", "kernelRef", "kernel")
-    total_votes = _parse_votes(_get_first(row, "totalVotes", "total_votes", "votes", "voteCount") or 0)
-    title = _get_first(row, "title", "kernelTitle") or kernel_ref or "Untitled Kaggle notebook"
-    url = _get_first(row, "url", "kernelUrl") or (
-        f"https://www.kaggle.com/code/{kernel_ref}" if kernel_ref else None
-    )
-
-    return {
-        "kernel_ref": kernel_ref,
-        "ref": kernel_ref,
-        "title": title,
-        "url": url,
-        "total_votes": total_votes,
-        "source": "kaggle",
-    }
 
 
 def _extract_notebook_text(notebook_path: Path) -> str:
@@ -169,7 +216,7 @@ def _extract_notebook_text(notebook_path: Path) -> str:
             if source.strip():
                 parts.append(source.strip())
         elif cell_type == "code":
-            code_snippet = source[:500]
+            code_snippet = source[:CODE_CELL_MAX_CHARS]
             if code_snippet.strip():
                 parts.append(code_snippet)
 
@@ -186,9 +233,13 @@ def _get_first(data: dict[str, Any], *keys: str) -> Any:
     lowered = {_normalize_key(key): value for key, value in data.items()}
     for key in keys:
         normalized_key = _normalize_key(key)
-        if normalized_key in lowered and lowered[normalized_key] not in {None, ""}:
+        if normalized_key in lowered and _has_value(lowered[normalized_key]):
             return lowered[normalized_key]
     return None
+
+
+def _has_value(value: Any) -> bool:
+    return value is not None and value != ""
 
 
 def _normalize_key(key: str) -> str:

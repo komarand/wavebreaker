@@ -142,7 +142,9 @@ def test_minimal_e2e_pipeline_creates_docx(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("kaggle_researcher.main.plan", fake_plan)
     monkeypatch.setattr(
         "kaggle_researcher.main.search_notebooks",
-        lambda queries, max_notebooks: [{"kernel_ref": "user/kernel", "content": "notebook text"}],
+        lambda queries, competition_id, max_notebooks: [
+            {"kernel_ref": "user/kernel", "content": "notebook text"}
+        ],
     )
     monkeypatch.setattr(
         "kaggle_researcher.main.build_kaggle_documents",

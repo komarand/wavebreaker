@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -20,6 +21,11 @@ try:
 except ImportError:  # pragma: no cover - covered indirectly via tests without dependency
     asyncpg = None
 
+try:
+    from pgvector.asyncpg import register_vector
+except ImportError:  # pragma: no cover - dependency is present in runtime requirements
+    register_vector = None
+
 
 class PgStore:
     def __init__(self, competition_id: str, dsn: str, embed_dim: int = DEFAULT_EMBED_DIM) -> None:
@@ -35,7 +41,17 @@ class PgStore:
         if asyncpg is None:
             raise RuntimeError("asyncpg is required to initialize PgStore")
 
-        self.pool = await asyncpg.create_pool(dsn=self.dsn, ssl=False)
+        bootstrap_connection = await asyncpg.connect(dsn=self.dsn, ssl=False)
+        try:
+            await bootstrap_connection.execute(CREATE_VECTOR_EXTENSION_SQL)
+        finally:
+            await bootstrap_connection.close()
+
+        self.pool = await asyncpg.create_pool(
+            dsn=self.dsn,
+            ssl=False,
+            init=_register_vector_codec,
+        )
         async with self.pool.acquire() as connection:
             await connection.execute(CREATE_VECTOR_EXTENSION_SQL)
             await connection.execute(create_documents_table_sql(self.embed_dim))
@@ -64,7 +80,7 @@ class PgStore:
                 str(doc.url) if doc.url is not None else None,
                 doc.content,
                 doc.summary,
-                doc.metadata,
+                _json_dumps_metadata(doc.metadata),
                 embedding,
             )
             for doc, embedding in zip(docs, embeddings, strict=True)
@@ -207,5 +223,41 @@ class PgStore:
             content=row["content"],
             score=float(row["score"]),
             rrf_score=0.0,
-            metadata=dict(row["metadata"] or {}),
+            metadata=_metadata_to_dict(row["metadata"]),
         )
+
+
+def _json_dumps_metadata(metadata: Any) -> str:
+    if metadata is None:
+        return "{}"
+
+    if isinstance(metadata, str):
+        try:
+            json.loads(metadata)
+        except json.JSONDecodeError:
+            return json.dumps(metadata)
+        return metadata
+
+    return json.dumps(metadata or {})
+
+
+def _metadata_to_dict(metadata: Any) -> dict[str, Any]:
+    if metadata is None:
+        return {}
+
+    if isinstance(metadata, dict):
+        return dict(metadata)
+
+    if isinstance(metadata, str):
+        try:
+            parsed = json.loads(metadata)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    return dict(metadata or {})
+
+
+async def _register_vector_codec(connection: Any) -> None:
+    if register_vector is not None:
+        await register_vector(connection)

@@ -7,6 +7,9 @@ DEFAULT_EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_EMBED_DIM = 1024
 DEFAULT_MAX_EMBED_BATCH_SIZE = 8
 
+from dotenv import load_dotenv
+
+load_dotenv(".env")
 
 class ConfigError(RuntimeError):
     pass
