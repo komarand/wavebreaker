@@ -5,7 +5,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, HttpUrl
 
 
-SourceType = Literal["kaggle", "arxiv", "papers_with_code", "github"]
+SourceType = Literal[
+    "kaggle",
+    "arxiv",
+    "papers_with_code",
+    "papers_with_code_legacy",
+    "huggingface_papers",
+    "github",
+]
 ConfidenceLevel = Literal["low", "medium", "high"]
 PriorityLevel = Literal["P0", "P1", "P2", "P3"]
 

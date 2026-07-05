@@ -162,11 +162,16 @@ def test_minimal_e2e_pipeline_creates_docx(monkeypatch, tmp_path: Path) -> None:
         lambda queries, max_papers: [{"entry_id": "paper", "content": "paper text"}],
     )
     monkeypatch.setattr("kaggle_researcher.main.enrich_with_pdf", lambda papers, cache_dir: papers)
-    monkeypatch.setattr("kaggle_researcher.main.search_papers_with_code", lambda query: [])
-    monkeypatch.setattr(
-        "kaggle_researcher.main.build_arxiv_documents",
-        lambda papers, competition_id: [make_source("arxiv-1", "arxiv", competition_id)],
-    )
+    async def fake_search_paper_sources(queries, max_results, warnings):
+        return []
+
+    monkeypatch.setattr("kaggle_researcher.main.search_paper_sources", fake_search_paper_sources)
+    def fake_build_arxiv_documents(papers, competition_id):
+        if not papers:
+            return []
+        return [make_source("arxiv-1", "arxiv", competition_id)]
+
+    monkeypatch.setattr("kaggle_researcher.main.build_arxiv_documents", fake_build_arxiv_documents)
     monkeypatch.setattr("kaggle_researcher.main.summarize_documents", fake_summarize_documents)
     monkeypatch.setattr("kaggle_researcher.main.embed_texts", fake_embed_texts)
     monkeypatch.setattr("kaggle_researcher.main.hybrid_search", fake_hybrid_search)
@@ -191,10 +196,17 @@ def test_minimal_e2e_pipeline_creates_docx(monkeypatch, tmp_path: Path) -> None:
     assert report_path.suffix == ".docx"
     assert result.competition_id == "playground-series-s5e1"
     assert result.num_documents == 2
-    assert result.num_sources == {"kaggle": 1, "arxiv": 1, "papers_with_code": 0, "github": 0}
+    assert result.num_sources == {
+        "kaggle": 1,
+        "arxiv": 1,
+        "huggingface_papers": 0,
+        "papers_with_code_legacy": 0,
+        "papers_with_code": 0,
+        "github": 0,
+    }
     assert result.warnings == [
         "GitHub source count is 0. Check GITHUB_TOKEN or query quality.",
-        "Papers with Code source count is 0. Check PWC API call or query quality.",
+        "Hugging Face Papers source count is 0. Falling back to arXiv-only academic retrieval.",
         "Retrieval failed for query 'tabular auc paper': retrieval temporarily unavailable",
     ]
     assert result.duration_sec >= 0

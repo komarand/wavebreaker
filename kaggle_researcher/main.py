@@ -18,7 +18,6 @@ from kaggle_researcher.agents.arxiv_agent import (
     build_arxiv_documents,
     enrich_with_pdf,
     search_arxiv,
-    search_papers_with_code,
 )
 from kaggle_researcher.agents.github_agent import (
     build_github_documents,
@@ -29,6 +28,7 @@ from kaggle_researcher.agents.kaggle_agent import (
     get_notebook_content,
     search_notebooks,
 )
+from kaggle_researcher.agents.paper_search_agent import search_paper_sources
 from kaggle_researcher.clients.deepseek_client import DeepSeekClient
 from kaggle_researcher.config import load_config
 from kaggle_researcher.embedder import embed_texts
@@ -303,6 +303,14 @@ async def _collect_sources(
         )
     )
     documents.extend(
+        await _collect_paper_sources(
+            plan_data=plan_data,
+            competition_id=competition_id,
+            settings=settings,
+            warnings=warnings,
+        )
+    )
+    documents.extend(
         await _collect_github_sources(
             plan_data=plan_data,
             competition_id=competition_id,
@@ -378,16 +386,27 @@ def _collect_arxiv_sources(
     try:
         papers = search_arxiv(plan_data.arxiv_queries, max_papers=settings.max_papers)
         enriched_papers = enrich_with_pdf(papers, cache_dir=settings.pdf_cache_dir)
-        pwc_papers: list[dict[str, Any]] = []
-        for query in plan_data.arxiv_queries[:2]:
-            try:
-                pwc_papers.extend(search_papers_with_code(query))
-            except Exception as exc:
-                warnings.append(f"Papers with Code search failed for query {query!r}: {exc}")
-        return build_arxiv_documents([*enriched_papers, *pwc_papers], competition_id=competition_id)
+        return build_arxiv_documents(enriched_papers, competition_id=competition_id)
     except Exception as exc:
         warnings.append(f"arXiv source collection failed: {exc}")
         return []
+
+
+async def _collect_paper_sources(
+    plan_data: PlanData,
+    competition_id: str,
+    settings: object,
+    warnings: list[str],
+) -> list[SourceDocument]:
+    paper_queries = [*plan_data.arxiv_queries]
+    if not paper_queries:
+        return []
+    raw_papers = await search_paper_sources(
+        queries=paper_queries,
+        max_results=settings.max_papers,
+        warnings=warnings,
+    )
+    return build_arxiv_documents(raw_papers, competition_id=competition_id)
 
 
 async def _collect_github_sources(
@@ -750,10 +769,14 @@ def _jsonable(value: Any) -> Any:
 
 def _source_counts(documents: list[SourceDocument]) -> dict[str, int]:
     counts = Counter(document.source for document in documents)
+    legacy_count = counts.get("papers_with_code_legacy", 0)
+    hf_count = counts.get("huggingface_papers", 0)
     return {
         "kaggle": counts.get("kaggle", 0),
         "arxiv": counts.get("arxiv", 0),
-        "papers_with_code": counts.get("papers_with_code", 0),
+        "huggingface_papers": hf_count,
+        "papers_with_code_legacy": legacy_count,
+        "papers_with_code": hf_count + legacy_count,
         "github": counts.get("github", 0),
     }
 
@@ -761,8 +784,10 @@ def _source_counts(documents: list[SourceDocument]) -> dict[str, int]:
 def _add_missing_source_warnings(num_sources: dict[str, int], warnings: list[str]) -> None:
     if num_sources.get("github", 0) == 0:
         warnings.append("GitHub source count is 0. Check GITHUB_TOKEN or query quality.")
-    if num_sources.get("papers_with_code", 0) == 0:
-        warnings.append("Papers with Code source count is 0. Check PWC API call or query quality.")
+    if num_sources.get("huggingface_papers", 0) == 0:
+        warnings.append(
+            "Hugging Face Papers source count is 0. Falling back to arXiv-only academic retrieval."
+        )
 
 
 def _slugify(value: str) -> str:
