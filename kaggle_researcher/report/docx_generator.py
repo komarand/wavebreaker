@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -143,7 +144,17 @@ def _add_markdown_like_text(document: Document, text: str) -> None:
             document.add_heading(stripped[2:].strip(), level=1)
         elif stripped.startswith("## "):
             document.add_heading(stripped[3:].strip(), level=2)
+        elif _is_numbered_section_heading(stripped):
+            document.add_heading(_strip_numbered_heading_prefix(stripped), level=2)
         elif stripped.startswith(("- ", "* ")):
             document.add_paragraph(stripped[2:].strip(), style="List Bullet")
         else:
             document.add_paragraph(stripped)
+
+
+def _is_numbered_section_heading(line: str) -> bool:
+    return re.match(r"^\d+[\.)]\s+\S", line) is not None
+
+
+def _strip_numbered_heading_prefix(line: str) -> str:
+    return re.sub(r"^\d+[\.)]\s+", "", line).strip()
