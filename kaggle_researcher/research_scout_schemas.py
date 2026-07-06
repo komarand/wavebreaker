@@ -55,7 +55,7 @@ class ResearchHypothesis(BaseModel):
 
 
 class EdaTask(BaseModel):
-    id: str
+    id: str = Field(min_length=1)
     priority: Priority
     module: Literal[
         "file_inventory",
@@ -70,10 +70,10 @@ class EdaTask(BaseModel):
         "feature_probe",
         "notebook_reverse_engineering",
     ]
-    question: str
-    rationale: str
+    question: str = Field(min_length=10)
+    rationale: str = Field(min_length=10)
     required_inputs: list[str] = Field(default_factory=list)
-    expected_outputs: list[str] = Field(default_factory=list)
+    expected_outputs: list[str] = Field(default_factory=list, min_length=1)
     related_hypothesis_ids: list[str] = Field(default_factory=list)
     blocking: bool = False
 
@@ -95,6 +95,8 @@ class ResearchHypothesesPayload(BaseModel):
 
     scout_findings: list[str] = Field(default_factory=list)
     scout_limitations: list[str] = Field(default_factory=list)
+    recommended_module_sequence: list[str] = Field(default_factory=list)
+    recommended_human_checklist: list[str] = Field(default_factory=list)
     recommended_eda_sequence: list[str] = Field(default_factory=list)
 
     models_used: dict = Field(default_factory=dict)

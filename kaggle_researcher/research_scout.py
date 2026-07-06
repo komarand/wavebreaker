@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from collections import Counter
 from typing import Any
@@ -38,6 +39,49 @@ VALID_CATEGORIES = {
     "notebook_reverse_engineering",
     "leaderboard_risk",
 }
+ALLOWED_EDA_MODULES = {
+    "file_inventory",
+    "schema_inferer",
+    "table_profiler",
+    "relationship_inferer",
+    "validation_analyzer",
+    "leakage_checker",
+    "drift_analyzer",
+    "metric_analyzer",
+    "baseline_runner",
+    "feature_probe",
+    "notebook_reverse_engineering",
+}
+MODULE_SHORT_NAMES = {
+    "file_inventory": "file",
+    "schema_inferer": "schema",
+    "table_profiler": "profile",
+    "relationship_inferer": "rel",
+    "validation_analyzer": "val",
+    "leakage_checker": "leak",
+    "drift_analyzer": "drift",
+    "metric_analyzer": "metric",
+    "baseline_runner": "base",
+    "feature_probe": "feat",
+    "notebook_reverse_engineering": "nb",
+}
+GLOBAL_TASK_MODULES = {"file_inventory", "table_profiler"}
+GENERIC_TABLE_PROFILE_PHRASE = "what does the dataset show for this hypothesis?"
+TEMPORAL_VALIDATION_CLAIM = (
+    "Primary validation should be strict out-of-time holdout on the latest periods plus "
+    "rolling or expanding temporal CV. StratifiedGroupKFold with groups=WEEK_NUM may be "
+    "used only as a secondary diagnostic; it does not guarantee chronological "
+    "train-before-validation order."
+)
+TEMPORAL_VALIDATION_TASK_QUESTION = (
+    "Which strict temporal or out-of-time validation split best matches the competition "
+    "holdout and stability metric?"
+)
+TEMPORAL_VALIDATION_OUTPUTS = [
+    "validation_evidence.temporal_folds",
+    "validation_evidence.oot_holdout",
+    "validation_evidence.stratified_group_kfold_diagnostic",
+]
 CATEGORY_PREFIX = {
     "validation": "val",
     "leakage": "leak",
@@ -50,18 +94,29 @@ CATEGORY_PREFIX = {
     "notebook_reverse_engineering": "nb",
     "leaderboard_risk": "lb",
 }
-DEFAULT_EDA_SEQUENCE = [
+DEFAULT_MODULE_SEQUENCE = [
     "file_inventory",
     "schema_inferer",
     "table_profiler",
-    "relationship_inferer",
+    "metric_analyzer",
     "validation_analyzer",
     "leakage_checker",
+    "relationship_inferer",
     "drift_analyzer",
-    "metric_analyzer",
     "baseline_runner",
     "feature_probe",
     "notebook_reverse_engineering",
+]
+DEFAULT_EDA_SEQUENCE = DEFAULT_MODULE_SEQUENCE
+DEFAULT_HUMAN_CHECKLIST = [
+    "Implement and test the official gini_stability metric.",
+    "Identify WEEK_NUM/date_decision and build latest-period holdout.",
+    "Compare random/grouped CV with strict out-of-time validation.",
+    "Compute overall and weekly default rates.",
+    "Check column suffix consistency.",
+    "Compare train and test file lists.",
+    "Plot application counts over time.",
+    "Compare CSV and Parquet versions if both exist.",
 ]
 
 
@@ -168,6 +223,7 @@ async def build_research_hypotheses(
     merged = {**base_payload, **_as_dict(raw_payload)}
     merged["models_used"] = {**base_payload["models_used"], **_as_dict(merged.get("models_used"))}
     normalized = normalize_research_hypotheses(merged)
+    normalized = attach_supporting_source_ids(normalized, docs)
     if return_raw:
         return normalized, _as_dict(raw_payload)
     return normalized
@@ -193,9 +249,8 @@ def normalize_research_hypotheses(payload: dict) -> dict:
             "All dataset-dependent claims must be verified by EDA Engine.",
         ]
     )
-    normalized["recommended_eda_sequence"] = _unique_strings(
-        list(normalized.get("recommended_eda_sequence") or []) + DEFAULT_EDA_SEQUENCE
-    )
+    sequence_payload = split_recommended_sequences(normalized)
+    normalized.update(sequence_payload)
 
     hypotheses = [_normalize_hypothesis(item) for item in list(normalized.get("hypotheses") or []) if isinstance(item, dict)]
     tasks = [_normalize_task(item) for item in list(normalized.get("eda_tasks") or []) if isinstance(item, dict)]
@@ -204,16 +259,511 @@ def normalize_research_hypotheses(payload: dict) -> dict:
     hypotheses = _dedupe_hypotheses(_assign_hypothesis_ids(hypotheses))
 
     tasks.extend(_default_tasks(normalized, hypotheses, tasks))
-    tasks = _dedupe_tasks(_assign_task_ids(tasks))
+    tasks = cleanup_generic_eda_tasks(tasks, {hypothesis["id"] for hypothesis in hypotheses})
     _ensure_high_priority_tasks(hypotheses, tasks)
     _ensure_task_relations(hypotheses, tasks)
+    tasks = ensure_task_ids(_dedupe_tasks(tasks))
 
     normalized["hypotheses"] = hypotheses
     normalized["eda_tasks"] = tasks
+    normalized = enforce_scout_validation_policy(normalized)
+    normalized["eda_tasks"] = ensure_task_ids(cleanup_generic_eda_tasks(normalized["eda_tasks"], {hypothesis["id"] for hypothesis in normalized["hypotheses"]}))
     return ResearchHypothesesPayload.model_validate(normalized).model_dump(mode="json")
 
 
+def ensure_task_ids(tasks: list[dict], existing_ids: set[str] | None = None) -> list[dict]:
+    used = set(existing_ids or set())
+    counters: Counter[str] = Counter()
+    normalized_tasks: list[dict] = []
+    for task in tasks:
+        item = dict(task)
+        module = str(item.get("module") or "table_profiler").strip()
+        short = MODULE_SHORT_NAMES.get(module, _slug(module or "task"))
+        related_ids = _string_list(item.get("related_hypothesis_ids"))
+        raw_id = _normalize_identifier(item.get("id"))
+        if not raw_id:
+            if related_ids:
+                raw_id = f"eda_{short}_{_normalize_identifier(related_ids[0])}"
+            else:
+                counters[short] += 1
+                raw_id = f"eda_{short}_{counters[short]:03d}"
+        elif raw_id.startswith("eda_table_profiler"):
+            raw_id = raw_id.replace("eda_table_profiler", "eda_profile", 1)
+
+        candidate = raw_id
+        suffix = 2
+        while candidate in used:
+            candidate = f"{raw_id}_{suffix}"
+            suffix += 1
+        item["id"] = candidate
+        used.add(candidate)
+        normalized_tasks.append(item)
+    return normalized_tasks
+
+
+def cleanup_generic_eda_tasks(
+    tasks: list[dict],
+    hypothesis_ids: set[str] | None = None,
+) -> list[dict]:
+    cleaned: list[dict] = []
+    removed_generic = False
+    useful_profile_exists = False
+    global_profile_exists = False
+    known_ids = hypothesis_ids or set()
+
+    for task in tasks:
+        item = dict(task)
+        module = str(item.get("module") or "")
+        question = str(item.get("question") or "")
+        related_ids = _string_list(item.get("related_hypothesis_ids"))
+        is_profile = module == "table_profiler"
+        is_generic = is_profile and GENERIC_TABLE_PROFILE_PHRASE in question.strip().lower()
+        is_global_profile = is_profile and not related_ids and "row counts" in question.lower()
+        if is_profile and related_ids and not is_generic:
+            useful_profile_exists = True
+        if is_global_profile:
+            if global_profile_exists:
+                continue
+            global_profile_exists = True
+        if is_generic and not related_ids:
+            removed_generic = True
+            continue
+        cleaned.append(item)
+
+    if removed_generic and not useful_profile_exists and not global_profile_exists:
+        schema_ids = [item for item in ("schema_001", "schema_004") if not known_ids or item in known_ids]
+        if not schema_ids and known_ids:
+            schema_ids = sorted(item for item in known_ids if item.startswith("schema_"))[:2]
+        if not schema_ids:
+            schema_ids = ["schema_001"]
+        cleaned.append(
+            {
+                "id": "eda_profile_global",
+                "priority": "P0",
+                "module": "table_profiler",
+                "question": (
+                    "What are the row counts, column types, missingness, cardinality, "
+                    "and basic distributions for each train/test table?"
+                ),
+                "rationale": (
+                    "Global table profiling is required before validation, leakage checks, "
+                    "drift analysis, and baseline modeling."
+                ),
+                "required_inputs": ["file_inventory.files", "inferred_schema.tables"],
+                "expected_outputs": [
+                    "table_profiles",
+                    "table_profiles.missingness",
+                    "table_profiles.cardinality",
+                    "table_profiles.dtypes",
+                ],
+                "related_hypothesis_ids": schema_ids,
+                "blocking": True,
+            }
+        )
+    return cleaned
+
+
+def enforce_scout_validation_policy(payload: dict) -> dict:
+    normalized = dict(payload)
+    if not _is_temporal_scout_payload(normalized):
+        return normalized
+
+    hypotheses = [dict(item) for item in list(normalized.get("hypotheses") or [])]
+    tasks = [dict(item) for item in list(normalized.get("eda_tasks") or [])]
+    validation_hypotheses = [
+        item for item in hypotheses if item.get("category") == "validation" and item.get("priority") == "P0"
+    ]
+    target = validation_hypotheses[0] if validation_hypotheses else None
+    if target is None:
+        target = _temporal_validation_hypothesis()
+        hypotheses.insert(0, target)
+    elif _unsafe_or_missing_temporal_policy(target):
+        target.update(_temporal_validation_hypothesis(hypothesis_id=str(target.get("id") or "val_001")))
+
+    target_id = str(target.get("id") or "val_001")
+    for task in tasks:
+        if task.get("module") == "validation_analyzer" and target_id in _string_list(task.get("related_hypothesis_ids")):
+            _rewrite_temporal_validation_task(task)
+    if not any(
+        task.get("module") == "validation_analyzer"
+        and target_id in _string_list(task.get("related_hypothesis_ids"))
+        for task in tasks
+    ):
+        tasks.append(
+            _task(
+                "eda_val_001",
+                "P0",
+                "validation_analyzer",
+                TEMPORAL_VALIDATION_TASK_QUESTION,
+                "Temporal validation is required to avoid training on future periods.",
+                ["inferred_schema.global_roles.candidate_time_columns"],
+                TEMPORAL_VALIDATION_OUTPUTS,
+                [target_id],
+                True,
+            )
+        )
+
+    normalized["hypotheses"] = hypotheses
+    normalized["eda_tasks"] = tasks
+    normalized["scout_limitations"] = _unique_strings(
+        [
+            *list(normalized.get("scout_limitations") or []),
+            "Validation policy enforced: strict temporal validation is primary for stability competitions.",
+        ]
+    )
+    return normalized
+
+
+def attach_supporting_source_ids(
+    payload: dict,
+    retrieved_documents: list[dict],
+    max_sources_per_hypothesis: int = 3,
+) -> dict:
+    normalized = dict(payload)
+    docs = [_normalize_retrieved_doc(doc, index) for index, doc in enumerate(retrieved_documents)]
+    if not docs:
+        return normalized
+
+    hypotheses = [dict(item) for item in list(normalized.get("hypotheses") or [])]
+    for hypothesis in hypotheses:
+        matches = _rank_source_matches(hypothesis, docs)
+        source_ids = [doc["id"] for _, doc in matches[:max_sources_per_hypothesis]]
+        if source_ids:
+            hypothesis["supporting_source_ids"] = _unique_strings(
+                [*list(hypothesis.get("supporting_source_ids") or []), *source_ids]
+            )[:max_sources_per_hypothesis]
+            provenance = list(hypothesis.get("provenance") or [])
+            for _, doc in matches[:max_sources_per_hypothesis]:
+                source = str(doc.get("source") or "")
+                if source in VALID_PROVENANCE:
+                    provenance.append(source)
+            hypothesis["provenance"] = _unique_strings(provenance)
+        else:
+            hypothesis["provenance"] = _unique_strings([*list(hypothesis.get("provenance") or []), "heuristic"])
+
+    source_ratio = (
+        sum(1 for item in hypotheses if item.get("supporting_source_ids")) / len(hypotheses)
+        if hypotheses
+        else 1.0
+    )
+    limitations = list(normalized.get("scout_limitations") or [])
+    p0_without_sources = [
+        item["id"]
+        for item in hypotheses
+        if item.get("priority") == "P0" and not item.get("supporting_source_ids")
+    ]
+    if source_ratio < 0.5:
+        limitations.append("Fewer than 50% of hypotheses have supporting_source_ids from retrieved documents.")
+    if p0_without_sources:
+        limitations.append("P0 hypotheses without supporting sources: " + ", ".join(p0_without_sources))
+    normalized["hypotheses"] = hypotheses
+    normalized["scout_limitations"] = _unique_strings(limitations)
+    return normalized
+
+
+def split_recommended_sequences(payload: dict) -> dict[str, list[str]]:
+    existing_modules = _string_list(payload.get("recommended_module_sequence"))
+    human = _string_list(payload.get("recommended_human_checklist"))
+    legacy = _string_list(payload.get("recommended_eda_sequence"))
+
+    modules = [item for item in existing_modules if item in ALLOWED_EDA_MODULES]
+    for item in legacy:
+        stripped = item.strip()
+        if stripped in ALLOWED_EDA_MODULES:
+            modules.append(stripped)
+        elif stripped:
+            human.append(_normalize_checklist_item(stripped))
+    modules = [item for item in DEFAULT_MODULE_SEQUENCE if item in set(modules or DEFAULT_MODULE_SEQUENCE)]
+    if not modules:
+        modules = DEFAULT_MODULE_SEQUENCE.copy()
+    if not human:
+        human = DEFAULT_HUMAN_CHECKLIST.copy()
+    return {
+        "recommended_module_sequence": _unique_strings(modules),
+        "recommended_human_checklist": _unique_strings(human),
+        "recommended_eda_sequence": _unique_strings(modules),
+    }
+
+
+def _temporal_validation_hypothesis(hypothesis_id: str = "val_001") -> dict[str, Any]:
+    return {
+        "id": hypothesis_id,
+        "category": "validation",
+        "priority": "P0",
+        "claim": TEMPORAL_VALIDATION_CLAIM,
+        "why_it_matters": (
+            "Stability metrics punish degradation across time. A split that mixes future "
+            "periods into training can overestimate performance and select unstable models."
+        ),
+        "how_to_verify": [
+            "Identify reliable time columns such as WEEK_NUM, date_decision, date, month, or period.",
+            "Create latest-period out-of-time holdout.",
+            "Create rolling or expanding temporal folds where training periods always precede validation periods.",
+            "Optionally compare against StratifiedGroupKFold by WEEK_NUM as a diagnostic only.",
+            "Compare random/grouped CV estimates with out-of-time estimates.",
+        ],
+        "expected_evidence_keys": [
+            "inferred_schema.global_roles.candidate_time_columns",
+            "validation_evidence.recommended_validation",
+            "validation_evidence.train_test_time_relation",
+            "validation_evidence.target_by_period",
+            "baseline_evidence.per_period_metric",
+        ],
+        "failure_condition": "No reliable temporal column exists and the official metric does not depend on temporal stability.",
+        "success_condition": (
+            "A reliable temporal column exists or the metric requires stability, and temporal folds "
+            "can be created without training on future periods."
+        ),
+        "provenance": ["kaggle", "heuristic", "not_verified_on_data"],
+        "supporting_source_ids": [],
+        "confidence": "high",
+        "status": "needs_eda",
+    }
+
+
+def _rewrite_temporal_validation_task(task: dict[str, Any]) -> None:
+    task["id"] = str(task.get("id") or "eda_val_001")
+    task["priority"] = "P0"
+    task["question"] = TEMPORAL_VALIDATION_TASK_QUESTION
+    task["rationale"] = "Temporal validation is required to match stability-sensitive holdout behavior."
+    task["expected_outputs"] = _unique_strings(
+        [*list(task.get("expected_outputs") or []), *TEMPORAL_VALIDATION_OUTPUTS]
+    )
+    task["blocking"] = True
+
+
+def _is_temporal_scout_payload(payload: dict[str, Any]) -> bool:
+    metric = _as_dict(payload.get("metric"))
+    text_parts = [
+        str(metric.get("name") or ""),
+        str(payload.get("competition_desc") or ""),
+        json.dumps(payload.get("source_summary") or {}, ensure_ascii=False),
+        json.dumps(payload.get("source_quality_summary") or {}, ensure_ascii=False),
+        json.dumps(payload.get("hypotheses") or [], ensure_ascii=False),
+    ]
+    text = " ".join(text_parts).lower()
+    return any(term in text for term in ("stability", "week_num", "week", "time", "temporal", "date", "period"))
+
+
+def _unsafe_or_missing_temporal_policy(hypothesis: dict[str, Any]) -> bool:
+    text = " ".join(
+        [
+            str(hypothesis.get("claim") or ""),
+            str(hypothesis.get("why_it_matters") or ""),
+            " ".join(_string_list(hypothesis.get("how_to_verify"))),
+        ]
+    ).lower()
+    has_primary_temporal = (
+        ("out-of-time" in text or "oot" in text or "strict temporal" in text)
+        and ("rolling" in text or "expanding" in text or "temporal" in text)
+    )
+    unsafe_group_primary = any(
+        phrase in text
+        for phrase in (
+            "stratifiedgroupkfold is the primary",
+            "stratifiedgroupkfold with groups=week_num ensures",
+            "groupkfold by week is sufficient",
+            "groupkfold is sufficient",
+            "stratifiedgroupkfold is sufficient",
+        )
+    )
+    return unsafe_group_primary or not has_primary_temporal
+
+
+def _normalize_retrieved_doc(doc: dict[str, Any], index: int) -> dict[str, Any]:
+    item = _as_dict(doc)
+    metadata = _as_dict(item.get("metadata"))
+    doc_id = str(item.get("id") or "").strip()
+    if not doc_id:
+        title_hash = hashlib.sha1(
+            f"{item.get('source')}-{item.get('title')}-{index}".encode("utf-8")
+        ).hexdigest()[:10]
+        doc_id = f"{item.get('source') or 'source'}-{title_hash}"
+    text = " ".join(
+        str(value or "")
+        for value in (
+            item.get("title"),
+            item.get("summary"),
+            item.get("content"),
+            metadata.get("specificity"),
+            metadata.get("evidence_type"),
+            item.get("source_quality"),
+            item.get("specificity"),
+            item.get("evidence_type"),
+        )
+    ).lower()
+    return {
+        **item,
+        "id": doc_id,
+        "source": str(item.get("source") or metadata.get("source") or "unknown"),
+        "_match_text": text,
+    }
+
+
+def _rank_source_matches(hypothesis: dict[str, Any], docs: list[dict[str, Any]]) -> list[tuple[float, dict[str, Any]]]:
+    keywords = _keywords_for_hypothesis(hypothesis)
+    preferred_sources = _preferred_sources_for_hypothesis(hypothesis)
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for doc in docs:
+        text = str(doc.get("_match_text") or "")
+        keyword_score = sum(1 for keyword in keywords if keyword.lower() in text)
+        if keyword_score <= 0:
+            continue
+        source = str(doc.get("source") or "")
+        source_score = _source_preference_score(source, preferred_sources, text)
+        scored.append((keyword_score * 10 + source_score, doc))
+    scored.sort(key=lambda item: (-item[0], item[1]["id"]))
+    return scored
+
+
+def _keywords_for_hypothesis(hypothesis: dict[str, Any]) -> list[str]:
+    category = str(hypothesis.get("category") or "")
+    claim_text = str(hypothesis.get("claim") or "").lower()
+    if category == "metric":
+        return ["metric", "gini", "auc", "stability", "weekly", "slope", "residual", "evaluation"]
+    if category == "validation":
+        return ["week_num", "validation", "fold", "cv", "out-of-time", "time", "temporal", "groupkfold", "stratifiedgroupkfold"]
+    if category == "leakage":
+        return ["leakage", "future", "date", "target encoding", "id overlap", "case_id", "fold"]
+    if category == "feature_engineering":
+        return ["feature", "aggregation", "aggregate", "catboost", "lightgbm", "encoding", "suffix", "parquet"]
+    if category == "baseline":
+        return ["baseline", "lightgbm", "catboost", "xgboost", "model"]
+    if category == "drift":
+        return ["drift", "shift", "temporal", "period", "week", "covid", "train test"]
+    if category == "notebook_reverse_engineering" or "notebook" in claim_text:
+        return ["notebook", "kaggle", "code", "cv", "feature", "model"]
+    if category == "dataset_schema":
+        return ["schema", "table", "column", "file", "parquet", "csv", "week_num", "case_id"]
+    return ["kaggle", "validation", "feature", "model", "metric"]
+
+
+def _preferred_sources_for_hypothesis(hypothesis: dict[str, Any]) -> list[str]:
+    category = str(hypothesis.get("category") or "")
+    if category == "notebook_reverse_engineering":
+        return ["kaggle"]
+    if category in {"feature_engineering", "baseline"}:
+        return ["kaggle", "github"]
+    if category == "drift":
+        return ["kaggle", "arxiv", "huggingface_papers"]
+    if category == "metric":
+        return ["kaggle", "arxiv", "huggingface_papers"]
+    return ["kaggle", "github", "arxiv", "huggingface_papers"]
+
+
+def _source_preference_score(source: str, preferred_sources: list[str], text: str) -> float:
+    try:
+        base = len(preferred_sources) - preferred_sources.index(source)
+    except ValueError:
+        base = 0
+    specificity = 2 if any(term in text for term in ("competition", "week_num", "home credit", "kaggle")) else 0
+    return base + specificity
+
+
+def _normalize_checklist_item(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return value
+    return value if value.endswith(".") else f"{value}."
+
+
+def _normalize_identifier(value: Any) -> str:
+    return re.sub(r"\s+", "_", str(value or "").strip())
+
+
+def _slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_") or "task"
+
+
+def _raw_contract_errors(payload: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    hypotheses = [item for item in list(payload.get("hypotheses") or []) if isinstance(item, dict)]
+    tasks = [item for item in list(payload.get("eda_tasks") or []) if isinstance(item, dict)]
+    hypothesis_ids = [_normalize_identifier(item.get("id")) for item in hypotheses]
+    task_ids = [_normalize_identifier(item.get("id")) for item in tasks]
+    if any(not item for item in hypothesis_ids):
+        errors.append("hypothesis IDs must not be empty")
+    if any(not item for item in task_ids):
+        errors.append("EDA task IDs must not be empty")
+    duplicate_hypothesis_ids = [item for item, count in Counter(hypothesis_ids).items() if item and count > 1]
+    duplicate_task_ids = [item for item, count in Counter(task_ids).items() if item and count > 1]
+    if duplicate_hypothesis_ids:
+        errors.append("payload must not contain duplicate hypothesis IDs: " + ", ".join(duplicate_hypothesis_ids))
+    if duplicate_task_ids:
+        errors.append("payload must not contain duplicate task IDs: " + ", ".join(duplicate_task_ids))
+    for task in tasks:
+        question = str(task.get("question") or "").lower()
+        if GENERIC_TABLE_PROFILE_PHRASE in question:
+            errors.append(f"EDA task {task.get('id') or '<empty>'} has generic task question")
+    return errors
+
+
+def _has_safe_temporal_validation(hypotheses: list[ResearchHypothesis]) -> bool:
+    for hypothesis in hypotheses:
+        if hypothesis.category != "validation" or hypothesis.priority != "P0":
+            continue
+        text = hypothesis.claim.lower()
+        has_oot = "out-of-time" in text or "oot" in text
+        has_temporal_cv = "rolling" in text or "expanding" in text or "strict temporal" in text
+        unsafe = any(
+            phrase in text
+            for phrase in (
+                "stratifiedgroupkfold is the primary",
+                "stratifiedgroupkfold with groups=week_num ensures",
+                "groupkfold by week is sufficient",
+                "stratifiedgroupkfold is sufficient",
+            )
+        )
+        if has_oot and has_temporal_cv and not unsafe:
+            return True
+    return False
+
+
+def _is_supported_supervised_task(task_type: str) -> bool:
+    text = task_type.lower()
+    return any(term in text for term in ("classification", "regression", "supervised", "binary", "multiclass"))
+
+
+def _is_dataset_dependent(hypothesis: ResearchHypothesis) -> bool:
+    text = " ".join(
+        [
+            hypothesis.claim,
+            hypothesis.why_it_matters,
+            " ".join(hypothesis.how_to_verify),
+        ]
+    ).lower()
+    return any(
+        term in text
+        for term in (
+            "dataset",
+            "train",
+            "test",
+            "column",
+            "feature",
+            "leakage",
+            "drift",
+            "baseline",
+            "validation",
+            "schema",
+            "table",
+        )
+    )
+
+
+def _retrieved_sources_available(model: ResearchHypothesesPayload) -> bool:
+    source_summary = model.source_summary or {}
+    source_quality_summary = model.source_quality_summary or {}
+    if any(int(value or 0) > 0 for value in source_summary.values() if isinstance(value, int)):
+        return True
+    top_sources = source_quality_summary.get("top_sources") if isinstance(source_quality_summary, dict) else None
+    return bool(top_sources)
+
+
 def validate_research_hypotheses(payload: dict) -> None:
+    raw_errors = _raw_contract_errors(payload)
+    if raw_errors:
+        raise ValueError("Research Scout validation failed:\n- " + "\n- ".join(raw_errors))
+
     try:
         model = ResearchHypothesesPayload.model_validate(payload)
     except ValidationError as exc:
@@ -223,6 +773,10 @@ def validate_research_hypotheses(payload: dict) -> None:
     hypotheses = model.hypotheses
     tasks = model.eda_tasks
     metric_name = str(model.metric.get("name") or "").lower()
+    hypothesis_ids = [item.id for item in hypotheses]
+    task_ids = [item.id for item in tasks]
+    known_hypothesis_ids = set(hypothesis_ids)
+    categories = {item.category for item in hypotheses}
 
     if len(hypotheses) < 8:
         errors.append("payload must contain at least 8 hypotheses")
@@ -230,36 +784,115 @@ def validate_research_hypotheses(payload: dict) -> None:
         errors.append("payload must contain at least one P0 validation hypothesis")
     if not any(item.category == "leakage" and item.priority == "P0" for item in hypotheses):
         errors.append("payload must contain at least one P0 leakage hypothesis")
-    for module in ("schema_inferer", "validation_analyzer", "leakage_checker"):
+    if "metric" not in categories:
+        errors.append("payload must contain at least one metric hypothesis")
+    if "dataset_schema" not in categories:
+        errors.append("payload must contain at least one schema hypothesis")
+    if _is_supported_supervised_task(model.task_type) and "baseline" not in categories:
+        errors.append("payload must contain at least one baseline hypothesis for supervised tasks")
+    if len(hypothesis_ids) != len(set(hypothesis_ids)):
+        errors.append("payload must not contain duplicate hypothesis IDs")
+    if len(task_ids) != len(set(task_ids)):
+        errors.append("payload must not contain duplicate task IDs")
+    for module in ("file_inventory", "schema_inferer", "table_profiler", "validation_analyzer", "leakage_checker", "metric_analyzer"):
         if not any(task.module == module for task in tasks):
             errors.append(f"payload must contain at least one {module} task")
-    if "stability" in metric_name and not _has_temporal_validation(hypotheses):
-        errors.append("stability metrics require a temporal validation hypothesis")
+    if "stability" in metric_name and not _has_safe_temporal_validation(hypotheses):
+        errors.append("stability metrics require P0 validation with out-of-time plus rolling/expanding temporal CV")
 
     for item in hypotheses:
         missing = []
+        if not item.id:
+            missing.append("id")
         if not item.claim:
             missing.append("claim")
         if not item.why_it_matters:
             missing.append("why_it_matters")
         if not item.how_to_verify:
             missing.append("how_to_verify")
+        if not item.expected_evidence_keys:
+            missing.append("expected_evidence_keys")
         if not item.provenance:
             missing.append("provenance")
         if not item.confidence:
             missing.append("confidence")
         if missing:
             errors.append(f"hypothesis {item.id} missing required fields: {', '.join(missing)}")
+        if _is_dataset_dependent(item) and "not_verified_on_data" not in item.provenance:
+            errors.append(f"hypothesis {item.id} dataset-dependent claim must include not_verified_on_data")
     for task in tasks:
         missing = []
+        if not task.id:
+            missing.append("id")
         if not task.module:
             missing.append("module")
         if not task.question:
             missing.append("question")
+        if not task.rationale:
+            missing.append("rationale")
         if not task.expected_outputs:
             missing.append("expected_outputs")
         if missing:
             errors.append(f"EDA task {task.id} missing required fields: {', '.join(missing)}")
+        if task.module not in ALLOWED_EDA_MODULES:
+            errors.append(f"EDA task {task.id} has invalid module {task.module}")
+        if GENERIC_TABLE_PROFILE_PHRASE in task.question.lower():
+            errors.append(f"EDA task {task.id} has generic task question")
+        if task.module not in GLOBAL_TASK_MODULES and not task.related_hypothesis_ids:
+            errors.append(f"EDA task {task.id} missing related_hypothesis_ids")
+        for hypothesis_id in task.related_hypothesis_ids:
+            if hypothesis_id not in known_hypothesis_ids:
+                errors.append(f"EDA task {task.id} references unknown hypothesis {hypothesis_id}")
+
+    p0_validation_ids = {
+        item.id for item in hypotheses if item.category == "validation" and item.priority == "P0"
+    }
+    p0_leakage_ids = {
+        item.id for item in hypotheses if item.category == "leakage" and item.priority == "P0"
+    }
+    validation_task_links = {
+        hypothesis_id
+        for task in tasks
+        if task.module == "validation_analyzer"
+        for hypothesis_id in task.related_hypothesis_ids
+    }
+    leakage_task_links = {
+        hypothesis_id
+        for task in tasks
+        if task.module == "leakage_checker"
+        for hypothesis_id in task.related_hypothesis_ids
+    }
+    if not p0_validation_ids <= validation_task_links:
+        errors.append("P0 validation hypothesis must be linked to a validation task")
+    if not p0_leakage_ids <= leakage_task_links:
+        errors.append("P0 leakage hypothesis must be linked to a leakage task")
+
+    if not set(model.recommended_module_sequence) <= ALLOWED_EDA_MODULES:
+        errors.append("recommended_module_sequence must only contain allowed module names")
+    for item in model.recommended_human_checklist:
+        if item in ALLOWED_EDA_MODULES:
+            errors.append("recommended_human_checklist must contain natural-language checks, not only module names")
+    legacy = model.recommended_eda_sequence
+    if any(item in ALLOWED_EDA_MODULES for item in legacy) and any(item not in ALLOWED_EDA_MODULES for item in legacy):
+        errors.append("recommended_eda_sequence legacy field must not mix module names and human checklist items")
+
+    if _retrieved_sources_available(model) and hypotheses:
+        sourced = [item for item in hypotheses if item.supporting_source_ids]
+        if len(sourced) / len(hypotheses) < 0.5:
+            limitations_text = " ".join(model.scout_limitations).lower()
+            if "fewer than 50% of hypotheses have supporting_source_ids" not in limitations_text:
+                errors.append(
+                    "at least 50% of hypotheses should have supporting_source_ids when retrieved documents are available"
+                )
+        p0_without_sources = [
+            item.id
+            for item in hypotheses
+            if item.priority == "P0"
+            and not item.supporting_source_ids
+            and "heuristic" not in item.provenance
+        ]
+        if p0_without_sources:
+            errors.append("P0 hypotheses should have at least one source ID when possible: " + ", ".join(p0_without_sources))
 
     if errors:
         raise ValueError("Research Scout validation failed:\n- " + "\n- ".join(errors))
@@ -282,6 +915,22 @@ def build_research_scout_summary(payload: dict) -> str:
         "## Executive summary",
         _executive_summary(model),
         "",
+        "## Contract quality checks",
+        f"- Number of hypotheses: {len(model.hypotheses)}",
+        f"- Number of EDA tasks: {len(model.eda_tasks)}",
+        f"- Number of linked tasks: {sum(1 for task in model.eda_tasks if task.related_hypothesis_ids)}",
+        f"- Number of hypotheses with supporting_source_ids: {sum(1 for hypothesis in model.hypotheses if hypothesis.supporting_source_ids)}",
+        "- Blocking tasks: "
+        + (", ".join(task.id for task in model.eda_tasks if task.blocking) or "none"),
+        "- Validation policy enforced: "
+        + ("yes" if _has_safe_temporal_validation(model.hypotheses) else "no"),
+        "",
+        "## Canonical EDA module sequence",
+        *[f"- {module}" for module in model.recommended_module_sequence],
+        "",
+        "## Human EDA checklist",
+        *[f"- {item}" for item in model.recommended_human_checklist],
+        "",
         "## P0 EDA checks",
     ]
     p0_hypotheses = [item for item in model.hypotheses if item.priority == "P0"]
@@ -303,11 +952,44 @@ def build_research_scout_summary(payload: dict) -> str:
     lines.extend(["", "## Limitations"])
     for limitation in model.scout_limitations:
         lines.append(f"- {limitation}")
+    p0_without_sources = [
+        hypothesis.id
+        for hypothesis in model.hypotheses
+        if hypothesis.priority == "P0" and not hypothesis.supporting_source_ids
+    ]
+    heuristic_only = [
+        hypothesis.id
+        for hypothesis in model.hypotheses
+        if "heuristic" in hypothesis.provenance and not hypothesis.supporting_source_ids
+    ]
+    not_verified = [
+        hypothesis.id
+        for hypothesis in model.hypotheses
+        if "not_verified_on_data" in hypothesis.provenance
+    ]
+    if p0_without_sources:
+        lines.append("- P0 hypotheses lack supporting sources: " + ", ".join(p0_without_sources))
+    if heuristic_only:
+        lines.append("- Heuristic-only hypotheses: " + ", ".join(heuristic_only))
+    if not_verified:
+        lines.append("- Claims not verified on data: " + ", ".join(not_verified))
     return "\n".join(lines).rstrip() + "\n"
 
 
 def split_eda_task_plan(payload: dict) -> dict:
-    model = ResearchHypothesesPayload.model_validate(payload)
+    normalized = dict(payload)
+    hypothesis_ids = {
+        str(hypothesis.get("id"))
+        for hypothesis in list(normalized.get("hypotheses") or [])
+        if isinstance(hypothesis, dict)
+    }
+    normalized["eda_tasks"] = ensure_task_ids(
+        cleanup_generic_eda_tasks(list(normalized.get("eda_tasks") or []), hypothesis_ids)
+    )
+    sequence_payload = split_recommended_sequences(normalized)
+    normalized.update(sequence_payload)
+    validate_research_hypotheses(normalized)
+    model = ResearchHypothesesPayload.model_validate(normalized)
     return {
         "schema_version": model.schema_version,
         "competition_id": model.competition_id,
@@ -323,7 +1005,10 @@ def split_eda_task_plan(payload: dict) -> dict:
             }
             for hypothesis in model.hypotheses
         },
-        "recommended_sequence": model.recommended_eda_sequence,
+        "recommended_module_sequence": model.recommended_module_sequence,
+        "recommended_human_checklist": model.recommended_human_checklist,
+        "recommended_sequence": model.recommended_module_sequence,
+        "recommended_eda_sequence": model.recommended_eda_sequence,
         "blocking_tasks": [
             task.id for task in model.eda_tasks if task.blocking
         ],
@@ -660,6 +1345,22 @@ def _default_tasks(
             "Schema roles gate validation, leakage checks, metrics, joins, and baselines.",
             ["file_inventory.files"],
             ["inferred_schema.global_roles", "sample_submission.schema"],
+            [by_category.get("dataset_schema", "")],
+            True,
+        ),
+        _task(
+            "eda_profile_global",
+            "P0",
+            "table_profiler",
+            "What are the row counts, column types, missingness, cardinality, and basic distributions for each train/test table?",
+            "Global table profiling is required before validation, leakage checks, drift analysis, and baseline modeling.",
+            ["file_inventory.files", "inferred_schema.tables"],
+            [
+                "table_profiles",
+                "table_profiles.missingness",
+                "table_profiles.cardinality",
+                "table_profiles.dtypes",
+            ],
             [by_category.get("dataset_schema", "")],
             True,
         ),
