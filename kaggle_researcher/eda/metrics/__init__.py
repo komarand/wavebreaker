@@ -6,6 +6,7 @@ from kaggle_researcher.eda.metrics.registry import (
     MetricSpec,
     TaskType,
     infer_metric_spec,
+    normalize_metric_name,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "MetricSpec",
     "TaskType",
     "infer_metric_spec",
+    "normalize_metric_name",
 ]

@@ -834,66 +834,141 @@ Do not train models in this task.
 
 ---
 
-## 40_eda_temporal_split_helpers
+## 40_eda_validation_policy_and_split_helpers
 
 ### Goal
 
-Implement deterministic temporal holdout and rolling/expanding fold construction helpers.
+Implement generic validation policy helpers instead of assuming temporal validation by default.
+
+This task replaces the previous temporal-only task.
+
+The EDA Engine must support ordinary iid tabular tasks, grouped tasks, ranking tasks, temporal tasks, and forecasting-like tabular tasks.
+
+A time column alone is **not sufficient** to make temporal validation primary.
 
 ### Files to create/change
 
 ```text
-kaggle_researcher/eda/validation/temporal_split.py
+kaggle_researcher/eda/validation/
+├── __init__.py
+├── split_helpers.py
+├── temporal_split.py
+├── group_split.py
+└── policy_selector.py
+
+tests/eda/test_split_helpers.py
 tests/eda/test_temporal_split.py
+tests/eda/test_group_split.py
+tests/eda/test_validation_policy_selector.py
 ```
 
 ### Codex prompt
 
 ```text
-Implement temporal validation helpers.
+Implement generic validation policy helpers and a validation policy selector.
 
-Functions:
+Use docs/EDA_ENGINE_SPEC.md as source of truth, but do not assume Home Credit or Gini Stability as the default case.
+
+Implement split helper functions:
+
+In validation/split_helpers.py:
+- infer_class_balance(df, target_col: str) -> dict
+- infer_regression_target_stats(df, target_col: str) -> dict
+- infer_candidate_group_columns(schema, profiles) -> list[dict]
+- infer_candidate_time_columns(schema, profiles) -> list[dict]
+- summarize_column_distribution(df, col: str, target_col: str | None = None) -> list[dict]
+
+In validation/temporal_split.py:
 - infer_periods(df, time_col: str) -> list
 - build_latest_period_holdout(periods: list, holdout_period_count: int = 4) -> dict
 - build_expanding_window_folds(periods: list, n_folds: int = 5, min_train_periods: int = 3) -> list[dict]
 - summarize_period_counts(df, time_col: str, target_col: str | None = None) -> list[dict]
 
-Requirements:
-- Deterministic output.
-- Sort periods naturally.
-- For target_col:
-  - include n_rows and target_mean by period.
-- If there are too few periods, return infeasible result with reason.
-- Do not import sklearn here.
+In validation/group_split.py:
+- summarize_group_counts(df, group_col: str, target_col: str | None = None) -> dict
+- assess_group_split_feasibility(df, group_col: str, target_col: str | None = None) -> dict
+- detect_group_leakage_risk(train_df, test_df, group_col: str) -> dict
+
+In validation/policy_selector.py:
+- select_validation_policy(
+    task_type,
+    metric_spec,
+    inferred_schema,
+    table_profiles,
+    validation_signals: dict | None = None,
+    scout_hypotheses: list | None = None,
+) -> dict
+
+Validation policies to support:
+- stratified_kfold
+- kfold
+- group_kfold
+- stratified_group_kfold
+- temporal_holdout
+- expanding_window
+- ranking_group_cv
+- custom_required
+
+Policy selection rules:
+- Binary/multiclass iid classification -> stratified_kfold.
+- Regression iid -> kfold.
+- Ranking/recommender with query_id/session_id/user_id -> ranking_group_cv or group_kfold.
+- Group/entity leakage risk -> group_kfold or stratified_group_kfold.
+- Forecasting or temporal/stability metric -> temporal_holdout or expanding_window.
+- Time column alone is diagnostic, not sufficient for primary temporal validation.
+- Unknown/custom metric -> conservative validation with warning and custom_required if needed.
+
+The selector output must include:
+- primary_validation
+- diagnostic_validations
+- rejected_validations
+- confidence
+- evidence_refs
+- warnings
+- limitations
+- reasoning_summary
+
+Do not import sklearn in split helper modules unless absolutely necessary.
+Do not implement model training.
 ```
 
 ### Acceptance criteria
 
-- Latest-period holdout picks latest periods.
-- Expanding folds are chronological and non-overlapping in validation periods.
-- Too few periods returns infeasible result.
-- Period summary includes target mean when target exists.
-- Tests pass.
+- iid binary classification with no group/time requirement selects `stratified_kfold`.
+- iid regression selects `kfold`.
+- ranking metric with query/group column selects `ranking_group_cv`.
+- temporal/stability metric selects temporal policy when time column exists.
+- time column alone does not force temporal primary validation.
+- too few periods returns infeasible temporal policy with reason.
+- group split feasibility is tested.
+- Tests pass with:
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe -m pytest tests/eda -q
+```
 
 ---
 
-## 41_eda_validation_analyzer
+## 41_eda_validation_analyzer_generic
 
 ### Goal
 
-Build factual validation evidence from schema, metric, and real train/test base tables.
+Build factual validation evidence using the generic ValidationPolicySelector.
+
+This task replaces the previous temporal-first validation analyzer.
 
 ### Files to create/change
 
 ```text
 kaggle_researcher/eda/modules/validation_analyzer.py
+kaggle_researcher/eda/validation/policy_selector.py
 tests/eda/test_validation_analyzer.py
 ```
 
 ### Codex prompt
 
 ```text
-Implement validation_analyzer module.
+Implement generic validation_analyzer.
 
 Function:
 - analyze_validation(
@@ -904,43 +979,59 @@ Function:
 ) -> ValidationEvidence
 
 Requirements:
-- Use train_base_table from inferred_schema.
-- Determine available time columns.
-- For each time column:
-  - min
-  - max
-  - n_periods
-  - n_missing
-  - confidence
-- If target and time exist:
-  - compute row count by period
-  - compute target rate by period
-- If test_base has same time column:
-  - compute train/test time relation.
-- Build latest-period holdout recommendation when feasible.
-- Build expanding-window CV recommendation when feasible.
-- If metric requires time/groups and time exists:
-  - recommend out_of_time_holdout_plus_rolling_cv as primary.
-- StratifiedGroupKFold can be diagnostic but not primary when temporal validation is feasible.
-- If no time column exists:
-  - explain fallback and limitations.
+1. Load train_base table only as much as needed.
+2. Detect and summarize:
+   - target column availability
+   - id column availability
+   - candidate group/entity columns
+   - candidate time/date columns
+   - candidate query/ranking columns
+3. If target exists:
+   - for classification: class balance / target rate
+   - for regression: target summary stats
+   - for time columns: target by period as diagnostic
+   - for group columns: target/group distribution as diagnostic
+4. If test_base exists:
+   - compare train/test time range when time columns exist
+   - compare train/test group overlap when group columns exist
+5. Call ValidationPolicySelector to produce:
+   - primary validation
+   - diagnostic validations
+   - rejected validations
+6. Temporal validation can be primary only when:
+   - metric/task requires temporal validation, or
+   - train/test relation indicates future test, or
+   - scout hypothesis plus data evidence supports temporal split risk.
+7. For ordinary iid classification:
+   - recommend StratifiedKFold.
+8. For ordinary iid regression:
+   - recommend KFold.
+9. For grouped tasks:
+   - recommend GroupKFold or StratifiedGroupKFold.
+10. For ranking tasks:
+   - recommend group/query-aware validation.
+
+Do not hard-code Home Credit as the default.
+Home Credit behavior must emerge from metric_spec=gini_stability and detected WEEK_NUM.
 ```
 
 ### Acceptance criteria
 
-- Fixture recommends out_of_time_holdout_plus_rolling_cv.
-- target_by_period is populated.
-- test_time_relation is populated when test has WEEK_NUM.
-- No time column fixture returns limitation, not crash.
+- Fixture with gini_stability + WEEK_NUM recommends temporal validation.
+- Binary iid fixture without temporal metric recommends StratifiedKFold even if a date column exists.
+- Regression fixture recommends KFold.
+- Grouped fixture recommends GroupKFold/StratifiedGroupKFold.
+- Ranking fixture recommends query/group-aware validation.
+- Validation evidence includes warnings/limitations when policy cannot be selected confidently.
 - Tests pass.
 
 ---
 
-## 42_eda_leakage_checker_basic
+## 42_eda_leakage_checker_generic
 
 ### Goal
 
-Implement basic factual leakage checks.
+Implement generic leakage checks for tabular competitions, not only Home Credit-like datasets.
 
 ### Files to create/change
 
@@ -952,7 +1043,7 @@ tests/eda/test_leakage_checker.py
 ### Codex prompt
 
 ```text
-Implement leakage_checker basic module.
+Implement generic leakage_checker.
 
 Function:
 - check_leakage(
@@ -963,38 +1054,40 @@ Function:
 
 MVP checks:
 - train/test id overlap
+- train/test group/entity overlap where group columns exist
 - target column present in test
 - target-like column names outside target
 - sample_submission structure sanity
 - duplicate rows across train/test for base tables where feasible
-- suspicious columns with extremely high target association for numeric columns in train_base
+- suspicious numeric columns with extremely high target association
+- potential post-target/future-date risk when time/date columns exist
+- ranking/query leakage risk when query/group identifiers appear in both train/test
 
 Requirements:
-- Distinguish confirmed issue from risk warning.
-- id overlap:
-  - passed when overlap_count=0
-  - failed or warning when overlap_count>0 depending on competition context
-- target present in test is high/critical severity.
-- suspicious high target association is warning, not confirmed leakage.
-- If required columns/tables are missing, return not_testable check.
-- Do not scan huge tables without sampling; for MVP base fixture full scan is OK.
+- Confirmed leakage requires direct evidence.
+- Suspicious association is warning, not proof.
+- Time/date presence alone is not leakage.
+- Group overlap is not always leakage; severity depends on selected validation policy.
+- Missing required tables/columns should return not_testable checks.
+- Must not scan huge tables without sampling/caps.
 ```
 
 ### Acceptance criteria
 
 - Default fixture has passed id overlap check.
-- Modified fixture with overlapping case_id detects overlap.
-- Test target column is detected as high severity.
+- Modified fixture with overlapping id detects overlap.
+- Test target column is high/critical severity.
+- Group overlap is reported with contextual severity.
 - Missing id returns not_testable.
 - Tests pass.
 
 ---
 
-## 43_eda_hypothesis_evaluator
+## 43_eda_hypothesis_evaluator_generic
 
 ### Goal
 
-Evaluate every Research Scout hypothesis against collected EDA evidence.
+Evaluate Research Scout hypotheses against generic EDA evidence.
 
 ### Files to create/change
 
@@ -1006,7 +1099,7 @@ tests/eda/test_hypothesis_evaluator.py
 ### Codex prompt
 
 ```text
-Implement hypothesis_evaluator.
+Implement or refactor hypothesis_evaluator to be generic.
 
 Function:
 - evaluate_hypotheses(
@@ -1016,8 +1109,8 @@ Function:
 ) -> list[HypothesisResult]
 
 Requirements:
-- Every input hypothesis must produce exactly one HypothesisResult.
-- Support categories:
+- Every input hypothesis must produce exactly one result.
+- Supported categories:
   - schema
   - metric
   - validation
@@ -1028,39 +1121,38 @@ Requirements:
   - feature
   - notebook
   - data_quality
-- Status rules:
-  - confirmed if evidence directly supports claim.
-  - partially_confirmed if only part is supported.
-  - rejected if evidence contradicts claim.
-  - not_testable if required data/evidence is absent.
-  - skipped if related module was disabled/skipped.
-- For MVP, implement deterministic rules for:
-  - schema_001
-  - metric_001
-  - val_001
-  - leak_001
-- Generic fallback:
-  - not_testable with limitation if category cannot be evaluated.
+- Do not assume Home Credit hypothesis IDs except in fixtures.
+- For MVP, provide deterministic evaluators by category:
+  - schema -> inferred_schema evidence
+  - metric -> metric_evidence
+  - validation -> validation_evidence.primary/diagnostic policies
+  - leakage -> leakage_evidence
+- Unknown category -> not_testable with limitation.
+- skipped module -> skipped hypothesis.
 - confirmed/rejected must include evidence_refs.
 - not_testable/skipped must include limitations.
 - impact_on_strategy must be concrete.
+
+Important:
+- A validation hypothesis saying "temporal CV is required" should be confirmed only if validation evidence selected temporal validation as primary or strong diagnostic.
+- If a time column exists but temporal policy was rejected as primary, the hypothesis should be partially_confirmed or rejected depending on wording.
 ```
 
 ### Acceptance criteria
 
 - All fixture hypotheses are evaluated.
-- No hypothesis ID is missing or duplicated.
+- Binary iid validation hypothesis does not get temporal confirmation merely from date column.
 - confirmed results include evidence_refs.
 - skipped/not_testable include limitations.
 - Tests pass.
 
 ---
 
-## 44_eda_recommendations
+## 44_eda_recommendations_generic
 
 ### Goal
 
-Build evidence-backed recommended next actions for Stage 3.
+Build evidence-backed next actions without assuming temporal validation or Gini by default.
 
 ### Files to create/change
 
@@ -1072,7 +1164,7 @@ tests/eda/test_eda_recommendations.py
 ### Codex prompt
 
 ```text
-Implement recommended next actions builder.
+Implement generic recommended next actions builder.
 
 Function:
 - build_recommended_next_actions(
@@ -1081,35 +1173,44 @@ Function:
 ) -> list[RecommendedNextAction]
 
 Requirements:
-- Generate P0/P1/P2/P3 actions from confirmed or partially_confirmed evidence.
-- MVP rules:
-  - If temporal validation feasible, P0 action recommends OOT holdout + expanding CV.
-  - If metric is rank-based, P0/P1 action says use probabilities/ranks, not class labels.
-  - If leakage check warns/fails, P0 action recommends fixing or excluding unsafe feature/source.
-  - If schema has secondary tables but relationship module not run, P1 action recommends running relationship inference before aggregation features.
+- Generate actions from confirmed or partially_confirmed evidence only.
 - Every action must include:
   - priority
   - action
   - why
   - evidence_refs
-- Sort by priority.
+- Generic MVP rules:
+  - If validation policy selected StratifiedKFold -> P0 action to use stratified CV.
+  - If validation policy selected KFold -> P0 action to use KFold.
+  - If validation policy selected GroupKFold/StratifiedGroupKFold -> P0 action to respect group split.
+  - If validation policy selected temporal_holdout/expanding_window -> P0 action to use temporal validation.
+  - If metric requires probabilities -> action to output probabilities/ranks, not hard labels.
+  - If metric requires threshold -> action to tune threshold on validation only.
+  - If metric requires calibration -> action to check calibration/clipping.
+  - If metric is regression_error -> action to optimize regression loss and inspect target transform.
+  - If leakage check warns/fails -> P0 action to fix/exclude unsafe source.
+  - If secondary tables exist but relationship module not run -> P1 action to run relationship inference before aggregations.
 - Do not invent actions without evidence_refs.
+- Sort by priority.
 ```
 
 ### Acceptance criteria
 
-- Fixture produces validation and metric actions.
-- Actions are sorted P0 -> P3.
-- Every action has non-empty evidence_refs.
+- Binary iid fixture produces StratifiedKFold action.
+- Home Credit-like fixture produces temporal validation action.
+- F1 metric produces threshold tuning action.
+- LogLoss metric produces calibration action.
+- RMSE metric produces regression target/loss action.
+- Every action has evidence_refs.
 - Tests pass.
 
 ---
 
-## 45_eda_mvp_orchestrator_and_cli
+## 45_eda_mvp_orchestrator_and_cli_generic
 
 ### Goal
 
-Wire P0 EDA modules into a working local-dataset MVP that writes `eda_evidence_pack.json`.
+Wire P0 generic EDA modules into a working local-dataset MVP.
 
 ### Files to create/change
 
@@ -1124,7 +1225,7 @@ tests/eda/test_eda_cli.py
 ### Codex prompt
 
 ```text
-Implement the EDA MVP orchestrator and CLI.
+Implement the generic EDA MVP orchestrator and CLI.
 
 Function:
 - async run_eda(config: EdaRunConfig) -> EdaRunResult
@@ -1140,8 +1241,8 @@ Execution order:
 8. file_inventory
 9. schema_inferer
 10. table_profiler
-11. metric_analyzer
-12. validation_analyzer
+11. metric_analyzer using MetricRegistry
+12. validation_analyzer using ValidationPolicySelector
 13. leakage_checker
 14. write module JSON artifacts
 15. evaluate_hypotheses
@@ -1153,42 +1254,31 @@ Execution order:
 Requirements:
 - Support local dataset path mode.
 - Dataset download path may exist but tests must use local dataset.
-- Non-blocking module failures become warnings.
-- MVP modules are blocking unless fail_fast=false and partial evidence is available.
 - Write skipped placeholders for P1 modules:
   - relationship_evidence
   - drift_evidence
   - baseline_evidence
   - feature_probe_evidence
   - notebook_static_analysis
-- CLI command:
-  python -m kaggle_eda_engine.main --competition-id fixture_competition --hypotheses-path ... --task-plan-path ... --local-dataset-path ...
+- Do not assume Home Credit as default.
+- Home Credit fixture should still work through metric/preset/schema evidence.
 ```
 
 ### Acceptance criteria
 
-- Offline fixture run creates:
-  - eda_evidence_pack.json
-  - eda_summary.md
-  - file_inventory.json
-  - inferred_schema.json
-  - table_profiles.json
-  - metric_evidence.json
-  - validation_evidence.json
-  - leakage_evidence.json
-  - hypothesis_results.json
-  - recommended_next_actions.json
-- `hypothesis_results.json` includes schema_001, metric_001, val_001, leak_001.
+- Offline Home Credit-like fixture creates eda_evidence_pack.json.
+- Additional iid classification fixture selects StratifiedKFold.
+- Additional regression fixture selects KFold.
 - CLI test runs without network calls.
 - Tests pass.
 
 ---
 
-## 46_eda_relationship_inferer
+## 46_eda_relationship_inferer_generic
 
 ### Goal
 
-Infer relationships between base and secondary tables.
+Infer relationships between base and secondary tables for generic multi-table tabular competitions.
 
 ### Files to create/change
 
@@ -1211,7 +1301,7 @@ Function:
 
 Requirements:
 - Identify base_table and base_id_column.
-- For each secondary train table:
+- For each secondary train/test table:
   - find candidate join keys shared with base table.
   - compute relationship_type:
     one_to_one, one_to_many, many_to_one, many_to_many, unknown
@@ -1219,27 +1309,30 @@ Requirements:
   - compute orphan_rate_right.
   - compute avg_rows_per_left and max_rows_per_left.
   - compute row_multiplication_risk low/medium/high.
+  - detect candidate group/query/entity keys.
   - detect candidate date cutoff columns.
   - assign confidence.
-- Must not recommend direct one-to-many joins without aggregation.
+- Do not recommend direct one-to-many joins without aggregation.
+- Do not assume case_id as the only possible join key.
+- Use schema hints, sample_submission keys, and shared column patterns.
 - Must support sampled checks for large tables.
 ```
 
 ### Acceptance criteria
 
-- Fixture train_static_0 is detected as related to train_base by case_id.
-- one-to-many relationship is detected when fixture has multiple rows per case_id.
-- row_multiplication_risk is populated.
+- Home Credit fixture detects relationship by case_id.
+- Generic fixture detects relationship by customer_id/order_id.
+- one-to-many relationship is detected when multiple rows per base id exist.
 - Missing join key returns unknown relationship with warning.
 - Tests pass.
 
 ---
 
-## 47_eda_drift_analyzer
+## 47_eda_drift_analyzer_generic
 
 ### Goal
 
-Analyze period drift and train/test distribution shift.
+Analyze drift as optional evidence, not as a universal assumption.
 
 ### Files to create/change
 
@@ -1251,7 +1344,7 @@ tests/eda/test_drift_analyzer.py
 ### Codex prompt
 
 ```text
-Implement drift_analyzer module.
+Implement generic drift_analyzer.
 
 Function:
 - analyze_drift(
@@ -1263,38 +1356,36 @@ Function:
 ) -> dict
 
 Requirements:
-- Compute target drift by period when target and time exist:
-  - target_by_period
-  - slope or simple trend indicator
-  - severity
-- Compute row count by period.
+- Compute target drift by period only when target and time exist.
+- Compute row count by period when time exists.
 - Compute missingness drift train vs test for shared columns.
 - Compute numeric PSI for shared numeric columns.
-- Compute categorical shift for shared categorical columns.
+- Compute categorical distribution shift for shared categorical columns.
 - Implement adversarial validation only if sklearn is available:
   - safe features only
-  - exclude target, id, prediction columns
+  - exclude target, id, prediction, query/group columns unless explicitly allowed
   - cap rows at max_rows
-  - return AUC and top features if model supports it
-- If sklearn unavailable, return enabled=false with warning.
-- Mark sampled=true when max_rows cap is used.
+  - return AUC and top features if available
+- If no test table exists, provide train-only drift diagnostics where possible.
+- If no time columns exist, skip temporal drift with limitation.
+- Drift evidence should influence validation only later or as diagnostic, not retroactively override generic policy unless explicitly wired.
 ```
 
 ### Acceptance criteria
 
-- Fixture drift output includes target_drift and missingness_drift.
-- Artificially shifted fixture produces higher drift severity.
-- Adversarial validation can be disabled gracefully.
+- Fixture with time column returns target_drift.
+- Fixture without time column skips temporal drift with limitation.
+- Artificially shifted train/test fixture produces higher drift severity.
 - target/id columns are excluded from adversarial features.
 - Tests pass.
 
 ---
 
-## 48_eda_baseline_runner_base_table
+## 48_eda_baseline_runner_generic
 
 ### Goal
 
-Run an honest base-table-only baseline using the recommended validation policy.
+Run an honest baseline appropriate to task_type and metric family.
 
 ### Files to create/change
 
@@ -1307,7 +1398,7 @@ requirements.txt
 ### Codex prompt
 
 ```text
-Implement baseline_runner module for base-table-only baseline.
+Implement generic baseline_runner.
 
 Function:
 - run_baseline(
@@ -1327,26 +1418,27 @@ Requirements:
 - Exclude:
   - target
   - id columns
-  - time columns only if they are unsafe; otherwise allow as explicit option? For MVP, exclude raw date strings and keep numeric WEEK_NUM only if needed for fold diagnostics, not as feature.
+  - raw date strings unless encoded safely
   - prediction/sample submission columns
   - columns flagged by critical leakage checks
-- Use validation_evidence recommended holdout/folds.
+  - query/group columns when they define validation split and should not be features
+- Choose model by task_type:
+  - binary_classification -> classifier
+  - multiclass_classification -> classifier
+  - regression -> regressor
+  - ranking -> skipped/not_testable in MVP unless query-aware baseline exists
+  - survival -> skipped/not_testable in MVP
+  - forecasting_tabular -> simple time-aware baseline later; skipped in MVP if unsupported
 - Model preference:
-  - LightGBMClassifier if lightgbm installed.
-  - fallback to sklearn HistGradientBoostingClassifier.
-  - fallback to LogisticRegression if needed.
+  - LightGBM if installed.
+  - sklearn HistGradientBoostingClassifier/Regressor fallback.
+  - LogisticRegression/LinearRegression fallback if needed.
 - Basic preprocessing:
   - numeric fill missing
-  - categorical one-hot or ordinal encoding with safe train-only fit
-- Compute:
-  - overall metric
-  - base Gini/AUC where applicable
-  - per-period metric where applicable
-  - feature importance if available
-- Write artifacts:
-  - artifacts/baseline/fold_metrics.csv
-  - artifacts/baseline/feature_importance.csv
-  - artifacts/baseline/oof_predictions.parquet or csv
+  - categorical encoding fit on train fold only
+- Use validation_evidence selected policy.
+- Compute metric using MetricRegistry/local metric when available.
+- If local metric unavailable, train baseline can still run but metric is skipped with warning.
 - Do not train on test.
 - Do not use target encoding.
 - Do not optimize leaderboard score.
@@ -1354,19 +1446,20 @@ Requirements:
 
 ### Acceptance criteria
 
-- Fixture baseline runs with fallback model.
-- Metrics are written to artifacts/baseline.
+- Binary classification fixture baseline runs.
+- Regression fixture baseline runs.
+- Ranking/survival fixture returns skipped/not_testable, not failure.
 - target/id columns are not in feature list.
-- Baseline uses temporal holdout when available.
+- Baseline uses selected validation policy.
 - Tests pass without requiring LightGBM.
 
 ---
 
-## 49_eda_feature_probe
+## 49_eda_feature_probe_generic
 
 ### Goal
 
-Assess which feature families are promising and safe to build first.
+Assess promising feature families across generic tabular tasks.
 
 ### Files to create/change
 
@@ -1378,7 +1471,7 @@ tests/eda/test_feature_probe.py
 ### Codex prompt
 
 ```text
-Implement feature_probe module.
+Implement generic feature_probe module.
 
 Function:
 - probe_feature_families(
@@ -1387,9 +1480,10 @@ Function:
     relationship_evidence: dict,
     leakage_evidence: list[LeakageCheckResult],
     baseline_evidence: dict,
+    metric_evidence: dict | None = None,
 ) -> list[dict]
 
-Feature families to evaluate:
+Feature families:
 - base_numeric_features
 - base_categorical_features
 - missingness_indicators
@@ -1397,33 +1491,39 @@ Feature families to evaluate:
 - secondary_table_aggregations
 - high_cardinality_encoding
 - target_encoding_or_woe
+- monotonic_or_binning_features
+- ranking_group_features
+- regression_target_transform
 
 Requirements:
-- Return for each family:
+- Return:
   - feature_family
   - status: high_potential|medium_potential|low_potential|unsafe|not_testable
   - leakage_risk: low|medium|high
   - evidence
   - recommendation
-- Mark target_encoding_or_woe as high leakage risk unless OOF/temporal encoding policy exists.
-- Mark secondary_table_aggregations high/medium potential only when relationships are known.
+- Target encoding / WoE is high leakage risk unless OOF/group/time-safe policy exists.
+- Secondary aggregations need relationship evidence.
+- Regression target transform is relevant only for regression metrics such as RMSLE/RMSE with skewed target.
+- Ranking group features are relevant only for ranking tasks.
 - Do not generate actual feature engineering code.
 ```
 
 ### Acceptance criteria
 
-- Fixture returns secondary_table_aggregations as not_testable before relationship evidence.
-- With relationship evidence, secondary_table_aggregations becomes medium/high potential.
-- target_encoding_or_woe is high leakage risk.
+- Secondary aggregations are not_testable before relationship evidence.
+- With relationship evidence, secondary aggregations become medium/high potential.
+- Target encoding is high leakage risk.
+- Regression fixture can recommend target transform if target is skewed.
 - Tests pass.
 
 ---
 
-## 50_eda_notebook_static_analysis
+## 50_eda_notebook_static_analysis_generic
 
 ### Goal
 
-Statically extract CV/model/feature patterns from collected notebook source text without executing notebooks.
+Statically extract patterns from notebook source text without executing notebooks.
 
 ### Files to create/change
 
@@ -1435,7 +1535,7 @@ tests/eda/test_notebook_static_analyzer.py
 ### Codex prompt
 
 ```text
-Implement notebook_static_analyzer.
+Implement generic notebook_static_analyzer.
 
 Function:
 - analyze_notebooks_static(
@@ -1454,34 +1554,38 @@ Requirements:
   - postprocessing
   - suspicious_leaderboard_overfit_patterns
 - Detect common strings:
+  - KFold
   - StratifiedKFold
   - GroupKFold
   - StratifiedGroupKFold
   - TimeSeriesSplit
-  - WEEK_NUM
   - LightGBM, CatBoost, XGBoost
   - target encoding
   - adversarial validation
   - rank averaging
   - clipping
-- Return warnings when notebooks use non-temporal CV in temporal/stability tasks.
+  - threshold tuning
+  - logloss calibration
+  - RMSLE target transform
+  - QWK threshold optimization
 - Notebook scores are observations, not truth.
+- Warnings should be contextual to task/metric when available.
 ```
 
 ### Acceptance criteria
 
-- Static fixture notebook text detects model and CV patterns.
+- Static fixture detects model and CV patterns.
 - No code execution occurs.
-- Warnings are produced for risky CV pattern.
+- Metric-specific patterns are extracted.
 - Tests pass.
 
 ---
 
-## 51_eda_p1_orchestrator_wiring
+## 51_eda_p1_orchestrator_wiring_generic
 
 ### Goal
 
-Wire optional P1 modules into the EDA orchestrator and CLI.
+Wire optional P1 modules into the EDA orchestrator without making them mandatory.
 
 ### Files to create/change
 
@@ -1513,13 +1617,9 @@ Requirements:
   - write module JSON with status=failed/skipped
   - add warning
   - continue run
-- Update EdaEvidencePack fields:
-  - relationship_evidence
-  - drift_evidence
-  - baseline_evidence
-  - feature_probe_evidence
-  - notebook_static_analysis
+- Update EdaEvidencePack fields.
 - Update eda_summary.md with P1 sections when available.
+- P1 modules must respect generic task_type and metric_evidence.
 ```
 
 ### Acceptance criteria
@@ -1532,11 +1632,11 @@ Requirements:
 
 ---
 
-## 52_eda_p1_hypothesis_and_recommendation_rules
+## 52_eda_p1_hypothesis_and_recommendation_rules_generic
 
 ### Goal
 
-Extend hypothesis evaluation and recommendations to use P1 evidence.
+Extend hypothesis evaluation and recommendations to use generic P1 evidence.
 
 ### Files to create/change
 
@@ -1552,28 +1652,32 @@ tests/eda/test_eda_recommendations_p1.py
 ```text
 Extend hypothesis evaluator and recommended actions for P1 evidence.
 
-Add deterministic evaluation rules for:
-- relationship hypotheses:
+Rules:
+- Relationship hypotheses:
   - confirmed when join keys and coverage are found.
   - partially_confirmed when only weak candidate keys exist.
-- drift hypotheses:
-  - confirmed when drift severity is medium/high.
+- Drift hypotheses:
+  - confirmed when drift severity is medium/high for relevant drift type.
   - rejected when drift checks show stable distributions.
   - not_testable when test/shared columns unavailable.
-- baseline hypotheses:
-  - confirmed when honest baseline completed.
+- Baseline hypotheses:
+  - confirmed when honest baseline completed for supported task_type.
   - skipped when baseline disabled.
-- feature hypotheses:
+  - not_testable for unsupported task types.
+- Feature hypotheses:
   - confirmed or partially_confirmed from feature_probe statuses.
-- notebook hypotheses:
+- Notebook hypotheses:
   - confirmed only as "pattern observed", not as factual performance proof.
 
-Extend recommendations:
-- relationship one-to-many -> aggregate before join.
-- high drift -> trust temporal CV over random CV/public LB.
+Recommendations:
+- one-to-many relationship -> aggregate before join.
+- high drift -> use selected robust validation and avoid public LB overfitting.
 - baseline complete -> use as sanity floor, not final solution.
 - high-potential feature family -> prioritize P1/P2 experiment.
 - risky notebook pattern -> audit before copying.
+- threshold-sensitive metric -> validate threshold tuning policy.
+- calibration-sensitive metric -> check calibration/clipping.
+- regression skew -> consider target transform if evidence supports it.
 ```
 
 ### Acceptance criteria
@@ -1582,15 +1686,16 @@ Extend recommendations:
 - Baseline disabled produces skipped, not failure.
 - Drift recommendation cites drift evidence.
 - Relationship recommendation cites relationship evidence.
+- Metric-specific recommendations cite metric evidence.
 - Tests pass.
 
 ---
 
-## 53_research_scout_schemas
+## 53_research_scout_schemas_generic
 
 ### Goal
 
-Define schemas for Research Scout outputs that feed EDA Engine.
+Define schemas for Research Scout outputs that feed the generic EDA Engine.
 
 ### Files to create/change
 
@@ -1606,7 +1711,7 @@ tests/test_research_scout_schemas.py
 ### Codex prompt
 
 ```text
-Create research_scout schemas.
+Create or update research_scout schemas.
 
 Models:
 - ResearchScoutOutput
@@ -1645,22 +1750,27 @@ Requirements:
   - val_001
   - leak_001
   - drift_001
+
+Important:
+- Do not assume temporal validation by default.
+- Do not assume Home Credit column names.
+- Hypotheses must be generic first, competition-specific second.
 ```
 
 ### Acceptance criteria
 
 - Research Scout output validates.
 - Generated EDA input JSON validates against EDA schemas.
-- Invalid hypothesis status/category fails validation.
+- Invalid hypothesis category/status fails validation.
 - Tests pass.
 
 ---
 
-## 54_research_scout_reasoner
+## 54_research_scout_reasoner_generic
 
 ### Goal
 
-Implement the Research Scout reasoning module that generates EDA hypotheses from retrieved sources.
+Implement the Research Scout reasoning module that generates generic EDA hypotheses from retrieved sources.
 
 ### Files to create/change
 
@@ -1672,7 +1782,7 @@ tests/test_research_scout.py
 ### Codex prompt
 
 ```text
-Implement Research Scout.
+Implement or update Research Scout.
 
 Function:
 - async run_research_scout(
@@ -1697,6 +1807,10 @@ Requirements:
   - avoid claiming EDA has already run.
   - require expected_eda_checks for every hypothesis.
   - prioritize P0 blocking checks for schema/metric/validation/leakage.
+  - infer task_type and metric from plan_data.
+  - generate generic tabular hypotheses first.
+  - generate temporal validation hypotheses only if metric/source/description supports them.
+  - generate group validation hypotheses only if group/entity/query risk is plausible.
 - Must include at least:
   - schema_001
   - metric_001
@@ -1704,12 +1818,15 @@ Requirements:
   - leak_001
 - Validate output against research_scout schemas and EDA schemas.
 - On LLM failure, provide deterministic fallback from PlanData.
+
+Do not automatically create "temporal validation is required" for every tabular task.
 ```
 
 ### Acceptance criteria
 
 - Mock LLM response validates and writes expected objects.
 - Fallback output includes P0 hypotheses.
+- Ordinary binary classification fallback does not force temporal validation.
 - Every hypothesis has expected_eda_checks.
 - Tests pass.
 
@@ -1745,6 +1862,7 @@ Requirements:
 - research_run.json should include paths to these files.
 - Existing behavior without --write-eda-plan should remain unchanged.
 - Do not run EDA Engine from run_research in this task.
+- Scout output must use generic task_type/metric/validation wording.
 ```
 
 ### Acceptance criteria
@@ -1756,11 +1874,11 @@ Requirements:
 
 ---
 
-## 56_final_synthesizer_schema
+## 56_final_synthesizer_schema_generic
 
 ### Goal
 
-Define a structured contract for final strategy synthesis that can consume EDA evidence.
+Define a structured contract for final strategy synthesis that can consume generic EDA evidence.
 
 ### Files to create/change
 
@@ -1772,7 +1890,7 @@ tests/test_final_synthesizer_schema.py
 ### Codex prompt
 
 ```text
-Create final_synthesizer contract.
+Create or update final_synthesizer contract.
 
 Models or typed dicts:
 - FinalStrategyResult
@@ -1801,6 +1919,13 @@ Requirements:
   - evidence_refs
   - related_hypothesis_ids
 - Do not implement LLM call yet; add schema and placeholder only.
+- The schema must support generic tabular outcomes:
+  - stratified CV
+  - KFold
+  - group CV
+  - temporal CV
+  - ranking group CV
+  - custom validation required
 ```
 
 ### Acceptance criteria
@@ -1812,11 +1937,11 @@ Requirements:
 
 ---
 
-## 57_final_synthesizer_reasoner
+## 57_final_synthesizer_reasoner_generic
 
 ### Goal
 
-Implement the final strategy synthesizer that combines retrieved sources and EDA evidence.
+Implement the final strategy synthesizer that combines retrieved sources and generic EDA evidence.
 
 ### Files to create/change
 
@@ -1851,6 +1976,7 @@ Requirements:
   - no claim that notebooks were executed.
   - no claim that baseline is final solution.
   - link every important recommendation to EDA evidence_refs.
+  - respect validation_evidence.primary_validation.
 - Output sections:
   - executive_summary
   - metric_and_validation
@@ -1863,6 +1989,8 @@ Requirements:
   - experiments_queue
   - what_not_to_do
   - first_48_hours
+- If EDA selected StratifiedKFold, do not override it with temporal CV.
+- If temporal validation is diagnostic only, state that clearly.
 - If EDA evidence is missing for a claim, mark it as hypothesis or limitation.
 ```
 
@@ -1871,11 +1999,12 @@ Requirements:
 - Mock LLM response validates into FinalStrategyResult.
 - Recommendations include evidence_refs.
 - Prompt includes source -> hypothesis -> EDA -> strategy rule.
+- Prompt includes "respect validation_evidence.primary_validation".
 - Tests pass.
 
 ---
 
-## 58_full_research_to_eda_to_strategy_cli
+## 58_full_research_to_eda_to_strategy_cli_generic
 
 ### Goal
 
@@ -1914,6 +2043,7 @@ Behavior:
   - write final_strategy.json/md/docx where practical.
 - All external calls must be mockable.
 - Default tests must use local fixture dataset and mocked DeepSeek.
+- The workflow must work for generic tabular fixtures, not only Home Credit.
 ```
 
 ### Acceptance criteria
@@ -1930,7 +2060,7 @@ Behavior:
 
 ---
 
-## 59_eda_quality_gates
+## 59_eda_quality_gates_generic
 
 ### Goal
 
@@ -1965,6 +2095,7 @@ Checks:
   - "probably confirmed" without evidence
   - "leakage found" unless leakage check status failed with evidence
   - "baseline proves final solution"
+  - "temporal validation is required" when validation_evidence selected another primary policy
 ```
 
 ### Acceptance criteria
@@ -1972,6 +2103,7 @@ Checks:
 - Missing hypothesis result creates warning.
 - Broken evidence_ref creates warning.
 - Empty action evidence_refs creates warning.
+- Temporal overclaim creates warning.
 - Quality functions return warnings, not exceptions.
 - Tests pass.
 
@@ -2010,6 +2142,7 @@ Requirements:
   - sampled=true
   - sample_rows
   - limitation/warning
+- Sampling behavior must be generic and task-independent.
 - Do not use OS-specific memory APIs unless optional.
 ```
 
@@ -2057,7 +2190,10 @@ Requirements:
   - write partial evidence_pack if possible
   - fail run unless fail_fast=false and fallback output exists
 - EdaRunResult should include module_statuses.
-- All exceptions should be sanitized: no secrets, no huge stack traces in JSON by default.
+- All exceptions should be sanitized:
+  - no secrets
+  - no huge stack traces in JSON by default
+- Partial packs must not contain unsupported conclusions.
 ```
 
 ### Acceptance criteria
@@ -2069,7 +2205,7 @@ Requirements:
 
 ---
 
-## 62_eda_summary_generator
+## 62_eda_summary_generator_generic
 
 ### Goal
 
@@ -2111,6 +2247,8 @@ Requirements:
 - Include evidence_refs in bullet text where useful.
 - Mark skipped/not_testable clearly.
 - Do not add strategy beyond recommended_next_actions.
+- Do not overstate temporal validation.
+- If temporal validation is diagnostic, call it diagnostic.
 - Replace existing inline summary creation in orchestrator with this function.
 ```
 
@@ -2119,41 +2257,52 @@ Requirements:
 - Summary contains all required sections.
 - Summary does not mention modules that are absent except as skipped/not_testable.
 - Warnings and limitations are included.
+- Summary respects validation_evidence.primary_validation.
 - Tests pass.
 
 ---
 
-## 63_eda_integration_fixture_full_p1
+## 63_eda_integration_fixture_full_p1_generic
 
 ### Goal
 
-Add an offline integration test that runs MVP + P1 modules on fixture data.
+Add offline integration tests that run MVP + P1 modules on generic fixture data.
 
 ### Files to create/change
 
 ```text
 tests/eda/test_eda_integration_full_p1.py
-tests/fixtures/eda/home_credit_tiny/
+tests/fixtures/eda/
 ```
 
 ### Codex prompt
 
 ```text
-Add full offline EDA integration test.
+Add full offline EDA integration tests.
+
+Fixtures:
+- home_credit_tiny
+- iid_binary_tiny
+- regression_tiny
+- grouped_binary_tiny
 
 Requirements:
-- Use home_credit_tiny fixture.
-- Run:
+- Run home_credit_tiny with:
   - MVP modules
   - relationship_inferer
   - drift_analyzer
   - feature_probe
+- Run iid_binary_tiny and verify:
+  - primary validation is StratifiedKFold
+  - temporal validation is not forced
+- Run regression_tiny and verify:
+  - primary validation is KFold
+  - regression metric evidence is used
+- Run grouped_binary_tiny and verify:
+  - group-aware validation is selected
 - Do not require baseline unless fallback sklearn model is available and test is stable.
 - Validate:
   - eda_evidence_pack.json exists.
-  - relationship_evidence has relationships.
-  - drift_evidence has target_drift.
-  - feature_probe_evidence is non-empty.
   - hypothesis_results cover all input hypotheses.
   - recommended_next_actions is non-empty.
   - quality gates return no critical warnings.
@@ -2161,18 +2310,19 @@ Requirements:
 
 ### Acceptance criteria
 
-- Test runs offline.
-- Test does not require Kaggle credentials.
-- Test does not require DeepSeek.
-- Test passes in CI.
+- Tests run offline.
+- Tests do not require Kaggle credentials.
+- Tests do not require DeepSeek.
+- Tests prove generic tabular behavior, not only Home Credit behavior.
+- Tests pass in CI.
 
 ---
 
-## 64_eda_production_cli_docs
+## 64_eda_production_cli_docs_generic
 
 ### Goal
 
-Document practical commands and expected outputs for EDA Engine production use.
+Document practical commands and expected outputs for generic EDA Engine production use.
 
 ### Files to create/change
 
@@ -2210,6 +2360,13 @@ Document safety notes:
 - Notebook execution is never performed.
 - Baseline is sanity check, not final score optimization.
 - Large datasets may be sampled and sampled=true must be respected.
+
+Document generic tabular behavior:
+- ordinary classification can use StratifiedKFold.
+- ordinary regression can use KFold.
+- grouped tasks can use group-aware validation.
+- temporal validation is used only when evidence supports it.
+- Gini Stability is supported but not the default worldview.
 ```
 
 ### Acceptance criteria
@@ -2218,34 +2375,35 @@ Document safety notes:
 - RUNBOOK has copy-pasteable commands.
 - Docs mention local dataset mode.
 - Docs mention no notebook execution.
+- Docs mention generic tabular validation behavior.
 - No tests required unless docs lint exists.
 
 ---
 
-# Recommended Codex usage pattern for EDA tasks
+# Recommended Codex steering prompt before Task 40
 
-For each EDA task, use a prompt like this:
+Use this prompt before continuing:
 
 ```text
-Use docs/SPEC.md, docs/EDA_ENGINE_SPEC.md, and docs/CODEX_TASKS.md as the source of truth.
-Implement only task <TASK_ID>.
-Do not implement later tasks.
-For tasks 28+, data execution is allowed only inside kaggle_researcher/eda and kaggle_eda_engine.
-Do not execute Kaggle notebooks.
-Keep the change small and add tests.
-```
+Do not continue with the old task 40+ wording.
 
-After each task:
+We have replaced Task 39 with a generic MetricRegistry.
 
-```powershell
-E:\wavebreaker\.venv-win\Scripts\python.exe -m pytest tests/eda
-E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_eda_engine.main --help
-```
+From Task 40 onward, use docs/EDA_ENGINE_CODEX_TASKS_40_PLUS_GENERIC.md as the source of truth.
 
-For full regression:
+Important:
+- A time column alone must never force temporal validation.
+- Gini Stability is supported, but it is only one metric registry entry.
+- Home Credit-specific behavior must come from metric/preset/schema evidence, not from global defaults.
+- Implement only the next requested task.
+- Do not implement future tasks.
+- Do not execute Kaggle notebooks.
 
-```powershell
-E:\wavebreaker\.venv-win\Scripts\python.exe -m pytest
-E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_researcher.main --help
-E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_eda_engine.main --help
+Use the project-local Windows virtual environment:
+
+E:\wavebreaker\.venv-win\Scripts\python.exe
+
+Run tests with:
+
+E:\wavebreaker\.venv-win\Scripts\python.exe -m pytest tests/eda -q
 ```

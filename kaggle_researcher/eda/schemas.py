@@ -305,14 +305,25 @@ class TableProfile(BaseModel):
 
 class MetricEvidence(BaseModel):
     metric_name: str
+    normalized_metric_name: str | None = None
+    task_type: str | None = None
+    metric_family: str | None = None
     base_metric: str | None = None
+    greater_is_better: bool | None = None
 
     requires_probabilities: bool | None = None
+    requires_threshold: bool | None = None
+    requires_calibration: bool | None = None
+    requires_groups: bool | None = None
+    requires_time: bool | None = None
+    requires_query_groups: bool | None = None
     rank_based: bool | None = None
     requires_time_or_groups: bool | None = None
     local_metric_available: bool = False
+    needs_custom_implementation: bool = False
 
     threshold_search_needed: bool | None = None
+    prediction_output_type: str | None = None
     tie_sensitivity: TieSensitivity | None = None
 
     components: dict[str, Any] = Field(default_factory=dict)
