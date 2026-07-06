@@ -16,9 +16,14 @@ from kaggle_researcher.research_scout import (
     build_research_hypotheses,
     build_research_scout_summary,
     cleanup_generic_eda_tasks,
+    correct_hypothesis_categories,
     enforce_scout_validation_policy,
+    enforce_stratified_groupkfold_caveat,
     ensure_task_ids,
+    expand_verification_steps,
+    is_generic_verification_text,
     normalize_research_hypotheses,
+    relink_eda_tasks,
     split_recommended_sequences,
     split_eda_task_plan,
     validate_research_hypotheses,
@@ -27,6 +32,8 @@ from kaggle_researcher.research_scout_schemas import (
     EdaTask,
     ResearchHypothesesPayload,
     ResearchHypothesis,
+    ScoutFinding,
+    VerificationStep,
 )
 from kaggle_researcher.schemas import PlanData, RetrievedDocument, SourceDocument
 
@@ -46,6 +53,30 @@ def complete_payload() -> dict[str, Any]:
             "domain": "tabular_credit_risk",
         }
     )
+
+
+def minimal_hypothesis(
+    hypothesis_id: str,
+    category: str,
+    claim: str,
+    *,
+    priority: str = "P1",
+    how_to_verify: list[str] | None = None,
+    verification_steps: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": hypothesis_id,
+        "category": category,
+        "priority": priority,
+        "claim": claim,
+        "why_it_matters": "This affects validation, feature work, or model selection.",
+        "how_to_verify": how_to_verify or ["Check the relevant evidence on the real train/test files."],
+        "verification_steps": verification_steps or [],
+        "expected_evidence_keys": ["evidence.result"],
+        "provenance": ["heuristic", "not_verified_on_data"],
+        "confidence": "medium",
+        "status": "needs_eda",
+    }
 
 
 def test_research_hypothesis_schema_valid() -> None:
@@ -576,6 +607,389 @@ def test_research_scout_integration_lite_normalizes_unsafe_response() -> None:
     assert len([task for task in normalized["eda_tasks"] if task["id"] == "eda_profile_global"]) == 1
     assert any(item["supporting_source_ids"] for item in normalized["hypotheses"])
     assert normalized["recommended_eda_sequence"] == normalized["recommended_module_sequence"]
+
+
+def test_verification_step_schema_valid() -> None:
+    step = VerificationStep(
+        id="verify_val_001_time_columns",
+        module="schema_inferer",
+        operation="identify_time_columns",
+        question="Which columns can define chronological validation splits?",
+        outputs=["inferred_schema.global_roles.candidate_time_columns"],
+        success_criteria=["At least one reliable time column exists."],
+    )
+
+    assert step.module == "schema_inferer"
+
+
+def test_verification_step_rejects_empty_id() -> None:
+    with pytest.raises(ValidationError):
+        VerificationStep(
+            id="",
+            module="schema_inferer",
+            operation="identify_time_columns",
+            question="Which columns can define chronological validation splits?",
+            outputs=["inferred_schema.global_roles.candidate_time_columns"],
+        )
+
+
+def test_research_hypothesis_accepts_verification_steps() -> None:
+    hypothesis = ResearchHypothesis(
+        id="val_001",
+        category="validation",
+        priority="P0",
+        claim="Use strict temporal validation.",
+        why_it_matters="Temporal validation controls model selection.",
+        how_to_verify=["Identify time columns."],
+        verification_steps=[
+            VerificationStep(
+                id="verify_val_001_time_columns",
+                module="schema_inferer",
+                operation="identify_time_columns",
+                question="Which columns can define chronological validation splits?",
+                outputs=["inferred_schema.global_roles.candidate_time_columns"],
+                success_criteria=["A time column exists."],
+            )
+        ],
+        expected_evidence_keys=["inferred_schema.global_roles.candidate_time_columns"],
+        provenance=["heuristic", "not_verified_on_data"],
+    )
+
+    assert hypothesis.verification_steps[0].operation == "identify_time_columns"
+
+
+def test_expand_verification_steps_adds_validation_steps() -> None:
+    payload = {
+        "hypotheses": [
+            minimal_hypothesis(
+                "val_001",
+                "validation",
+                "Primary validation should use out-of-time and rolling temporal CV with WEEK_NUM.",
+                priority="P0",
+            )
+        ],
+        "eda_tasks": [{"id": "eda_val_001", "module": "validation_analyzer"}],
+    }
+
+    expanded = expand_verification_steps(payload)
+    outputs = {
+        output
+        for step in expanded["hypotheses"][0]["verification_steps"]
+        for output in step["outputs"]
+    }
+
+    assert "validation_evidence.oot_holdout" in outputs
+    assert "validation_evidence.temporal_folds" in outputs
+
+
+def test_expand_verification_steps_adds_drift_steps_for_default_rate_over_time() -> None:
+    expanded = expand_verification_steps(
+        {"hypotheses": [minimal_hypothesis("drift_001", "drift", "Default rate changes over time by WEEK_NUM.")]}
+    )
+    outputs = {output for step in expanded["hypotheses"][0]["verification_steps"] for output in step["outputs"]}
+
+    assert "validation_evidence.target_by_period" in outputs
+    assert "drift_evidence.adversarial_auc" in outputs
+
+
+def test_expand_verification_steps_adds_metric_steps_for_residual_std() -> None:
+    expanded = expand_verification_steps(
+        {"hypotheses": [minimal_hypothesis("metric_001", "metric", "Residual std penalty affects Gini stability.")]}
+    )
+    outputs = {output for step in expanded["hypotheses"][0]["verification_steps"] for output in step["outputs"]}
+
+    assert "metric_evidence.weekly_components" in outputs
+    assert "baseline_evidence.metric_components" in outputs
+
+
+def test_expand_verification_steps_derives_how_to_verify() -> None:
+    expanded = expand_verification_steps(
+        {"hypotheses": [minimal_hypothesis("leak_001", "leakage", "Check future-information leakage.")]}
+    )
+
+    assert "check the relevant evidence" not in " ".join(expanded["hypotheses"][0]["how_to_verify"]).lower()
+    assert expanded["hypotheses"][0]["verification_steps"]
+
+
+def test_is_generic_verification_text_detects_generic_phrase() -> None:
+    assert is_generic_verification_text("Check the dataset.")
+    assert not is_generic_verification_text("Check table_profiles.missingness for columns above 95%.")
+
+
+def test_validator_rejects_generic_how_to_verify_without_steps() -> None:
+    payload = complete_payload()
+    target = payload["hypotheses"][0]
+    target["how_to_verify"] = ["Check the dataset."]
+    target["verification_steps"] = []
+
+    with pytest.raises(ValueError, match="generic how_to_verify"):
+        validate_research_hypotheses(payload)
+
+
+def test_validator_accepts_generic_how_to_verify_when_structured_steps_exist_and_rewrites_legacy_text() -> None:
+    payload = normalize_research_hypotheses(
+        {
+            "competition_id": "comp",
+            "competition_desc": "Metric gini stability with WEEK_NUM.",
+            "task_type": "binary_classification",
+            "metric": {"name": "gini_stability"},
+            "hypotheses": [
+                minimal_hypothesis("val_001", "validation", "Primary validation should use out-of-time plus rolling temporal CV.", priority="P0")
+            ],
+        }
+    )
+
+    validate_research_hypotheses(payload)
+    val = next(item for item in payload["hypotheses"] if item["id"] == "val_001")
+    assert not any(is_generic_verification_text(text) for text in val["how_to_verify"])
+
+
+def test_category_correction_default_rate_to_drift() -> None:
+    result = correct_hypothesis_categories(
+        {"hypotheses": [minimal_hypothesis("feat_001", "feature_engineering", "Default rate changes over time by WEEK_NUM.")], "eda_tasks": []}
+    )
+
+    assert result["hypotheses"][0]["category"] == "drift"
+    assert result["hypotheses"][0]["id"] == "drift_001"
+
+
+def test_category_correction_covariate_shift_to_drift() -> None:
+    result = correct_hypothesis_categories(
+        {"hypotheses": [minimal_hypothesis("feat_002", "feature_engineering", "Covariate shift may separate train/test rows.")], "eda_tasks": []}
+    )
+
+    assert result["hypotheses"][0]["category"] == "drift"
+
+
+def test_category_correction_residual_std_to_metric() -> None:
+    result = correct_hypothesis_categories(
+        {"hypotheses": [minimal_hypothesis("feat_005", "feature_engineering", "Residual std penalty drives the metric.")], "eda_tasks": []}
+    )
+
+    assert result["hypotheses"][0]["category"] == "metric"
+
+
+def test_category_correction_prediction_ties_to_metric() -> None:
+    result = correct_hypothesis_categories(
+        {"hypotheses": [minimal_hypothesis("feat_006", "feature_engineering", "Prediction ties can change rank-based scoring.")], "eda_tasks": []}
+    )
+
+    assert result["hypotheses"][0]["category"] == "metric"
+
+
+def test_category_correction_high_missing_to_dataset_schema() -> None:
+    result = correct_hypothesis_categories(
+        {"hypotheses": [minimal_hypothesis("feat_007", "feature_engineering", "High missing rates above >95% missing require schema profiling.")], "eda_tasks": []}
+    )
+
+    assert result["hypotheses"][0]["category"] == "dataset_schema"
+
+
+def test_category_correction_updates_task_links() -> None:
+    result = correct_hypothesis_categories(
+        {
+            "hypotheses": [minimal_hypothesis("feat_001", "feature_engineering", "Default rate changes over time by WEEK_NUM.")],
+            "eda_tasks": [{"id": "eda_feat_001", "module": "feature_probe", "related_hypothesis_ids": ["feat_001"]}],
+        }
+    )
+
+    assert result["eda_tasks"][0]["related_hypothesis_ids"] == ["drift_001"]
+
+
+def test_category_correction_records_migration_map() -> None:
+    result = correct_hypothesis_categories(
+        {"hypotheses": [minimal_hypothesis("feat_001", "feature_engineering", "Default rate changes over time by WEEK_NUM.")], "eda_tasks": []}
+    )
+
+    assert result["category_corrections"][0]["old_id"] == "feat_001"
+    assert result["category_corrections"][0]["new_id"] == "drift_001"
+
+
+def test_structured_findings_schema_valid() -> None:
+    finding = ScoutFinding(
+        id="finding_001",
+        finding_type="observed_in_sources",
+        claim="Top notebooks use grouped validation by WEEK_NUM.",
+        caveat="Use only as diagnostic.",
+        provenance=["kaggle"],
+    )
+
+    assert finding.finding_type == "observed_in_sources"
+
+
+def test_legacy_scout_findings_generated_from_structured() -> None:
+    payload = normalize_research_hypotheses(
+        {
+            "competition_id": "comp",
+            "competition_desc": "Metric gini stability with WEEK_NUM.",
+            "task_type": "binary_classification",
+            "metric": {"name": "gini_stability"},
+            "structured_findings": [
+                {
+                    "id": "finding_001",
+                    "finding_type": "warning",
+                    "claim": "Public leaderboard may be noisy over time.",
+                    "provenance": ["heuristic"],
+                }
+            ],
+        }
+    )
+
+    assert payload["scout_findings"][0].startswith("warning: Public leaderboard")
+
+
+def test_findings_grouped_in_summary() -> None:
+    summary = build_research_scout_summary(complete_payload())
+
+    assert "## Structured findings" in summary
+    assert "### Observed in sources" in summary
+    assert "### Caveats" in summary
+
+
+def test_enforce_stratified_groupkfold_caveat_adds_caveat_finding() -> None:
+    payload = enforce_stratified_groupkfold_caveat(
+        {
+            "competition_desc": "Gini stability over WEEK_NUM.",
+            "metric": {"name": "gini_stability"},
+            "hypotheses": [minimal_hypothesis("val_001", "validation", "StratifiedGroupKFold is the primary validation.", priority="P0")],
+            "structured_findings": [],
+            "eda_tasks": [],
+        }
+    )
+
+    assert any(item["id"] == "caveat_stratified_groupkfold_temporal" for item in payload["structured_findings"])
+
+
+def test_enforce_stratified_groupkfold_caveat_rewrites_recommendation_to_observed() -> None:
+    payload = enforce_stratified_groupkfold_caveat(
+        {
+            "competition_desc": "Gini stability over WEEK_NUM.",
+            "metric": {"name": "gini_stability"},
+            "hypotheses": [minimal_hypothesis("val_001", "validation", "Use out-of-time plus rolling temporal CV.", priority="P0")],
+            "structured_findings": [
+                {
+                    "id": "finding_001",
+                    "finding_type": "recommendation",
+                    "claim": "Use StratifiedGroupKFold with WEEK_NUM.",
+                    "provenance": ["kaggle"],
+                }
+            ],
+            "eda_tasks": [],
+        }
+    )
+
+    finding = next(item for item in payload["structured_findings"] if item["id"] == "finding_001")
+    assert finding["finding_type"] == "observed_in_sources"
+    assert "not sufficient as primary temporal validation" in finding["caveat"]
+
+
+def test_enforce_stratified_groupkfold_caveat_keeps_temporal_validation_primary() -> None:
+    payload = enforce_stratified_groupkfold_caveat(
+        {
+            "competition_desc": "Gini stability over WEEK_NUM.",
+            "metric": {"name": "gini_stability"},
+            "hypotheses": [minimal_hypothesis("val_001", "validation", "StratifiedGroupKFold is the primary validation.", priority="P0")],
+            "eda_tasks": [],
+        }
+    )
+
+    claim = payload["hypotheses"][0]["claim"]
+    assert "out-of-time holdout" in claim
+    assert "secondary diagnostic" in claim
+
+
+def test_relink_eda_tasks_links_drift_hypotheses_to_drift_task() -> None:
+    payload = relink_eda_tasks({"hypotheses": [minimal_hypothesis("drift_001", "drift", "Default rate drift.")], "eda_tasks": []})
+
+    task = next(task for task in payload["eda_tasks"] if task["module"] == "drift_analyzer")
+    assert "drift_001" in task["related_hypothesis_ids"]
+
+
+def test_relink_eda_tasks_links_metric_hypotheses_to_metric_task() -> None:
+    payload = relink_eda_tasks({"hypotheses": [minimal_hypothesis("metric_001", "metric", "Residual std penalty.")], "eda_tasks": []})
+
+    task = next(task for task in payload["eda_tasks"] if task["module"] == "metric_analyzer")
+    assert "metric_001" in task["related_hypothesis_ids"]
+
+
+def test_relink_eda_tasks_links_schema_hypotheses_to_schema_or_profile_tasks() -> None:
+    payload = relink_eda_tasks({"hypotheses": [minimal_hypothesis("schema_001", "dataset_schema", "High missing rates.")], "eda_tasks": []})
+
+    schema_task = next(task for task in payload["eda_tasks"] if task["module"] == "schema_inferer")
+    profile_task = next(task for task in payload["eda_tasks"] if task["module"] == "table_profiler")
+    assert "schema_001" in schema_task["related_hypothesis_ids"]
+    assert "schema_001" in profile_task["related_hypothesis_ids"]
+
+
+def test_relink_eda_tasks_keeps_feature_task_feature_only() -> None:
+    payload = relink_eda_tasks(
+        {
+            "hypotheses": [
+                minimal_hypothesis("feat_001", "feature_engineering", "Feature family lift."),
+                minimal_hypothesis("drift_001", "drift", "Default rate drift."),
+            ],
+            "eda_tasks": [],
+        }
+    )
+
+    feature_task = next(task for task in payload["eda_tasks"] if task["module"] == "feature_probe")
+    assert feature_task["related_hypothesis_ids"] == ["feat_001"]
+
+
+def test_research_scout_integration_lite_structures_and_relinks_llm_drift() -> None:
+    raw_payload = {
+        "competition_id": "home-credit-credit-risk-model-stability",
+        "competition_desc": "Gini stability over WEEK_NUM.",
+        "task_type": "binary_classification",
+        "metric": {"name": "gini_stability"},
+        "source_summary": {"kaggle": 2},
+        "hypotheses": [
+            minimal_hypothesis("feat_001", "feature_engineering", "Default rate changes over time by WEEK_NUM."),
+            minimal_hypothesis("feat_002", "feature_engineering", "Covariate shift separates train/test rows."),
+            minimal_hypothesis("feat_005", "feature_engineering", "Residual std penalty affects weekly Gini."),
+            minimal_hypothesis("feat_006", "feature_engineering", "Prediction ties affect rank-based scoring."),
+        ],
+        "structured_findings": [
+            {
+                "id": "finding_sgkf",
+                "finding_type": "recommendation",
+                "claim": "Notebooks recommend StratifiedGroupKFold with WEEK_NUM.",
+                "provenance": ["kaggle"],
+            }
+        ],
+        "eda_tasks": [
+            {
+                "id": "eda_feat_001",
+                "priority": "P1",
+                "module": "feature_probe",
+                "question": "Which feature families deserve experiments?",
+                "rationale": "Feature probes prioritize model work.",
+                "expected_outputs": ["feature_evidence.family_lift"],
+                "related_hypothesis_ids": ["feat_001", "feat_002", "feat_005", "feat_006"],
+            }
+        ],
+    }
+
+    normalized = normalize_research_hypotheses(raw_payload)
+    validate_research_hypotheses(normalized)
+
+    category_by_old = {
+        correction["old_id"]: correction["new_category"]
+        for correction in normalized["category_corrections"]
+    }
+    assert category_by_old["feat_001"] == "drift"
+    assert category_by_old["feat_002"] == "drift"
+    assert category_by_old["feat_005"] == "metric"
+    assert category_by_old["feat_006"] == "metric"
+    assert all(item["verification_steps"] for item in normalized["hypotheses"] if item["priority"] in {"P0", "P1"})
+    assert not any(
+        is_generic_verification_text(text)
+        for item in normalized["hypotheses"]
+        for text in item["how_to_verify"]
+    )
+    assert any(item["id"] == "caveat_stratified_groupkfold_temporal" for item in normalized["structured_findings"])
+    feature_task = next(task for task in normalized["eda_tasks"] if task["module"] == "feature_probe")
+    assert all(hypothesis_id.startswith("feat_") for hypothesis_id in feature_task["related_hypothesis_ids"])
 
 
 def test_build_research_hypotheses_uses_mocked_llm_response() -> None:

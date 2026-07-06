@@ -13,6 +13,8 @@ from kaggle_researcher.research_scout_schemas import (
     EdaTask,
     ResearchHypothesesPayload,
     ResearchHypothesis,
+    ScoutFinding,
+    VerificationStep,
 )
 
 
@@ -82,6 +84,38 @@ TEMPORAL_VALIDATION_OUTPUTS = [
     "validation_evidence.oot_holdout",
     "validation_evidence.stratified_group_kfold_diagnostic",
 ]
+GENERIC_VERIFICATION_PHRASES = [
+    "check the relevant evidence",
+    "check the dataset",
+    "inspect the data",
+    "analyze the data",
+    "look at the data",
+    "verify on real train/test files",
+    "perform eda",
+    "run eda",
+]
+CONCRETE_VERIFICATION_TERMS = set(ALLOWED_EDA_MODULES) | {
+    "column",
+    "columns",
+    "statistic",
+    "rate",
+    "auc",
+    "gini",
+    "week_num",
+    "output",
+    "threshold",
+    "artifact",
+    "missingness",
+    "dtype",
+    "fold",
+    "psi",
+}
+STRATIFIED_GROUPKFOLD_CAVEAT = (
+    "This is observed in sources, but it is not sufficient as primary temporal validation "
+    "because it does not guarantee chronological train-before-validation order. Use it only "
+    "as a secondary diagnostic; primary validation should be out-of-time plus rolling or "
+    "expanding temporal CV."
+)
 CATEGORY_PREFIX = {
     "validation": "val",
     "leakage": "leak",
@@ -140,6 +174,19 @@ Do not claim that something is true on the dataset unless it can be verified fro
 Mark dataset-dependent claims as not_verified_on_data.
 Prefer actionable checks over broad advice.
 Use P0 only for checks that can invalidate the entire strategy.
+For every hypothesis, provide verification_steps. Do not use vague verification text such as
+"check the dataset", "inspect the data", "run EDA", or "check the relevant evidence".
+Every verification step must name an EDA module, operation, inputs, outputs, success criteria,
+and failure criteria.
+Use structured_findings instead of raw mixed findings. Finding types are observed_in_sources,
+recommendation, warning, caveat, and limitation.
+If a claim is about target drift, train/test shift, adversarial validation, PSI, or time
+distributions, classify it as drift. If it is about metric formula, Gini, weekly Gini,
+residual std, slope penalty, prediction ties, rank/probability semantics, or thresholds,
+classify it as metric. If it is about missingness, dtype, suffixes, file lists, target/id/time
+roles, or sample submission, classify it as dataset_schema.
+If a claim mentions StratifiedGroupKFold or GroupKFold with WEEK_NUM, state clearly that it is
+observed in sources but not sufficient as primary temporal validation.
 
 Return one JSON object matching this shape:
 {
@@ -154,8 +201,11 @@ Return one JSON object matching this shape:
   "source_quality_summary": {},
   "hypotheses": [],
   "eda_tasks": [],
+  "structured_findings": [],
   "scout_findings": [],
   "scout_limitations": [],
+  "recommended_module_sequence": [],
+  "recommended_human_checklist": [],
   "recommended_eda_sequence": [],
   "models_used": {"research_scout": "deepseek-v4-pro"}
 }"""
@@ -249,6 +299,9 @@ def normalize_research_hypotheses(payload: dict) -> dict:
             "All dataset-dependent claims must be verified by EDA Engine.",
         ]
     )
+    normalized["structured_findings"] = normalize_structured_findings(normalized)
+    normalized["scout_findings"] = _legacy_findings_from_structured(normalized["structured_findings"])
+    normalized["category_corrections"] = list(normalized.get("category_corrections") or [])
     sequence_payload = split_recommended_sequences(normalized)
     normalized.update(sequence_payload)
 
@@ -257,6 +310,12 @@ def normalize_research_hypotheses(payload: dict) -> dict:
 
     hypotheses.extend(_default_hypotheses(normalized, hypotheses))
     hypotheses = _dedupe_hypotheses(_assign_hypothesis_ids(hypotheses))
+    correction_payload = correct_hypothesis_categories(
+        {**normalized, "hypotheses": hypotheses, "eda_tasks": tasks}
+    )
+    hypotheses = correction_payload["hypotheses"]
+    tasks = correction_payload["eda_tasks"]
+    normalized["category_corrections"] = correction_payload.get("category_corrections", [])
 
     tasks.extend(_default_tasks(normalized, hypotheses, tasks))
     tasks = cleanup_generic_eda_tasks(tasks, {hypothesis["id"] for hypothesis in hypotheses})
@@ -267,6 +326,12 @@ def normalize_research_hypotheses(payload: dict) -> dict:
     normalized["hypotheses"] = hypotheses
     normalized["eda_tasks"] = tasks
     normalized = enforce_scout_validation_policy(normalized)
+    normalized = relink_eda_tasks(normalized)
+    normalized = expand_verification_steps(normalized)
+    normalized = enforce_stratified_groupkfold_caveat(normalized)
+    normalized = _ensure_source_attachment_limitations(normalized)
+    normalized["structured_findings"] = normalize_structured_findings(normalized)
+    normalized["scout_findings"] = _legacy_findings_from_structured(normalized["structured_findings"])
     normalized["eda_tasks"] = ensure_task_ids(cleanup_generic_eda_tasks(normalized["eda_tasks"], {hypothesis["id"] for hypothesis in normalized["hypotheses"]}))
     return ResearchHypothesesPayload.model_validate(normalized).model_dump(mode="json")
 
@@ -485,6 +550,188 @@ def split_recommended_sequences(payload: dict) -> dict[str, list[str]]:
     }
 
 
+def is_generic_verification_text(text: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9_.]+", " ", text.lower()).strip()
+    if not any(phrase in normalized for phrase in GENERIC_VERIFICATION_PHRASES):
+        return False
+    return not any(term in normalized for term in CONCRETE_VERIFICATION_TERMS)
+
+
+def expand_verification_steps(payload: dict) -> dict:
+    normalized = dict(payload)
+    tasks = [dict(task) for task in list(normalized.get("eda_tasks") or [])]
+    task_ids_by_module: dict[str, list[str]] = {}
+    for task in tasks:
+        task_ids_by_module.setdefault(str(task.get("module")), []).append(str(task.get("id")))
+
+    hypotheses: list[dict[str, Any]] = []
+    for hypothesis in list(normalized.get("hypotheses") or []):
+        item = dict(hypothesis)
+        existing_steps = [
+            _normalize_verification_step(step)
+            for step in list(item.get("verification_steps") or [])
+            if isinstance(step, dict)
+        ]
+        steps = existing_steps.copy()
+        if item.get("priority") in {"P0", "P1"} or not steps:
+            for step in _verification_templates_for_hypothesis(item, task_ids_by_module):
+                if not any(existing["id"] == step["id"] for existing in steps):
+                    steps.append(step)
+        if item.get("priority") in {"P0", "P1"} and not steps:
+            steps.append(_generic_structured_step(item, task_ids_by_module))
+        item["verification_steps"] = ensure_verification_step_ids(steps)
+        if not item.get("how_to_verify") or any(is_generic_verification_text(text) for text in _string_list(item.get("how_to_verify"))):
+            item["how_to_verify"] = _how_to_verify_from_steps(item["verification_steps"])
+        hypotheses.append(item)
+    normalized["hypotheses"] = hypotheses
+    return normalized
+
+
+def correct_hypothesis_categories(payload: dict) -> dict:
+    normalized = dict(payload)
+    hypotheses = [dict(item) for item in list(normalized.get("hypotheses") or [])]
+    tasks = [dict(item) for item in list(normalized.get("eda_tasks") or [])]
+    corrections = list(normalized.get("category_corrections") or [])
+    used_ids = {str(item.get("id")) for item in hypotheses if item.get("id")}
+    id_map: dict[str, str] = {}
+
+    for hypothesis in hypotheses:
+        old_category = str(hypothesis.get("category") or "")
+        new_category, reason = _corrected_category_for_hypothesis(hypothesis)
+        if new_category == old_category:
+            continue
+        old_id = str(hypothesis.get("id") or "")
+        new_id = _reassign_hypothesis_id(old_id, new_category, used_ids)
+        used_ids.discard(old_id)
+        used_ids.add(new_id)
+        hypothesis["category"] = new_category
+        hypothesis["id"] = new_id
+        id_map[old_id] = new_id
+        corrections.append(
+            {
+                "old_id": old_id,
+                "new_id": new_id,
+                "old_category": old_category,
+                "new_category": new_category,
+                "reason": reason,
+            }
+        )
+
+    if id_map:
+        for task in tasks:
+            task["related_hypothesis_ids"] = [
+                id_map.get(hypothesis_id, hypothesis_id)
+                for hypothesis_id in _string_list(task.get("related_hypothesis_ids"))
+            ]
+        for hypothesis in hypotheses:
+            for step in list(hypothesis.get("verification_steps") or []):
+                if isinstance(step, dict):
+                    step["related_hypothesis_ids"] = [
+                        id_map.get(hypothesis_id, hypothesis_id)
+                        for hypothesis_id in _string_list(step.get("related_hypothesis_ids"))
+                    ]
+
+    normalized["hypotheses"] = hypotheses
+    normalized["eda_tasks"] = tasks
+    normalized["category_corrections"] = corrections
+    return normalized
+
+
+def enforce_stratified_groupkfold_caveat(payload: dict) -> dict:
+    normalized = enforce_scout_validation_policy(payload)
+    if not _is_temporal_scout_payload(normalized):
+        return normalized
+
+    references_group_kfold = _payload_mentions_groupkfold(normalized)
+    findings = normalize_structured_findings(normalized)
+    for finding in findings:
+        text = f"{finding.get('claim', '')} {finding.get('caveat', '')}".lower()
+        if _mentions_groupkfold(text):
+            if finding.get("finding_type") == "recommendation" and "not sufficient as primary" not in text:
+                finding["finding_type"] = "observed_in_sources"
+            finding["caveat"] = STRATIFIED_GROUPKFOLD_CAVEAT
+            finding["confidence"] = "high"
+
+    if references_group_kfold and not any(finding.get("id") == "caveat_stratified_groupkfold_temporal" for finding in findings):
+        findings.append(
+            {
+                "id": "caveat_stratified_groupkfold_temporal",
+                "finding_type": "caveat",
+                "claim": "StratifiedGroupKFold with WEEK_NUM can keep weeks disjoint but does not enforce chronological order.",
+                "implication": "It must not be used as the sole primary validation strategy for stability competitions.",
+                "caveat": "Primary validation should remain strict out-of-time holdout plus rolling or expanding temporal CV.",
+                "provenance": ["heuristic", "not_verified_on_data"],
+                "supporting_source_ids": [],
+                "related_hypothesis_ids": [
+                    item["id"]
+                    for item in list(normalized.get("hypotheses") or [])
+                    if isinstance(item, dict) and item.get("category") == "validation"
+                ][:1],
+                "confidence": "high",
+            }
+        )
+    normalized["structured_findings"] = findings
+    normalized["scout_findings"] = _legacy_findings_from_structured(findings)
+    return normalized
+
+
+def relink_eda_tasks(payload: dict) -> dict:
+    normalized = dict(payload)
+    hypotheses = [dict(item) for item in list(normalized.get("hypotheses") or [])]
+    tasks = ensure_task_ids([dict(item) for item in list(normalized.get("eda_tasks") or [])])
+    tasks_by_module = {str(task.get("module")): task for task in tasks}
+    category_module = {
+        "validation": "validation_analyzer",
+        "leakage": "leakage_checker",
+        "metric": "metric_analyzer",
+        "dataset_schema": "schema_inferer",
+        "relationships": "relationship_inferer",
+        "drift": "drift_analyzer",
+        "feature_engineering": "feature_probe",
+        "baseline": "baseline_runner",
+        "notebook_reverse_engineering": "notebook_reverse_engineering",
+        "leaderboard_risk": "drift_analyzer",
+    }
+    for module in ALLOWED_EDA_MODULES:
+        if module not in tasks_by_module and module in DEFAULT_MODULE_SEQUENCE:
+            task = _module_task_template(module, hypotheses)
+            tasks.append(task)
+            tasks_by_module[module] = task
+
+    for task in tasks:
+        module = str(task.get("module"))
+        if module in GLOBAL_TASK_MODULES:
+            continue
+        allowed_categories = {
+            category for category, mapped_module in category_module.items() if mapped_module == module
+        }
+        task["related_hypothesis_ids"] = [
+            hypothesis["id"]
+            for hypothesis in hypotheses
+            if hypothesis.get("category") in allowed_categories
+        ]
+
+    for task in tasks:
+        if task.get("module") in {"schema_inferer", "table_profiler"}:
+            schema_ids = [hypothesis["id"] for hypothesis in hypotheses if hypothesis.get("category") == "dataset_schema"]
+            task["related_hypothesis_ids"] = schema_ids
+
+    tasks = ensure_task_ids(_dedupe_tasks(tasks))
+    task_ids_by_module: dict[str, list[str]] = {}
+    for task in tasks:
+        task_ids_by_module.setdefault(str(task.get("module")), []).append(str(task.get("id")))
+    for hypothesis in hypotheses:
+        for step in list(hypothesis.get("verification_steps") or []):
+            if isinstance(step, dict):
+                related = task_ids_by_module.get(str(step.get("module")), [])
+                if related:
+                    step["related_task_ids"] = _unique_strings([*list(step.get("related_task_ids") or []), *related])
+
+    normalized["hypotheses"] = hypotheses
+    normalized["eda_tasks"] = tasks
+    return normalized
+
+
 def _temporal_validation_hypothesis(hypothesis_id: str = "val_001") -> dict[str, Any]:
     return {
         "id": hypothesis_id,
@@ -519,6 +766,346 @@ def _temporal_validation_hypothesis(hypothesis_id: str = "val_001") -> dict[str,
         "confidence": "high",
         "status": "needs_eda",
     }
+
+
+def ensure_verification_step_ids(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    used: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for step in steps:
+        item = _normalize_verification_step(step)
+        raw_id = _normalize_identifier(item.get("id")) or f"verify_{item['module']}_{_slug(item['operation'])}"
+        candidate = raw_id
+        suffix = 2
+        while candidate in used:
+            candidate = f"{raw_id}_{suffix}"
+            suffix += 1
+        item["id"] = candidate
+        used.add(candidate)
+        result.append(item)
+    return result
+
+
+def _verification_templates_for_hypothesis(
+    hypothesis: dict[str, Any],
+    task_ids_by_module: dict[str, list[str]],
+) -> list[dict[str, Any]]:
+    category = str(hypothesis.get("category") or "")
+    text = _hypothesis_text(hypothesis)
+    hypothesis_id = str(hypothesis.get("id") or "hyp")
+    steps: list[dict[str, Any]] = []
+    if category == "validation":
+        if any(term in text for term in ("temporal", "out-of-time", "week_num", "rolling", "expanding", "stability")):
+            steps.extend(
+                [
+                    _step(hypothesis_id, "schema_inferer", "identify_time_columns", "Which columns can define chronological validation splits?", ["file_inventory.files", "table_profiles", "train_base"], ["inferred_schema.global_roles.candidate_time_columns"], task_ids_by_module),
+                    _step(hypothesis_id, "validation_analyzer", "build_oot_holdout", "Which latest-period out-of-time holdout best matches the competition holdout?", ["train_base", "target", "candidate_time_columns"], ["validation_evidence.oot_holdout"], task_ids_by_module),
+                    _step(hypothesis_id, "validation_analyzer", "build_rolling_or_expanding_folds", "Can folds be built so training periods always precede validation periods?", ["train_base", "target", "candidate_time_columns"], ["validation_evidence.temporal_folds"], task_ids_by_module),
+                    _step(hypothesis_id, "baseline_runner", "compare_random_vs_oot", "How different are random or grouped CV estimates from strict out-of-time validation?", ["baseline_predictions", "validation_folds"], ["validation_evidence.random_vs_oot", "baseline_evidence.per_period_metric"], task_ids_by_module),
+                ]
+            )
+        else:
+            steps.append(_step(hypothesis_id, "validation_analyzer", "recommend_validation_split", "Which validation split best matches the competition holdout?", ["inferred_schema.global_roles"], ["validation_evidence.recommended_validation"], task_ids_by_module))
+    elif category == "leakage":
+        for operation, question, output in (
+            ("check_id_overlap", "Do train and test identifiers overlap in unsafe ways?", "leakage_evidence.id_overlap"),
+            ("find_target_like_columns", "Which columns look like target proxies or post-outcome fields?", "leakage_evidence.target_like_columns"),
+            ("check_future_rows", "Do secondary rows contain future information relative to prediction time?", "leakage_evidence.future_rows"),
+            ("check_group_leakage", "Can group membership leak labels across validation folds?", "leakage_evidence.group_leakage"),
+        ):
+            steps.append(_step(hypothesis_id, "leakage_checker", operation, question, ["inferred_schema.global_roles"], [output], task_ids_by_module))
+    elif category == "metric":
+        steps.extend(
+            [
+                _step(hypothesis_id, "metric_analyzer", "implement_metric", "Can the official metric be reproduced locally on known examples?", ["target", "prediction"], ["metric_evidence.local_metric"], task_ids_by_module),
+                _step(hypothesis_id, "metric_analyzer", "verify_probability_or_rank_inputs", "Does the metric require probabilities, ranks, or hard labels?", ["metric_definition", "sample_submission"], ["metric_evidence.requires_probabilities", "metric_evidence.rank_based"], task_ids_by_module),
+            ]
+        )
+        if any(term in text for term in ("gini", "stability", "weekly", "slope", "residual", "std")):
+            steps.append(_step(hypothesis_id, "metric_analyzer", "compute_weekly_metric_components", "Which weekly metric components drive the stability score?", ["target", "prediction", "candidate_time_columns"], ["metric_evidence.weekly_components"], task_ids_by_module))
+        if "tie" in text or "ties" in text:
+            steps.append(_step(hypothesis_id, "metric_analyzer", "tie_sensitivity_analysis", "How sensitive is the metric to tied predictions?", ["prediction_scores"], ["metric_evidence.tie_sensitivity"], task_ids_by_module))
+        if any(term in text for term in ("residual", "std", "stability")):
+            steps.append(_step(hypothesis_id, "baseline_runner", "compare_metric_components", "How do baseline models trade off mean score and stability penalty?", ["baseline_predictions", "temporal_folds"], ["baseline_evidence.metric_components"], task_ids_by_module))
+    elif category == "dataset_schema":
+        steps.extend(
+            [
+                _step(hypothesis_id, "file_inventory", "list_files", "Which train, test, sample submission, CSV, and Parquet files are available?", [], ["file_inventory.files"], task_ids_by_module),
+                _step(hypothesis_id, "schema_inferer", "infer_roles", "Which columns are target, ID, time, group, and submission fields?", ["file_inventory.files"], ["inferred_schema.global_roles"], task_ids_by_module),
+                _step(hypothesis_id, "table_profiler", "profile_missingness", "Which columns have high missingness by table and split?", ["train_tables", "test_tables"], ["table_profiles.missingness"], task_ids_by_module),
+                _step(hypothesis_id, "table_profiler", "profile_dtypes", "Which dtypes and cardinalities appear in each table?", ["train_tables", "test_tables"], ["table_profiles.dtypes"], task_ids_by_module),
+            ]
+        )
+        if "suffix" in text:
+            steps.append(_step(hypothesis_id, "schema_inferer", "check_suffix_dtype_consistency", "Are column suffixes consistent with dtypes and semantic roles?", ["inferred_schema.global_roles", "table_profiles.dtypes"], ["schema_evidence.suffix_dtype_consistency"], task_ids_by_module))
+    elif category == "drift":
+        if any(term in text for term in ("default rate", "target drift", "period", "week", "time")):
+            steps.append(_step(hypothesis_id, "validation_analyzer", "compute_target_by_period", "How does target rate change across periods?", ["target", "candidate_time_columns"], ["validation_evidence.target_by_period"], task_ids_by_module))
+        for operation, question, output in (
+            ("run_adversarial_validation", "How separable are train and test rows using schema-safe features?", "drift_evidence.adversarial_auc"),
+            ("compute_numeric_psi", "Which numeric features show train/test distribution shift?", "drift_evidence.numeric_psi"),
+            ("compute_categorical_shift", "Which categorical levels shift between train and test?", "drift_evidence.categorical_shift"),
+            ("compute_missingness_shift", "Which missingness patterns shift between train and test?", "drift_evidence.missingness"),
+        ):
+            steps.append(_step(hypothesis_id, "drift_analyzer", operation, question, ["train_tables", "test_tables"], [output], task_ids_by_module))
+    elif category == "relationships":
+        for operation, question, output in (
+            ("detect_base_table", "Which table is the base prediction table?", "relationship_evidence.base_table"),
+            ("detect_join_keys", "Which keys connect base and secondary tables?", "relationship_evidence.join_keys"),
+            ("measure_join_coverage", "What join coverage and orphan rates exist across tables?", "relationship_evidence.join_coverage"),
+            ("check_cutoff_feasibility", "Can secondary rows be cut off before prediction time?", "relationship_evidence.cutoff_feasibility"),
+        ):
+            steps.append(_step(hypothesis_id, "relationship_inferer", operation, question, ["file_inventory.files", "inferred_schema.global_roles"], [output], task_ids_by_module))
+    elif category == "feature_engineering":
+        for operation, question, output in (
+            ("evaluate_aggregation_feasibility", "Which aggregations are feasible without leakage?", "feature_evidence.aggregation_feasibility"),
+            ("evaluate_date_features", "Which date features are safe and predictive?", "feature_evidence.date_features"),
+            ("evaluate_missingness_indicators", "Which missingness indicators are safe feature candidates?", "feature_evidence.missingness_indicators"),
+            ("evaluate_encoding_safety", "Which encodings can be built inside folds safely?", "feature_evidence.encoding_safety"),
+            ("measure_feature_family_lift", "Which feature families improve aligned validation?", "feature_evidence.family_lift"),
+        ):
+            module = "baseline_runner" if operation == "measure_feature_family_lift" else "feature_probe"
+            steps.append(_step(hypothesis_id, module, operation, question, ["validated_schema", "recommended_validation"], [output], task_ids_by_module))
+    elif category == "baseline":
+        for operation, question, output in (
+            ("train_base_table_baseline", "What is the base-table baseline score?", "baseline_evidence.base_table_metric"),
+            ("train_simple_aggregation_baseline", "What lift comes from simple aggregation baselines?", "baseline_evidence.simple_aggregation_metric"),
+            ("compute_per_period_metric", "How does baseline performance vary by period?", "baseline_evidence.per_period_metric"),
+            ("save_feature_importance", "Which features dominate the baseline model?", "baseline_evidence.feature_importance"),
+        ):
+            steps.append(_step(hypothesis_id, "baseline_runner", operation, question, ["validated_schema", "recommended_validation"], [output], task_ids_by_module))
+    elif category == "notebook_reverse_engineering":
+        for operation, question, output in (
+            ("extract_cv_strategy", "What validation strategies appear in top notebooks?", "notebook_static_analysis.cv_strategy"),
+            ("extract_feature_families", "What feature families appear in top notebooks?", "notebook_static_analysis.feature_families"),
+            ("extract_metric_code", "What metric code appears in top notebooks?", "notebook_static_analysis.metric_code"),
+            ("extract_postprocessing", "What postprocessing appears in top notebooks?", "notebook_static_analysis.postprocessing"),
+        ):
+            steps.append(_step(hypothesis_id, "notebook_reverse_engineering", operation, question, ["retrieved Kaggle notebook sources"], [output], task_ids_by_module))
+    return steps
+
+
+def _step(
+    hypothesis_id: str,
+    module: str,
+    operation: str,
+    question: str,
+    inputs: list[str],
+    outputs: list[str],
+    task_ids_by_module: dict[str, list[str]],
+) -> dict[str, Any]:
+    return {
+        "id": f"verify_{hypothesis_id}_{_slug(operation)}",
+        "module": module,
+        "operation": operation,
+        "question": question,
+        "inputs": inputs,
+        "outputs": outputs,
+        "success_criteria": [f"{outputs[0]} is produced with usable evidence."],
+        "failure_criteria": [f"{outputs[0]} cannot be produced or is inconclusive."],
+        "related_task_ids": task_ids_by_module.get(module, []),
+    }
+
+
+def _generic_structured_step(
+    hypothesis: dict[str, Any],
+    task_ids_by_module: dict[str, list[str]],
+) -> dict[str, Any]:
+    module = _module_for_category(str(hypothesis.get("category") or "dataset_schema"))
+    return _step(
+        str(hypothesis.get("id") or "hyp"),
+        module,
+        "collect_evidence",
+        "Which concrete evidence artifacts verify this hypothesis?",
+        ["validated_schema"],
+        hypothesis.get("expected_evidence_keys") or [f"{module}.result"],
+        task_ids_by_module,
+    )
+
+
+def _how_to_verify_from_steps(steps: list[dict[str, Any]]) -> list[str]:
+    return [
+        f"{step['operation']}: {step['question']}"
+        for step in steps
+    ]
+
+
+def _corrected_category_for_hypothesis(hypothesis: dict[str, Any]) -> tuple[str, str]:
+    current = str(hypothesis.get("category") or "feature_engineering")
+    text = _hypothesis_text(hypothesis)
+    explicit_feature = any(
+        term in text
+        for term in (
+            "feature family",
+            "aggregation",
+            "encoding",
+            "date features",
+            "missingness indicators",
+            "feature selection",
+            "feature lift",
+            "feature importance",
+        )
+    )
+    if explicit_feature:
+        return current, ""
+    drift_terms = (
+        "default rate changes over time",
+        "target drift",
+        "default rate drift",
+        "week_num drift",
+        "covariate shift",
+        "train/test shift",
+        "distribution shift",
+        "adversarial validation",
+        "psi",
+        "period drift",
+        "default rate over time",
+    )
+    metric_terms = (
+        "residual standard deviation",
+        "residual std",
+        "metric penalty",
+        "weekly gini",
+        "slope",
+        "tie",
+        "ties",
+        "threshold search",
+        "hard class labels",
+        "rank-based",
+        "probability-based",
+        "calibration",
+    )
+    schema_terms = (
+        "high missing rates",
+        ">95% missing",
+        "missing value analysis",
+        "column suffix",
+        "dtype",
+        "data type",
+        "train/test file list",
+        "csv vs parquet",
+        "target/id/time columns",
+        "sample submission",
+    )
+    if _contains_terms(text, drift_terms):
+        return "drift", "Claim mentions default rate changes over time, drift, shift, PSI, or adversarial validation."
+    if _contains_terms(text, metric_terms):
+        return "metric", "Claim mentions metric formula, residual penalty, ties, thresholds, ranks, or probabilities."
+    if _contains_terms(text, schema_terms):
+        return "dataset_schema", "Claim mentions missingness, dtypes, suffixes, file lists, roles, or sample submission."
+    return current, ""
+
+
+def _contains_terms(text: str, terms: tuple[str, ...]) -> bool:
+    for term in terms:
+        if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text):
+            return True
+    return False
+
+
+def _reassign_hypothesis_id(old_id: str, new_category: str, used_ids: set[str]) -> str:
+    prefix = CATEGORY_PREFIX.get(new_category, "hyp")
+    suffix = "001"
+    match = re.match(r"^[a-z]+_(\d+)$", old_id)
+    if match:
+        suffix = match.group(1)
+    candidate = f"{prefix}_{suffix}"
+    counter = int(suffix) if suffix.isdigit() else 1
+    while candidate in used_ids and candidate != old_id:
+        counter += 1
+        candidate = f"{prefix}_{counter:03d}"
+    return candidate
+
+
+def _module_task_template(module: str, hypotheses: list[dict[str, Any]]) -> dict[str, Any]:
+    category = {
+        "file_inventory": "dataset_schema",
+        "schema_inferer": "dataset_schema",
+        "table_profiler": "dataset_schema",
+        "relationship_inferer": "relationships",
+        "validation_analyzer": "validation",
+        "leakage_checker": "leakage",
+        "drift_analyzer": "drift",
+        "metric_analyzer": "metric",
+        "baseline_runner": "baseline",
+        "feature_probe": "feature_engineering",
+        "notebook_reverse_engineering": "notebook_reverse_engineering",
+    }.get(module)
+    related = [item["id"] for item in hypotheses if item.get("category") == category]
+    short = MODULE_SHORT_NAMES.get(module, module)
+    return _task(
+        f"eda_{short}_001",
+        "P1",
+        module,
+        f"Which evidence should {module} produce for Scout hypotheses?",
+        f"{module} evidence is required by structured verification steps.",
+        [],
+        [f"{module}.result"],
+        related,
+        module in {"file_inventory", "schema_inferer", "table_profiler", "validation_analyzer", "leakage_checker"},
+    )
+
+
+def _module_for_category(category: str) -> str:
+    return {
+        "validation": "validation_analyzer",
+        "leakage": "leakage_checker",
+        "metric": "metric_analyzer",
+        "dataset_schema": "schema_inferer",
+        "relationships": "relationship_inferer",
+        "drift": "drift_analyzer",
+        "feature_engineering": "feature_probe",
+        "baseline": "baseline_runner",
+        "notebook_reverse_engineering": "notebook_reverse_engineering",
+        "leaderboard_risk": "drift_analyzer",
+    }.get(category, "table_profiler")
+
+
+def _hypothesis_text(hypothesis: dict[str, Any]) -> str:
+    steps = list(hypothesis.get("verification_steps") or [])
+    step_text = " ".join(
+        " ".join(
+            str(step.get(key) or "")
+            for key in ("operation", "question", "outputs")
+        )
+        for step in steps
+        if isinstance(step, dict)
+    )
+    return " ".join(
+        [
+            str(hypothesis.get("claim") or ""),
+            str(hypothesis.get("why_it_matters") or ""),
+            " ".join(_string_list(hypothesis.get("how_to_verify"))),
+            " ".join(_string_list(hypothesis.get("expected_evidence_keys"))),
+            step_text,
+        ]
+    ).lower()
+
+
+def _payload_mentions_groupkfold(payload: dict[str, Any]) -> bool:
+    text = json.dumps(
+        {
+            "structured_findings": payload.get("structured_findings"),
+            "scout_findings": payload.get("scout_findings"),
+            "hypotheses": payload.get("hypotheses"),
+            "eda_tasks": payload.get("eda_tasks"),
+        },
+        ensure_ascii=False,
+    ).lower()
+    return _mentions_groupkfold(text)
+
+
+def _mentions_groupkfold(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "stratifiedgroupkfold",
+            "groupkfold",
+            "groups=week_num",
+            "week_num as group",
+            "week_num as group",
+        )
+    )
 
 
 def _rewrite_temporal_validation_task(task: dict[str, Any]) -> None:
@@ -759,6 +1346,40 @@ def _retrieved_sources_available(model: ResearchHypothesesPayload) -> bool:
     return bool(top_sources)
 
 
+def _ensure_source_attachment_limitations(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    hypotheses = [item for item in list(normalized.get("hypotheses") or []) if isinstance(item, dict)]
+    source_summary = _as_dict(normalized.get("source_summary"))
+    sources_available = any(
+        isinstance(value, int) and value > 0
+        for value in source_summary.values()
+    )
+    if not sources_available or not hypotheses:
+        return normalized
+    sourced = [item for item in hypotheses if item.get("supporting_source_ids")]
+    if len(sourced) / len(hypotheses) >= 0.5:
+        return normalized
+    normalized["scout_limitations"] = _unique_strings(
+        [
+            *list(normalized.get("scout_limitations") or []),
+            "Fewer than 50% of hypotheses have supporting_source_ids from retrieved documents.",
+        ]
+    )
+    return normalized
+
+
+def _valid_verification_steps(steps: list[VerificationStep]) -> list[VerificationStep]:
+    return [
+        step
+        for step in steps
+        if step.module in ALLOWED_EDA_MODULES
+        and bool(step.operation)
+        and bool(step.question)
+        and bool(step.outputs)
+        and (bool(step.success_criteria) or bool(step.failure_criteria))
+    ]
+
+
 def validate_research_hypotheses(payload: dict) -> None:
     raw_errors = _raw_contract_errors(payload)
     if raw_errors:
@@ -820,6 +1441,25 @@ def validate_research_hypotheses(payload: dict) -> None:
             errors.append(f"hypothesis {item.id} missing required fields: {', '.join(missing)}")
         if _is_dataset_dependent(item) and "not_verified_on_data" not in item.provenance:
             errors.append(f"hypothesis {item.id} dataset-dependent claim must include not_verified_on_data")
+        valid_steps = _valid_verification_steps(item.verification_steps)
+        if item.priority in {"P0", "P1"} and not valid_steps:
+            errors.append(f"hypothesis {item.id} must include at least one structured verification_step")
+        if any(is_generic_verification_text(text) for text in item.how_to_verify) and not valid_steps:
+            errors.append(f"hypothesis {item.id} has generic how_to_verify without structured verification_steps")
+        for step in item.verification_steps:
+            step_missing = []
+            if step.module not in ALLOWED_EDA_MODULES:
+                step_missing.append("valid module")
+            if not step.operation:
+                step_missing.append("operation")
+            if not step.question:
+                step_missing.append("question")
+            if not step.outputs:
+                step_missing.append("outputs")
+            if not step.success_criteria and not step.failure_criteria:
+                step_missing.append("success_criteria or failure_criteria")
+            if step_missing:
+                errors.append(f"verification step {step.id} missing required fields: {', '.join(step_missing)}")
     for task in tasks:
         missing = []
         if not task.id:
@@ -915,6 +1555,63 @@ def build_research_scout_summary(payload: dict) -> str:
         "## Executive summary",
         _executive_summary(model),
         "",
+        "## Structured findings",
+    ]
+    for title, finding_type in (
+        ("Observed in sources", "observed_in_sources"),
+        ("Recommendations", "recommendation"),
+        ("Warnings", "warning"),
+        ("Caveats", "caveat"),
+        ("Limitations", "limitation"),
+    ):
+        lines.append(f"### {title}")
+        group = [finding for finding in model.structured_findings if finding.finding_type == finding_type]
+        if group:
+            for finding in group:
+                caveat = f" Caveat: {finding.caveat}" if finding.caveat else ""
+                lines.append(f"- {finding.id}: {finding.claim}{caveat}")
+        else:
+            lines.append("- None.")
+    corrections = model.category_corrections
+    lines.extend(["", "## Category corrections"])
+    if corrections:
+        for correction in corrections:
+            lines.append(
+                f"- {correction.get('old_id')} -> {correction.get('new_id')}: "
+                f"{correction.get('old_category')} -> {correction.get('new_category')}. "
+                f"{correction.get('reason')}"
+            )
+    else:
+        lines.append("- None.")
+
+    verification_steps = [
+        step
+        for hypothesis in model.hypotheses
+        for step in hypothesis.verification_steps
+    ]
+    generic_legacy = [
+        hypothesis.id
+        for hypothesis in model.hypotheses
+        if any(is_generic_verification_text(text) for text in hypothesis.how_to_verify)
+    ]
+    steps_by_module = Counter(step.module for step in verification_steps)
+    lines.extend(
+        [
+            "",
+            "## Verification coverage",
+            f"- Number of hypotheses: {len(model.hypotheses)}",
+            f"- Number with structured verification steps: {sum(1 for hypothesis in model.hypotheses if hypothesis.verification_steps)}",
+            f"- Number with generic legacy how_to_verify: {len(generic_legacy)}",
+            "- Number of verification steps by module: "
+            + (", ".join(f"{module}={count}" for module, count in sorted(steps_by_module.items())) or "none"),
+            "",
+            "## StratifiedGroupKFold caveat",
+            _stratified_groupkfold_summary_caveat(model),
+        ]
+    )
+    lines.extend(
+        [
+        "",
         "## Contract quality checks",
         f"- Number of hypotheses: {len(model.hypotheses)}",
         f"- Number of EDA tasks: {len(model.eda_tasks)}",
@@ -932,7 +1629,8 @@ def build_research_scout_summary(payload: dict) -> str:
         *[f"- {item}" for item in model.recommended_human_checklist],
         "",
         "## P0 EDA checks",
-    ]
+        ]
+    )
     p0_hypotheses = [item for item in model.hypotheses if item.priority == "P0"]
     lines.extend(_hypothesis_lines(p0_hypotheses, task_by_hypothesis))
 
@@ -997,11 +1695,15 @@ def split_eda_task_plan(payload: dict) -> dict:
         "task_type": model.task_type,
         "metric": model.metric,
         "eda_tasks": [task.model_dump(mode="json") for task in model.eda_tasks],
+        "structured_findings": [finding.model_dump(mode="json") for finding in model.structured_findings],
+        "category_corrections": model.category_corrections,
         "hypothesis_index": {
             hypothesis.id: {
                 "category": hypothesis.category,
                 "priority": hypothesis.priority,
                 "claim": hypothesis.claim,
+                "verification_step_count": len(hypothesis.verification_steps),
+                "supporting_source_count": len(hypothesis.supporting_source_ids),
             }
             for hypothesis in model.hypotheses
         },
@@ -1093,6 +1795,11 @@ def _normalize_hypothesis(item: dict[str, Any]) -> dict[str, Any]:
         "claim": str(item.get("claim") or "Verify this competition-specific assumption with EDA."),
         "why_it_matters": str(item.get("why_it_matters") or "Unverified assumptions can invalidate validation, features, or leaderboard strategy."),
         "how_to_verify": _string_list(item.get("how_to_verify")) or ["Check the relevant evidence on the real train/test files."],
+        "verification_steps": [
+            _normalize_verification_step(step)
+            for step in list(item.get("verification_steps") or [])
+            if isinstance(step, dict)
+        ],
         "expected_evidence_keys": _string_list(item.get("expected_evidence_keys")),
         "failure_condition": item.get("failure_condition"),
         "success_condition": item.get("success_condition"),
@@ -1101,6 +1808,91 @@ def _normalize_hypothesis(item: dict[str, Any]) -> dict[str, Any]:
         "confidence": confidence,
         "status": status,
     }
+
+
+def _normalize_verification_step(item: dict[str, Any]) -> dict[str, Any]:
+    module = str(item.get("module") or "table_profiler")
+    if module not in ALLOWED_EDA_MODULES:
+        module = "table_profiler"
+    operation = str(item.get("operation") or "verify").strip() or "verify"
+    question = str(item.get("question") or f"What evidence should {operation} produce?").strip()
+    outputs = _string_list(item.get("outputs")) or [f"{module}.{operation}"]
+    return {
+        "id": _normalize_identifier(item.get("id")) or f"verify_{module}_{_slug(operation)}",
+        "module": module,
+        "operation": operation,
+        "question": question if len(question) >= 10 else f"What evidence should {operation} produce?",
+        "inputs": _string_list(item.get("inputs")),
+        "outputs": outputs,
+        "success_criteria": _string_list(item.get("success_criteria")) or ["Required evidence artifact is produced."],
+        "failure_criteria": _string_list(item.get("failure_criteria")) or ["Required evidence artifact cannot be produced."],
+        "related_task_ids": _string_list(item.get("related_task_ids")),
+    }
+
+
+def normalize_structured_findings(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_findings = [
+        item for item in list(payload.get("structured_findings") or []) if isinstance(item, dict)
+    ]
+    if not raw_findings:
+        raw_findings = [
+            {
+                "id": f"finding_{index:03d}",
+                "finding_type": "observed_in_sources",
+                "claim": str(value),
+                "provenance": ["heuristic"],
+            }
+            for index, value in enumerate(_string_list(payload.get("scout_findings")), start=1)
+            if str(value).strip()
+        ]
+    findings = [_normalize_finding(item, index) for index, item in enumerate(raw_findings, start=1)]
+    if not findings:
+        findings.append(
+            _normalize_finding(
+                {
+                    "id": "limitation_scout_mode",
+                    "finding_type": "limitation",
+                    "claim": "Research Scout mode did not execute EDA or inspect private train/test data.",
+                    "provenance": ["heuristic", "not_verified_on_data"],
+                    "confidence": "high",
+                },
+                1,
+            )
+        )
+    return findings
+
+
+def _normalize_finding(item: dict[str, Any], index: int) -> dict[str, Any]:
+    finding_type = str(item.get("finding_type") or "observed_in_sources")
+    if finding_type not in {"observed_in_sources", "recommendation", "warning", "caveat", "limitation"}:
+        finding_type = "observed_in_sources"
+    provenance = [value for value in _string_list(item.get("provenance")) if value in VALID_PROVENANCE]
+    if not provenance:
+        provenance = ["heuristic"]
+    confidence = str(item.get("confidence") or "medium")
+    if confidence not in {"low", "medium", "high"}:
+        confidence = "medium"
+    return {
+        "id": _normalize_identifier(item.get("id")) or f"finding_{index:03d}",
+        "finding_type": finding_type,
+        "claim": str(item.get("claim") or "Scout finding requires review.").strip(),
+        "implication": item.get("implication"),
+        "caveat": item.get("caveat"),
+        "provenance": _unique_strings(provenance),
+        "supporting_source_ids": _string_list(item.get("supporting_source_ids")),
+        "related_hypothesis_ids": _string_list(item.get("related_hypothesis_ids")),
+        "confidence": confidence,
+    }
+
+
+def _legacy_findings_from_structured(findings: list[dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for finding in findings:
+        line = f"{finding['finding_type']}: {finding['claim']}"
+        if finding.get("caveat"):
+            line += f" Caveat: {finding['caveat']}"
+        lines.append(line)
+    return lines
 
 
 def _normalize_task(item: dict[str, Any]) -> dict[str, Any]:
@@ -1711,6 +2503,18 @@ def _hypothesis_lines(
         suffix = f" Related tasks: {', '.join(task_ids)}." if task_ids else ""
         lines.append(f"- [{hypothesis.priority}] {hypothesis.id}: {hypothesis.claim}{suffix}")
     return lines
+
+
+def _stratified_groupkfold_summary_caveat(model: ResearchHypothesesPayload) -> str:
+    text = json.dumps(model.model_dump(mode="json"), ensure_ascii=False).lower()
+    if "stratifiedgroupkfold" in text or "groupkfold" in text or _has_safe_temporal_validation(model.hypotheses):
+        return (
+            "For temporal/stability competitions, StratifiedGroupKFold with WEEK_NUM may be useful "
+            "as a secondary diagnostic, but it is not sufficient as primary validation because it "
+            "does not guarantee chronological train-before-validation order. Primary validation "
+            "should be strict out-of-time holdout plus rolling or expanding temporal CV."
+        )
+    return "No StratifiedGroupKFold caveat was triggered."
 
 
 def _as_dict(value: Any) -> dict[str, Any]:

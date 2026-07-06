@@ -283,6 +283,11 @@ async def run_research(
             summary_path = run_dir / "research_scout_summary.md"
             _write_json_file(hypotheses_path, scout_payload)
             _write_json_file(eda_task_plan_path, eda_task_plan)
+            _write_json_artifact(
+                run_dir,
+                "research_scout_category_corrections.json",
+                scout_payload.get("category_corrections", []),
+            )
             summary_path.write_text(scout_summary, encoding="utf-8")
             _write_json_artifact(run_dir, "warnings.json", warnings)
             result = ResearchRunResult(
