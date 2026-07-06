@@ -1,0 +1,127 @@
+{
+  "schema_version": "1.0",
+  "competition_id": "home_credit_tiny",
+  "created_at": "2026-07-06T12:00:00+03:00",
+  "hypotheses": [
+    {
+      "hypothesis_id": "schema_001",
+      "category": "schema",
+      "claim": "The dataset has train/test base tables connected by case_id, with target present only in train.",
+      "rationale": "Home Credit-style competitions usually expose base train/test tables and secondary static tables.",
+      "expected_eda_checks": [
+        "file_inventory.detect_table_roles",
+        "schema_inferer.detect_global_roles"
+      ],
+      "priority": "P0",
+      "confidence_before_eda": "medium",
+      "source_refs": [
+        "fixture.synthetic"
+      ]
+    },
+    {
+      "hypothesis_id": "metric_001",
+      "category": "metric",
+      "claim": "The task should be evaluated with probability scores suitable for a rank-based binary classification metric.",
+      "rationale": "The sample submission contains a score column and the task plan uses gini_stability.",
+      "expected_eda_checks": [
+        "metric_analyzer.basic_metric_contract",
+        "schema_inferer.detect_prediction_column"
+      ],
+      "priority": "P0",
+      "confidence_before_eda": "medium",
+      "source_refs": [
+        "fixture.synthetic"
+      ]
+    },
+    {
+      "hypothesis_id": "val_001",
+      "category": "validation",
+      "claim": "Temporal validation should be feasible because WEEK_NUM exists in train and test base tables.",
+      "rationale": "The fixture includes ordered WEEK_NUM periods and target rate changes by period.",
+      "expected_eda_checks": [
+        "schema_inferer.detect_time_columns",
+        "validation_analyzer.period_distribution",
+        "validation_analyzer.temporal_cv_feasibility"
+      ],
+      "priority": "P0",
+      "confidence_before_eda": "medium",
+      "source_refs": [
+        "fixture.synthetic"
+      ]
+    },
+    {
+      "hypothesis_id": "leak_001",
+      "category": "leakage",
+      "claim": "The EDA engine should verify that target is absent from test and train/test case_id values do not overlap.",
+      "rationale": "Target-in-test and id overlap are high-impact leakage checks for tabular competitions.",
+      "expected_eda_checks": [
+        "leakage_checker.target_absent_from_test",
+        "leakage_checker.train_test_id_overlap"
+      ],
+      "priority": "P0",
+      "confidence_before_eda": "medium",
+      "source_refs": [
+        "fixture.synthetic"
+      ]
+    }
+  ],
+  "eda_tasks": [
+    {
+      "task_id": "file_inventory_001",
+      "module": "file_inventory",
+      "priority": "P0",
+      "blocking": true,
+      "related_hypothesis_ids": [
+        "schema_001"
+      ],
+      "params": {}
+    },
+    {
+      "task_id": "schema_001",
+      "module": "schema_inferer",
+      "priority": "P0",
+      "blocking": true,
+      "related_hypothesis_ids": [
+        "schema_001",
+        "val_001",
+        "leak_001"
+      ],
+      "params": {}
+    },
+    {
+      "task_id": "metric_001",
+      "module": "metric_analyzer",
+      "priority": "P0",
+      "blocking": false,
+      "related_hypothesis_ids": [
+        "metric_001"
+      ],
+      "params": {}
+    },
+    {
+      "task_id": "validation_001",
+      "module": "validation_analyzer",
+      "priority": "P0",
+      "blocking": true,
+      "related_hypothesis_ids": [
+        "val_001"
+      ],
+      "params": {}
+    },
+    {
+      "task_id": "leakage_001",
+      "module": "leakage_checker",
+      "priority": "P0",
+      "blocking": true,
+      "related_hypothesis_ids": [
+        "leak_001"
+      ],
+      "params": {}
+    }
+  ],
+  "structured_findings": [],
+  "scout_limitations": [
+    "Synthetic offline fixture for deterministic tests."
+  ],
+  "models_used": {}
+}

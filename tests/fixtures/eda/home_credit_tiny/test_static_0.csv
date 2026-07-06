@@ -1,0 +1,5 @@
+case_id,num_group1,credit_amount,status,mostly_missing_flag,merchant_code
+2001,0,14000,active,,merchant_2001
+2002,1,23000,closed,,merchant_2002
+2003,0,16000,active,,merchant_2003
+2004,2,31000,late,1,merchant_2004
