@@ -282,6 +282,11 @@ def test_full_mocked_pipeline_completes_and_records_github_warning(
     research_run_payload = json.loads((run_path / "research_run.json").read_text(encoding="utf-8"))
     assert research_run_payload["competition_id"] == "comp-1"
     assert research_run_payload["report_path"] == result.report_path
+    assert research_run_payload["plan_data"]["metric"] == "gini"
+    assert research_run_payload["retrieved_document_ids"] == ["retrieved-1"]
+    assert research_run_payload["reasoning_outputs_summary"]["metric"]["confidence"] == "medium"
+    assert research_run_payload["reasoning_outputs_summary"]["experiments"]["count"] == 1
+    assert json.loads((Path(result.report_path).parent / "research_run.json").read_text(encoding="utf-8")) == research_run_payload
     assert json.loads((run_path / "domain_patterns.json").read_text(encoding="utf-8"))[0]["competition_family"] == "credit_risk_tabular"
 
 

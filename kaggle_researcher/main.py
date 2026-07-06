@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import re
 import time
 from collections import Counter
@@ -44,9 +45,21 @@ from kaggle_researcher.reasoning.skeptical_reviewer import review
 from kaggle_researcher.reasoning.validation_architect import design_validation
 from kaggle_researcher.retrieval.source_quality import rerank_by_source_quality, source_quality_summary
 from kaggle_researcher.retriever import hybrid_search
-from kaggle_researcher.schemas import PlanData, ResearchRunResult, RetrievedDocument, SourceDocument
+from kaggle_researcher.schemas import (
+    PlanData,
+    ResearchRunResult,
+    RetrievedDocument,
+    ReviewResult,
+    SourceDocument,
+)
 from kaggle_researcher.store.domain_memory import DomainMemory
 from kaggle_researcher.store.pg_store import PgStore
+
+
+FAST_MAX_NOTEBOOKS = 3
+FAST_MAX_PAPERS = 3
+FAST_MAX_REPOS = 2
+FAST_MAX_RETRIEVAL_QUERIES = 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -86,6 +99,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow a minimal report if full reasoning fails.",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable verbose debug logging.",
+    )
+    parser.add_argument(
+        "--no-github",
+        action="store_true",
+        help="Skip GitHub repository collection.",
+    )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Reduce collection limits and skip the skeptical reviewer pass.",
+    )
     return parser
 
 
@@ -101,7 +129,14 @@ async def run_research(
     show_progress: bool = True,
     report_mode: Literal["full", "minimal"] = "full",
     allow_minimal_fallback: bool = False,
+    debug: bool = False,
+    no_github: bool = False,
+    fast: bool = False,
 ) -> ResearchRunResult:
+    if debug:
+        logging.basicConfig(level=logging.DEBUG)
+        logging.getLogger("kaggle_researcher").setLevel(logging.DEBUG)
+
     started_at = time.perf_counter()
     settings = load_config()
     resolved_competition_id = competition_id or derive_competition_id(competition_url)
@@ -135,11 +170,13 @@ async def run_research(
             settings=settings,
             warnings=warnings,
             show_progress=show_progress,
+            no_github=no_github,
+            fast=fast,
         )
         if not source_documents:
             raise RuntimeError("No source documents were collected")
         num_sources = _source_counts(source_documents)
-        _add_missing_source_warnings(num_sources, warnings)
+        _add_missing_source_warnings(num_sources, warnings, no_github=no_github)
         _write_json_artifact(run_dir, "source_counts.json", num_sources)
 
         _stage("[4/8] Summarizing documents...", show_progress)
@@ -173,6 +210,7 @@ async def run_research(
             top_k=settings.top_k,
             warnings=warnings,
             show_progress=show_progress,
+            fast=fast,
         )
         _write_json_artifact(run_dir, "retrieved_documents.json", retrieved_documents)
         _stage("[7/8] Running reasoning chain...", show_progress)
@@ -204,8 +242,6 @@ async def run_research(
             naming_strategy=report_naming_strategy,
         )
         _stage(f"Report saved to: {actual_report_path}", show_progress)
-        _write_json_artifact(run_dir, "warnings.json", warnings)
-
         result = ResearchRunResult(
             competition_id=resolved_competition_id,
             report_path=str(actual_report_path),
@@ -217,7 +253,15 @@ async def run_research(
             run_artifacts_path=str(run_dir),
             retrieved_evidence_count=len(retrieved_documents),
         )
-        _write_json_artifact(run_dir, "research_run.json", result)
+        run_summary = _build_research_run_summary(
+            result=result,
+            plan_data=plan_data,
+            retrieved_documents=retrieved_documents,
+            run_dir=run_dir,
+        )
+        _write_json_artifact(run_dir, "warnings.json", warnings)
+        _write_json_artifact(run_dir, "research_run.json", run_summary)
+        _write_json_file(actual_report_path.parent / "research_run.json", run_summary)
         return result
     except Exception:
         _write_json_artifact(run_dir, "warnings.json", warnings)
@@ -293,6 +337,8 @@ async def _collect_sources(
     settings: object,
     warnings: list[str],
     show_progress: bool,
+    no_github: bool = False,
+    fast: bool = False,
 ) -> list[SourceDocument]:
     documents: list[SourceDocument] = []
     try:
@@ -304,6 +350,7 @@ async def _collect_sources(
                 settings,
                 warnings,
                 show_progress,
+                fast,
             )
         )
     except Exception as exc:
@@ -318,6 +365,7 @@ async def _collect_sources(
             settings,
             warnings,
             show_progress,
+            fast,
         )
     )
     documents.extend(
@@ -326,17 +374,22 @@ async def _collect_sources(
             competition_id=competition_id,
             settings=settings,
             warnings=warnings,
+            fast=fast,
         )
     )
-    documents.extend(
-        await _collect_github_sources(
-            plan_data=plan_data,
-            competition_id=competition_id,
-            settings=settings,
-            warnings=warnings,
-            show_progress=show_progress,
+    if no_github:
+        warnings.append("GitHub source collection skipped by --no-github.")
+    else:
+        documents.extend(
+            await _collect_github_sources(
+                plan_data=plan_data,
+                competition_id=competition_id,
+                settings=settings,
+                warnings=warnings,
+                show_progress=show_progress,
+                fast=fast,
+            )
         )
-    )
     return documents
 
 
@@ -346,11 +399,12 @@ def _collect_kaggle_sources(
     settings: object,
     warnings: list[str],
     show_progress: bool,
+    fast: bool = False,
 ) -> list[SourceDocument]:
     raw_notebooks = search_notebooks(
         plan_data.kaggle_queries,
         competition_id=competition_id,
-        max_notebooks=settings.max_notebooks,
+        max_notebooks=_fast_limit(settings.max_notebooks, FAST_MAX_NOTEBOOKS, fast),
     )
     usable_notebooks: list[dict[str, object]] = []
 
@@ -400,9 +454,13 @@ def _collect_arxiv_sources(
     settings: object,
     warnings: list[str],
     show_progress: bool,
+    fast: bool = False,
 ) -> list[SourceDocument]:
     try:
-        papers = search_arxiv(plan_data.arxiv_queries, max_papers=settings.max_papers)
+        papers = search_arxiv(
+            plan_data.arxiv_queries,
+            max_papers=_fast_limit(settings.max_papers, FAST_MAX_PAPERS, fast),
+        )
         enriched_papers = enrich_with_pdf(papers, cache_dir=settings.pdf_cache_dir)
         return build_arxiv_documents(enriched_papers, competition_id=competition_id)
     except Exception as exc:
@@ -415,13 +473,14 @@ async def _collect_paper_sources(
     competition_id: str,
     settings: object,
     warnings: list[str],
+    fast: bool = False,
 ) -> list[SourceDocument]:
     paper_queries = [*plan_data.arxiv_queries]
     if not paper_queries:
         return []
     raw_papers = await search_paper_sources(
         queries=paper_queries,
-        max_results=settings.max_papers,
+        max_results=_fast_limit(settings.max_papers, FAST_MAX_PAPERS, fast),
         warnings=warnings,
     )
     return build_arxiv_documents(raw_papers, competition_id=competition_id)
@@ -433,6 +492,7 @@ async def _collect_github_sources(
     settings: object,
     warnings: list[str],
     show_progress: bool,
+    fast: bool = False,
 ) -> list[SourceDocument]:
     if not plan_data.github_queries:
         return []
@@ -441,7 +501,7 @@ async def _collect_github_sources(
         raw_repos = await search_repos(
             plan_data.github_queries,
             token=settings.github_token,
-            max_repos=settings.max_repos,
+            max_repos=_fast_limit(settings.max_repos, FAST_MAX_REPOS, fast),
         )
         return build_github_documents(raw_repos, competition_id=competition_id)
     except Exception as exc:
@@ -470,9 +530,12 @@ async def _retrieve_documents(
     top_k: int,
     warnings: list[str],
     show_progress: bool = True,
+    fast: bool = False,
 ) -> list[RetrievedDocument]:
     retrieved_by_id: dict[str, RetrievedDocument] = {}
     queries = _retrieval_queries(plan_data)
+    if fast:
+        queries = queries[:FAST_MAX_RETRIEVAL_QUERIES]
     for query in tqdm(
         queries,
         desc="Retrieving evidence",
@@ -548,6 +611,7 @@ async def _build_report_text(
     run_dir: Path,
     warnings: list[str],
     show_progress: bool,
+    fast: bool = False,
 ) -> str:
     if report_mode == "minimal":
         return _build_minimal_report_text(competition_desc, plan_data, retrieved_documents)
@@ -562,6 +626,7 @@ async def _build_report_text(
             model=model,
             run_dir=run_dir,
             show_progress=show_progress,
+            skip_reviewer=fast,
         )
     except Exception as exc:
         if allow_minimal_fallback:
@@ -579,6 +644,7 @@ async def _build_full_report_text(
     model: str,
     run_dir: Path,
     show_progress: bool,
+    skip_reviewer: bool = False,
 ) -> str:
     domain_patterns = await _run_reasoning_stage(
         "domain_memory",
@@ -690,17 +756,24 @@ async def _build_full_report_text(
         "experiments": provenance_sections["experiments"],
         "leaderboard": provenance_sections["leaderboard"],
     }
-    review_result = await _run_reasoning_stage(
-        "skeptical_reviewer",
-        lambda: review(
-            draft_sections=draft_sections,
-            retrieved_documents=retrieved_documents,
-            client=client,
-            model=model,
-            artifact_dir=run_dir,
-        ),
-        show_progress,
-    )
+    if skip_reviewer:
+        review_result = ReviewResult(
+            confidence="low",
+            evidence_ids=[],
+            too_generic=["Skipped by --fast."],
+        )
+    else:
+        review_result = await _run_reasoning_stage(
+            "skeptical_reviewer",
+            lambda: review(
+                draft_sections=draft_sections,
+                retrieved_documents=retrieved_documents,
+                client=client,
+                model=model,
+                artifact_dir=run_dir,
+            ),
+            show_progress,
+        )
     _write_json_artifact(run_dir, "review_result.json", review_result)
     provenance_sections["review"] = attach_default_provenance(
         "review",
@@ -815,10 +888,12 @@ def _create_run_dir(competition_id: str) -> Path:
 
 def _write_json_artifact(run_dir: Path, filename: str, value: Any) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / filename).write_text(
-        json.dumps(_jsonable(value), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _write_json_file(run_dir / filename, value)
+
+
+def _write_json_file(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_jsonable(value), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _write_text_artifact(run_dir: Path, filename: str, value: str) -> None:
@@ -868,13 +943,86 @@ def _models_used(settings: Any) -> dict[str, str]:
     }
 
 
-def _add_missing_source_warnings(num_sources: dict[str, int], warnings: list[str]) -> None:
-    if num_sources.get("github", 0) == 0:
+def _add_missing_source_warnings(
+    num_sources: dict[str, int],
+    warnings: list[str],
+    *,
+    no_github: bool = False,
+) -> None:
+    if not no_github and num_sources.get("github", 0) == 0:
         warnings.append("GitHub source count is 0. Check GITHUB_TOKEN or query quality.")
     if num_sources.get("huggingface_papers", 0) == 0:
         warnings.append(
             "Hugging Face Papers source count is 0. Falling back to arXiv-only academic retrieval."
         )
+
+
+def _build_research_run_summary(
+    result: ResearchRunResult,
+    plan_data: PlanData,
+    retrieved_documents: list[RetrievedDocument],
+    run_dir: Path,
+) -> dict[str, Any]:
+    return {
+        **result.model_dump(mode="json"),
+        "plan_data": plan_data.model_dump(mode="json"),
+        "retrieved_document_ids": [document.id for document in retrieved_documents],
+        "reasoning_outputs_summary": _reasoning_outputs_summary(run_dir),
+        "report_path": result.report_path,
+    }
+
+
+def _reasoning_outputs_summary(run_dir: Path) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    artifact_map = {
+        "metric": "metric_result.json",
+        "validation": "validation_result.json",
+        "leakage": "leakage_result.json",
+        "leaderboard": "leaderboard_audit.json",
+        "experiments": "experiments.json",
+        "review": "review_result.json",
+    }
+    for name, filename in artifact_map.items():
+        path = run_dir / filename
+        if not path.exists():
+            continue
+        value = json.loads(path.read_text(encoding="utf-8"))
+        summary[name] = _summarize_reasoning_output(value)
+    return summary
+
+
+def _summarize_reasoning_output(value: Any) -> Any:
+    if isinstance(value, list):
+        return {
+            "count": len(value),
+            "items": [
+                {
+                    key: item.get(key)
+                    for key in ("priority", "experiment", "confidence", "evidence_ids")
+                    if isinstance(item, dict) and key in item
+                }
+                for item in value[:10]
+            ],
+        }
+    if isinstance(value, dict):
+        keys = (
+            "confidence",
+            "evidence_ids",
+            "risk_level",
+            "validation_risk",
+            "recommended_cv",
+            "shake_up_risk",
+            "public_lb_trust",
+            "unsupported_claims",
+            "too_generic",
+            "unnecessary_experiments",
+        )
+        return {key: value[key] for key in keys if key in value}
+    return value
+
+
+def _fast_limit(configured: int, fast_limit: int, fast: bool) -> int:
+    return min(configured, fast_limit) if fast else configured
 
 
 def _slugify(value: str) -> str:
@@ -900,6 +1048,9 @@ async def run() -> int:
         show_progress=not args.no_progress,
         report_mode=args.report_mode,
         allow_minimal_fallback=args.allow_minimal_fallback,
+        debug=args.debug,
+        no_github=args.no_github,
+        fast=args.fast,
     )
     print("Research run complete.")
     print(f"Report mode: {result.report_mode}")
