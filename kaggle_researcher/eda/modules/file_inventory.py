@@ -4,6 +4,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from kaggle_researcher.eda.io.dataset_reader import DatasetReader, ReaderError
+from kaggle_researcher.eda.presets import CompetitionPreset
 from kaggle_researcher.eda.schemas import DatasetFile, FileInventoryResult
 
 
@@ -11,7 +12,10 @@ DETECTED_EXTENSIONS = {".csv", ".parquet", ".json", ".jsonl", ".zip"}
 READABLE_EXTENSIONS = {".csv", ".parquet", ".json", ".jsonl"}
 
 
-def build_file_inventory(dataset_path: Path) -> FileInventoryResult:
+def build_file_inventory(
+    dataset_path: Path,
+    preset: CompetitionPreset | None = None,
+) -> FileInventoryResult:
     root = Path(dataset_path).resolve()
     if not root.exists():
         raise FileNotFoundError(f"Dataset path does not exist: {root}")
@@ -25,8 +29,8 @@ def build_file_inventory(dataset_path: Path) -> FileInventoryResult:
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
         relative_path = path.relative_to(root).as_posix()
         extension = path.suffix.lower()
-        role_hint = _detect_role_hint(path.name)
-        table_hint = _detect_table_hint(path.name, role_hint)
+        role_hint = _detect_role_hint(path.name, preset=preset)
+        table_hint = _detect_table_hint(path.name, role_hint, preset=preset)
         can_read, read_error = _check_readability(reader, relative_path, extension)
         if read_error is not None:
             warnings.append(f"{relative_path}: {read_error}")
@@ -95,8 +99,14 @@ def _check_readability(
     return True, None
 
 
-def _detect_role_hint(filename: str) -> str:
+def _detect_role_hint(filename: str, *, preset: CompetitionPreset | None = None) -> str:
     stem = Path(filename).stem.lower()
+    if preset is not None and _matches_patterns(stem, preset, "sample_submission"):
+        return "sample_submission"
+    if preset is not None and _matches_patterns(stem, preset, "train"):
+        return "train"
+    if preset is not None and _matches_patterns(stem, preset, "test"):
+        return "test"
     if "sample_submission" in stem or stem in {"submission", "sample"}:
         return "sample_submission"
     if stem.startswith("train") or "_train" in stem or stem.endswith("_train"):
@@ -108,10 +118,19 @@ def _detect_role_hint(filename: str) -> str:
     return "unknown"
 
 
-def _detect_table_hint(filename: str, role_hint: str) -> str:
+def _detect_table_hint(
+    filename: str,
+    role_hint: str,
+    *,
+    preset: CompetitionPreset | None = None,
+) -> str:
     stem = Path(filename).stem.lower()
     if role_hint == "sample_submission":
         return "submission"
+    if preset is not None:
+        for table_hint in ("base", "depth_0", "depth_1", "depth_2"):
+            if _matches_patterns(stem, preset, table_hint):
+                return table_hint
     if "base" in stem:
         return "base"
     if stem.endswith("_0") or "depth_0" in stem:
@@ -173,6 +192,10 @@ def _logical_train_test_pair_name(filename: str) -> str:
         if stem.endswith(suffix):
             return stem[: -len(suffix)]
     return stem
+
+
+def _matches_patterns(stem: str, preset: CompetitionPreset, pattern_name: str) -> bool:
+    return any(pattern.lower() in stem for pattern in preset.table_name_patterns.get(pattern_name, ()))
 
 
 __all__ = ["build_file_inventory"]
