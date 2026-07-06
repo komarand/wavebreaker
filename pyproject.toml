@@ -38,7 +38,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["kaggle_researcher*"]
+include = ["kaggle_researcher*", "kaggle_eda_engine*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

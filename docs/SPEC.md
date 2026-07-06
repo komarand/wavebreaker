@@ -621,3 +621,28 @@ accelerate
 - Validation Architect и Leaderboard Auditor дают рекомендации на основе
   текстовых источников и описания задачи — не на основе фактического
   анализа train/test
+
+
+## Kaggle EDA Engine / Data Evidence Layer
+
+Starting from v5, KaggleResearcher includes an optional EDA Engine described in `docs/EDA_ENGINE_SPEC.md`.
+
+The existing research pipeline remains source/retrieval/reasoning-based and does not execute Kaggle datasets. The EDA Engine is a separate data-execution layer under:
+
+- `kaggle_researcher/eda/`
+- `kaggle_eda_engine/`
+
+EDA Engine consumes:
+
+- `research_hypotheses.json`
+- `eda_task_plan.json`
+- Kaggle dataset or local dataset path
+
+EDA Engine produces:
+
+- `eda_evidence_pack.json`
+- `eda_summary.md`
+- module-level JSON artifacts
+- `artifacts/`
+
+Notebook execution remains forbidden. Dataset execution is allowed only inside the EDA Engine scope.

@@ -1301,3 +1301,12 @@ Install dependencies with:
 ```powershell
 E:\wavebreaker\.venv-win\Scripts\python.exe -m pip install -r requirements.txt
 E:\wavebreaker\.venv-win\Scripts\python.exe -m pip install -e .
+
+### Milestone D+ — Kaggle EDA Engine
+
+EDA Engine tasks continue in:
+
+- `docs/EDA_ENGINE_MILESTONES.md`
+- `docs/EDA_ENGINE_CODEX_TASKS_28_PLUS.md`
+
+For EDA Engine implementation, use those files together with `docs/SPEC.md`.
