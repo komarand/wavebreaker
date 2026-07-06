@@ -93,31 +93,74 @@ async def compose_report(
         },
         "required_sections": SECTION_HEADINGS,
     }
-    report_text = await client.chat_text(
-        model=model,
-        system_prompt=(
-            "Compose the final Kaggle analyst v4 roadmap as markdown-like text. "
-            "Use exactly the 15 required section headings in order. Include confidence "
-            "where relevant. Include 'Чего не делать'. Do not claim real EDA, train/test "
-            "analysis, notebook execution, or confirmed leakage. Do not include chain-of-thought. "
-            "In the validation section, when temporal/stability signals exist, write this policy: "
-            "Primary: out-of-time holdout on the latest periods plus rolling/expanding temporal CV. "
-            "Secondary: StratifiedGroupKFold only as a robustness check if it does not violate "
-            "chronological order. Explicitly say not to train on future periods and validate on "
-            "past periods. Include provenance markers for key claims using this style: "
-            "_Provenance: Kaggle + heuristic; not verified on data._ Tag validation, leakage, "
-            "metric, model, feature, leaderboard, and do-not-do claims."
-        ),
-        user_prompt=json.dumps(payload, ensure_ascii=False, indent=2),
-        timeout=180,
-        max_tokens=6000,
+    report_text = _canonicalize_report_headings(
+        await client.chat_text(
+            model=model,
+            system_prompt=(
+                "Compose the final Kaggle analyst v4 roadmap as markdown-like text. "
+                "Use exactly the 15 required section headings in order. Include confidence "
+                "where relevant. Include 'Чего не делать'. Do not claim real EDA, train/test "
+                "analysis, notebook execution, or confirmed leakage. Do not include chain-of-thought. "
+                "In the validation section, when temporal/stability signals exist, write this policy: "
+                "Primary: out-of-time holdout on the latest periods plus rolling/expanding temporal CV. "
+                "Secondary: StratifiedGroupKFold only as a robustness check if it does not violate "
+                "chronological order. Explicitly say not to train on future periods and validate on "
+                "past periods. Include provenance markers for key claims using this style: "
+                "_Provenance: Kaggle + heuristic; not verified on data._ Tag validation, leakage, "
+                "metric, model, feature, leaderboard, and do-not-do claims."
+            ),
+            user_prompt=json.dumps(payload, ensure_ascii=False, indent=2),
+            timeout=180,
+            max_tokens=6000,
+        )
     )
-    validate_composed_report(report_text)
+    try:
+        validate_composed_report(report_text)
+    except RuntimeError as exc:
+        if "15 required section headings" not in str(exc):
+            raise
+        report_text = _canonicalize_report_headings(
+            await _repair_report_sections(
+                client=client,
+                model=model,
+                report_text=report_text,
+                payload=payload,
+            )
+        )
+        validate_composed_report(report_text)
     return report_text
 
 
+async def _repair_report_sections(
+    client: DeepSeekClient,
+    model: str,
+    report_text: str,
+    payload: dict[str, Any],
+) -> str:
+    return await client.chat_text(
+        model=model,
+        system_prompt=(
+            "Repair the markdown roadmap structure only. Return the full report with exactly "
+            "the required 15 headings in the required order. Preserve the existing substantive "
+            "content as much as possible. Do not add new facts. Do not claim real EDA, train/test "
+            "analysis, notebook execution, confirmed leakage, or chain-of-thought."
+        ),
+        user_prompt=json.dumps(
+            {
+                "required_sections": SECTION_HEADINGS,
+                "original_inputs": payload,
+                "report_to_repair": report_text,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        timeout=180,
+        max_tokens=6000,
+    )
+
+
 def validate_composed_report(report_text: str) -> None:
-    found_headings = _extract_required_heading_lines(report_text)
+    found_headings = _extract_required_heading_lines(_canonicalize_report_headings(report_text))
     if found_headings != SECTION_HEADINGS:
         raise RuntimeError(
             "Composed report must contain exactly the 15 required section headings in order. "
@@ -136,13 +179,88 @@ def validate_composed_report(report_text: str) -> None:
 
 
 def _extract_required_heading_lines(report_text: str) -> list[str]:
-    required_by_lower = {heading.lower(): heading for heading in SECTION_HEADINGS}
     found: list[str] = []
     for line in report_text.splitlines():
-        normalized = _normalize_heading_line(line)
-        if normalized.lower() in required_by_lower:
-            found.append(required_by_lower[normalized.lower()])
+        canonical = _canonical_heading_for_line(line)
+        if canonical is not None:
+            found.append(canonical)
     return found
+
+
+def _canonicalize_report_headings(report_text: str) -> str:
+    lines: list[str] = []
+    for line in report_text.splitlines():
+        canonical = _canonical_heading_for_line(line)
+        if canonical is None:
+            lines.append(line)
+        else:
+            lines.append(f"## {canonical}")
+    return "\n".join(lines)
+
+
+def _canonical_heading_for_line(line: str) -> str | None:
+    normalized = _normalize_heading_line(line)
+    if not normalized:
+        return None
+    return _heading_lookup().get(_heading_key(normalized))
+
+
+def _heading_lookup() -> dict[str, str]:
+    lookup = {_heading_key(heading): heading for heading in SECTION_HEADINGS}
+    aliases = {
+        SECTION_HEADINGS[1]: [
+            "Тип соревнования и метрика",
+            "Тип соревнования и интерпретация metric",
+        ],
+        SECTION_HEADINGS[2]: [
+            "Анатомия датасета",
+            "Данные и анатомия датасета",
+            "Анатомия данных",
+        ],
+        SECTION_HEADINGS[4]: [
+            "Риски утечки и shakeup",
+            "Риски утечки и shake up",
+            "Утечки и shake-up",
+        ],
+        SECTION_HEADINGS[5]: [
+            "Разведка публичных notebooks",
+            "Разведка по публичным ноутбукам",
+        ],
+        SECTION_HEADINGS[6]: [
+            "Паттерны похожих соревнований",
+            "Паттерны прошлых соревнований",
+        ],
+        SECTION_HEADINGS[11]: [
+            "Очередь экспериментов",
+            "План экспериментов",
+            "Experiment queue",
+        ],
+        SECTION_HEADINGS[12]: [
+            "Стратегия финальных сабмитов",
+            "Выбор финальных сабмитов",
+        ],
+        SECTION_HEADINGS[13]: [
+            "Что не делать",
+            "Do not do",
+        ],
+        SECTION_HEADINGS[14]: [
+            "Первые 48 часов",
+            "План на первые 48 часов",
+            "48-hour action plan",
+        ],
+    }
+    for canonical, variants in aliases.items():
+        for variant in variants:
+            lookup[_heading_key(variant)] = canonical
+    return lookup
+
+
+def _heading_key(value: str) -> str:
+    text = value.strip().lower().replace("ё", "е")
+    text = re.sub(r"\s*\([^)]*\)", "", text)
+    text = text.replace("shake-up", "shakeup").replace("shake up", "shakeup")
+    text = re.sub(r"[^0-9a-zа-я]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _normalize_heading_line(line: str) -> str:

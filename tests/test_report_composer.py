@@ -39,6 +39,16 @@ class FakeClient:
         return self.response
 
 
+class SequentialFakeClient:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = list(responses)
+        self.calls: list[dict[str, object]] = []
+
+    async def chat_text(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.responses.pop(0)
+
+
 def _validation() -> ValidationResult:
     return ValidationResult(
         confidence="medium",
@@ -134,6 +144,40 @@ def test_compose_report_returns_report_with_all_15_required_headings() -> None:
     assert payload["required_sections"] == SECTION_HEADINGS
     assert payload["plan_data"]["metric"] == "gini"
     assert payload["review_revised_sections_for_prompt"]["validation"] == "Keep temporal validation."
+
+
+def test_compose_report_canonicalizes_common_heading_variants() -> None:
+    variant_headings = SECTION_HEADINGS.copy()
+    variant_headings[2] = "Анатомия датасета"
+    variant_headings[11] = "Очередь экспериментов"
+    variant_headings[13] = "Что не делать"
+    report = "\n\n".join(
+        f"## {heading}\nConfidence: medium. _Provenance: Kaggle + heuristic; not verified on data._"
+        for heading in variant_headings
+    )
+    client = FakeClient(report)
+
+    result = _run_compose(client)
+
+    assert f"## {SECTION_HEADINGS[2]}" in result
+    assert f"## {SECTION_HEADINGS[11]}" in result
+    assert f"## {SECTION_HEADINGS[13]}" in result
+    validate_composed_report(result)
+
+
+def test_compose_report_repairs_missing_headings_once() -> None:
+    client = SequentialFakeClient(
+        [
+            "## Executive summary\nToo short.",
+            _full_report(),
+        ]
+    )
+
+    result = _run_compose(client)
+
+    assert len(client.calls) == 2
+    assert "Repair the markdown roadmap structure only" in str(client.calls[1]["system_prompt"])
+    validate_composed_report(result)
 
 
 def test_validate_composed_report_rejects_missing_sections() -> None:
