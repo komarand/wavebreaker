@@ -34,6 +34,12 @@ from kaggle_researcher.clients.deepseek_client import DeepSeekClient
 from kaggle_researcher.config import load_config
 from kaggle_researcher.embedder import embed_texts
 from kaggle_researcher.planner import fallback_plan, plan
+from kaggle_researcher.research_scout import (
+    build_research_hypotheses,
+    build_research_scout_summary,
+    split_eda_task_plan,
+    validate_research_hypotheses,
+)
 from kaggle_researcher.report.docx_generator import generate_report
 from kaggle_researcher.reasoning.experiment_planner import plan_experiments
 from kaggle_researcher.reasoning.leaderboard_auditor import audit_leaderboard_risk
@@ -92,12 +98,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--report-mode",
         choices=("full", "minimal"),
         default="full",
-        help="Report mode. Full is the default; minimal must be requested explicitly.",
+        help="Compatibility alias for --mode full|minimal. Full is the default.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("full", "scout", "minimal"),
+        default="full",
+        help="Pipeline mode. Scout writes Research Scout JSON artifacts without a DOCX report.",
     )
     parser.add_argument(
         "--allow-minimal-fallback",
         action="store_true",
         help="Allow a minimal report if full reasoning fails.",
+    )
+    parser.add_argument(
+        "--allow-partial-scout-output",
+        action="store_true",
+        help="Write research_hypotheses_partial.json when Scout validation fails.",
     )
     parser.add_argument(
         "--debug",
@@ -128,7 +145,9 @@ async def run_research(
     report_naming_strategy: str = "timestamp",
     show_progress: bool = True,
     report_mode: Literal["full", "minimal"] = "full",
+    mode: Literal["full", "scout", "minimal"] = "full",
     allow_minimal_fallback: bool = False,
+    allow_partial_scout_output: bool = False,
     debug: bool = False,
     no_github: bool = False,
     fast: bool = False,
@@ -136,6 +155,10 @@ async def run_research(
     if debug:
         logging.basicConfig(level=logging.DEBUG)
         logging.getLogger("kaggle_researcher").setLevel(logging.DEBUG)
+    if mode == "minimal":
+        report_mode = "minimal"
+    elif report_mode == "minimal":
+        mode = "minimal"
 
     started_at = time.perf_counter()
     settings = load_config()
@@ -143,6 +166,8 @@ async def run_research(
     warnings: list[str] = []
     run_dir = _create_run_dir(resolved_competition_id)
     models_used = _models_used(settings)
+    if mode == "scout":
+        models_used["research_scout"] = settings.deepseek_v4_pro
     _write_json_artifact(run_dir, "models_used.json", models_used)
     store = PgStore(
         competition_id=resolved_competition_id,
@@ -213,6 +238,81 @@ async def run_research(
             fast=fast,
         )
         _write_json_artifact(run_dir, "retrieved_documents.json", retrieved_documents)
+        if mode == "scout":
+            _stage("[7/8] Running Research Scout...", show_progress)
+            domain_patterns = await domain_memory.find_similar(
+                task_type=plan_data.task_type,
+                domain=plan_data.domain,
+                top_k=5,
+            )
+            _write_json_artifact(run_dir, "domain_patterns.json", domain_patterns)
+            scout_payload, scout_raw_payload = await build_research_hypotheses(
+                competition_id=resolved_competition_id,
+                competition_url=competition_url,
+                competition_desc=competition_desc,
+                plan_data=plan_data.model_dump(mode="json"),
+                retrieved_documents=[
+                    document.model_dump(mode="json") for document in retrieved_documents
+                ],
+                source_quality_summary=source_quality_summary(retrieved_documents),
+                domain_patterns=domain_patterns,
+                client=client,
+                model=settings.deepseek_v4_pro,
+                return_raw=True,
+            )
+            validation_payload = {"ok": True, "errors": []}
+            try:
+                validate_research_hypotheses(scout_payload)
+            except ValueError as exc:
+                validation_payload = {"ok": False, "errors": str(exc).splitlines()}
+                _write_json_artifact(run_dir, "research_scout_validation.json", validation_payload)
+                if allow_partial_scout_output:
+                    partial_payload = {**scout_payload, "validation_errors": validation_payload["errors"]}
+                    _write_json_artifact(run_dir, "research_hypotheses_partial.json", partial_payload)
+                    warnings.append(f"Research Scout validation failed; wrote partial output: {exc}")
+                else:
+                    raise
+            else:
+                _write_json_artifact(run_dir, "research_scout_validation.json", validation_payload)
+
+            eda_task_plan = split_eda_task_plan(scout_payload)
+            scout_summary = build_research_scout_summary(scout_payload)
+            _write_json_artifact(run_dir, "research_scout_raw.json", scout_raw_payload)
+            hypotheses_path = run_dir / "research_hypotheses.json"
+            eda_task_plan_path = run_dir / "eda_task_plan.json"
+            summary_path = run_dir / "research_scout_summary.md"
+            _write_json_file(hypotheses_path, scout_payload)
+            _write_json_file(eda_task_plan_path, eda_task_plan)
+            summary_path.write_text(scout_summary, encoding="utf-8")
+            _write_json_artifact(run_dir, "warnings.json", warnings)
+            result = ResearchRunResult(
+                competition_id=resolved_competition_id,
+                mode="scout",
+                report_mode="scout",
+                num_documents=len(summarized_documents),
+                num_sources=num_sources,
+                warnings=warnings,
+                duration_sec=round(time.perf_counter() - started_at, 3),
+                run_artifacts_path=str(run_dir),
+                retrieved_evidence_count=len(retrieved_documents),
+                research_hypotheses_path=str(hypotheses_path),
+                eda_task_plan_path=str(eda_task_plan_path),
+                summary_path=str(summary_path),
+                num_hypotheses=len(scout_payload["hypotheses"]),
+                num_eda_tasks=len(scout_payload["eda_tasks"]),
+            )
+            run_summary = _build_research_run_summary(
+                result=result,
+                plan_data=plan_data,
+                retrieved_documents=retrieved_documents,
+                run_dir=run_dir,
+            )
+            _write_json_artifact(run_dir, "research_run.json", run_summary)
+            _stage("Research Scout complete.", show_progress)
+            _stage(f"Hypotheses saved to: {hypotheses_path}", show_progress)
+            _stage(f"EDA task plan saved to: {eda_task_plan_path}", show_progress)
+            _stage(f"Summary saved to: {summary_path}", show_progress)
+            return result
         _stage("[7/8] Running reasoning chain...", show_progress)
         target_report_path = Path(report_path) if report_path is not None else _report_output_path(
             output_dir=output_dir,
@@ -244,6 +344,7 @@ async def run_research(
         _stage(f"Report saved to: {actual_report_path}", show_progress)
         result = ResearchRunResult(
             competition_id=resolved_competition_id,
+            mode=mode,
             report_path=str(actual_report_path),
             num_documents=len(summarized_documents),
             num_sources=num_sources,
@@ -932,6 +1033,7 @@ def _models_used(settings: Any) -> dict[str, str]:
     return {
         "planner": settings.deepseek_v4_pro,
         "summarizer": settings.deepseek_v4_flash,
+        "research_scout": reasoning_model,
         "validation_architect": reasoning_model,
         "leakage_risk_analyst": reasoning_model,
         "metric_specialist": reasoning_model,
@@ -1037,6 +1139,10 @@ async def run() -> int:
         print("Provide competition_url and competition_desc to run the minimal pipeline.")
         return 0
 
+    mode = args.mode
+    if mode == "full" and args.report_mode == "minimal":
+        mode = "minimal"
+
     result = await run_research(
         competition_url=args.competition_url,
         competition_desc=args.competition_desc,
@@ -1047,11 +1153,27 @@ async def run() -> int:
         report_naming_strategy=args.report_naming_strategy,
         show_progress=not args.no_progress,
         report_mode=args.report_mode,
+        mode=mode,
         allow_minimal_fallback=args.allow_minimal_fallback,
+        allow_partial_scout_output=args.allow_partial_scout_output,
         debug=args.debug,
         no_github=args.no_github,
         fast=args.fast,
     )
+    if result.mode == "scout":
+        print("Research Scout complete.")
+        print(f"Hypotheses saved to: {result.research_hypotheses_path}")
+        print(f"EDA task plan saved to: {result.eda_task_plan_path}")
+        print(f"Summary saved to: {result.summary_path}")
+        print(f"Run artifacts saved to: {result.run_artifacts_path}")
+        print(f"Hypotheses: {result.num_hypotheses}")
+        print(f"EDA tasks: {result.num_eda_tasks}")
+        print(f"Warnings: {len(result.warnings)}")
+        for warning in result.warnings:
+            print(f"  - {warning}")
+        print(result.model_dump_json(indent=2))
+        return 0
+
     print("Research run complete.")
     print(f"Report mode: {result.report_mode}")
     print(f"Report saved to: {result.report_path}")

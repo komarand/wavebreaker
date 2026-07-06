@@ -53,14 +53,20 @@ class PlanData(BaseModel):
 
 class ResearchRunResult(BaseModel):
     competition_id: str
-    report_path: str
+    report_path: str | None = None
     num_documents: int
     num_sources: dict[str, int] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     duration_sec: float
+    mode: str = "full"
     report_mode: str = "full"
     run_artifacts_path: str | None = None
     retrieved_evidence_count: int = 0
+    research_hypotheses_path: str | None = None
+    eda_task_plan_path: str | None = None
+    summary_path: str | None = None
+    num_hypotheses: int = 0
+    num_eda_tasks: int = 0
 
 
 class ReasoningBaseResult(BaseModel):
