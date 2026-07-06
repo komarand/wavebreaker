@@ -7,7 +7,11 @@ import pytest
 from pydantic import BaseModel
 
 from kaggle_researcher.reasoning.common import call_reasoning_json
-from kaggle_researcher.reasoning.report_composer import compose_report, format_section_for_prompt
+from kaggle_researcher.reasoning.report_composer import (
+    SECTION_HEADINGS,
+    compose_report,
+    format_section_for_prompt,
+)
 from kaggle_researcher.schemas import (
     ExperimentItem,
     LeaderboardAuditResult,
@@ -80,7 +84,11 @@ def test_report_composer_serializes_structured_revised_sections_without_crashing
 
         async def chat_text(self, **kwargs):
             self.user_prompt = kwargs["user_prompt"]
-            return "ok"
+            return "\n\n".join(
+                f"## {heading}\nKey claim. _Provenance: Kaggle + heuristic; not verified on data._ "
+                + ("More detail. " * 25)
+                for heading in SECTION_HEADINGS
+            )
 
     client = FakeClient()
     review = ReviewResult(

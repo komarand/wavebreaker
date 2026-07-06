@@ -14,6 +14,8 @@ venv/
 env/
 ENV/
 
+
+runs/
 # Build / packaging
 build/
 dist/

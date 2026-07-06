@@ -83,7 +83,11 @@ def test_report_composer_prompt_includes_provenance_and_temporal_policy() -> Non
 
         async def chat_text(self, **kwargs):
             self.system_prompt = kwargs["system_prompt"]
-            return "ok"
+            return "\n\n".join(
+                f"## {heading}\nKey claim. _Provenance: Kaggle + heuristic; not verified on data._ "
+                + ("More detail. " * 25)
+                for heading in SECTION_HEADINGS
+            )
 
     client = FakeClient()
     asyncio.run(

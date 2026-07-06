@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from kaggle_researcher.clients.deepseek_client import DeepSeekClient
@@ -18,7 +19,7 @@ from kaggle_researcher.schemas import (
 SECTION_HEADINGS = [
     "Executive summary",
     "Тип соревнования и интерпретация метрики",
-    "Анатомия датасета",
+    "Анатомия датасета (по доступным описаниям, без EDA на реальных данных)",
     "Стратегия валидации",
     "Риски утечки и shake-up",
     "Разведка по публичным notebooks",
@@ -27,11 +28,31 @@ SECTION_HEADINGS = [
     "План feature engineering",
     "План моделей",
     "План ансамблирования",
-    "Очередь экспериментов",
+    "Очередь экспериментов с приоритетами",
     "Стратегия выбора финальных сабмитов",
     "Чего не делать",
     "План первых 48 часов",
 ]
+
+FORBIDDEN_REPORT_PHRASES = (
+    "we analyzed train/test",
+    "i analyzed train/test",
+    "train/test data was analyzed",
+    "train/test analysis was performed",
+    "real eda showed",
+    "eda showed",
+    "we ran eda",
+    "i ran eda",
+    "adversarial validation found",
+    "notebook execution showed",
+    "we executed notebooks",
+    "i executed notebooks",
+    "confirmed leakage",
+    "leakage confirmed",
+    "leakage found",
+    "chain-of-thought",
+    "chain of thought",
+)
 
 
 def format_section_for_prompt(value: Any) -> str:
@@ -72,7 +93,7 @@ async def compose_report(
         },
         "required_sections": SECTION_HEADINGS,
     }
-    return await client.chat_text(
+    report_text = await client.chat_text(
         model=model,
         system_prompt=(
             "Compose the final Kaggle analyst v4 roadmap as markdown-like text. "
@@ -91,3 +112,41 @@ async def compose_report(
         timeout=180,
         max_tokens=6000,
     )
+    validate_composed_report(report_text)
+    return report_text
+
+
+def validate_composed_report(report_text: str) -> None:
+    found_headings = _extract_required_heading_lines(report_text)
+    if found_headings != SECTION_HEADINGS:
+        raise RuntimeError(
+            "Composed report must contain exactly the 15 required section headings in order. "
+            f"Found {len(found_headings)} matching headings."
+        )
+    lowered = report_text.lower()
+    forbidden_phrase = next(
+        (phrase for phrase in FORBIDDEN_REPORT_PHRASES if phrase in lowered),
+        None,
+    )
+    if forbidden_phrase is not None:
+        raise RuntimeError(
+            "Composed report contains a forbidden data-execution or reasoning claim: "
+            f"{forbidden_phrase!r}"
+        )
+
+
+def _extract_required_heading_lines(report_text: str) -> list[str]:
+    required_by_lower = {heading.lower(): heading for heading in SECTION_HEADINGS}
+    found: list[str] = []
+    for line in report_text.splitlines():
+        normalized = _normalize_heading_line(line)
+        if normalized.lower() in required_by_lower:
+            found.append(required_by_lower[normalized.lower()])
+    return found
+
+
+def _normalize_heading_line(line: str) -> str:
+    text = line.strip()
+    text = re.sub(r"^#{1,6}\s+", "", text)
+    text = re.sub(r"^\d+[\.)]\s+", "", text)
+    return text.strip()
