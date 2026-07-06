@@ -55,6 +55,26 @@ class FakeStore:
         self.closed = True
 
 
+class FakeDomainMemory:
+    instances: list["FakeDomainMemory"] = []
+
+    def __init__(self, dsn: str, embed_dim: int) -> None:
+        self.dsn = dsn
+        self.embed_dim = embed_dim
+        self.initialized = False
+        self.closed = False
+        FakeDomainMemory.instances.append(self)
+
+    async def init(self) -> None:
+        self.initialized = True
+
+    async def find_similar(self, task_type: str, domain: str, top_k: int = 5) -> list[dict[str, Any]]:
+        return []
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 def make_source(
     doc_id: str,
     source: str,
@@ -115,6 +135,7 @@ def run(coro):
 
 def test_minimal_e2e_pipeline_creates_docx(monkeypatch, tmp_path: Path) -> None:
     FakeStore.instances = []
+    FakeDomainMemory.instances = []
     report_calls: list[dict[str, Any]] = []
     embed_calls: list[dict[str, Any]] = []
 
@@ -147,6 +168,7 @@ def test_minimal_e2e_pipeline_creates_docx(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("kaggle_researcher.main.load_config", lambda: FakeSettings())
     monkeypatch.setattr("kaggle_researcher.main.DeepSeekClient", FakeClient)
     monkeypatch.setattr("kaggle_researcher.main.PgStore", FakeStore)
+    monkeypatch.setattr("kaggle_researcher.main.DomainMemory", FakeDomainMemory)
     monkeypatch.setattr("kaggle_researcher.main.plan", fake_plan)
     monkeypatch.setattr(
         "kaggle_researcher.main.search_notebooks",
@@ -213,6 +235,8 @@ def test_minimal_e2e_pipeline_creates_docx(monkeypatch, tmp_path: Path) -> None:
     assert result.duration_sec >= 0
     assert FakeStore.instances[0].initialized is True
     assert FakeStore.instances[0].closed is True
+    assert FakeDomainMemory.instances[0].initialized is True
+    assert FakeDomainMemory.instances[0].closed is True
     assert [doc.id for doc in FakeStore.instances[0].upserted_docs] == ["kaggle-1", "arxiv-1"]
     assert len(FakeStore.instances[0].upserted_embeddings) == 2
     assert embed_calls == [{"texts": ["summary for kaggle-1", "summary for arxiv-1"], "batch_size": 4}]

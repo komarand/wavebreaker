@@ -59,6 +59,17 @@ class FakeStore:
         return None
 
 
+class FakeDomainMemory:
+    async def init(self) -> None:
+        return None
+
+    async def find_similar(self, task_type: str, domain: str, top_k: int = 5) -> list[dict[str, Any]]:
+        return []
+
+    async def close(self) -> None:
+        return None
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -126,6 +137,7 @@ def install_pipeline_mocks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> l
     monkeypatch.setattr(main_module, "load_config", lambda: FakeSettings())
     monkeypatch.setattr(main_module, "DeepSeekClient", FakeClient)
     monkeypatch.setattr(main_module, "PgStore", FakeStore)
+    monkeypatch.setattr(main_module, "DomainMemory", lambda dsn, embed_dim: FakeDomainMemory())
     monkeypatch.setattr(main_module, "plan", fake_plan)
     monkeypatch.setattr(main_module, "_collect_sources", fake_collect_sources)
     monkeypatch.setattr(main_module, "summarize_documents", fake_summarize_documents)
@@ -294,6 +306,7 @@ def test_full_report_passes_artifact_dir_only_to_reviewer(
             competition_desc="desc",
             plan_data=PlanData(task_type="classification", metric="gini", domain="credit"),
             retrieved_documents=[retrieved_doc()],
+            domain_memory=FakeDomainMemory(),
             client=FakeClient(api_key="secret"),
             model="model",
             run_dir=tmp_path,

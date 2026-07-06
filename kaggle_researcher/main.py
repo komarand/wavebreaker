@@ -45,6 +45,7 @@ from kaggle_researcher.reasoning.validation_architect import design_validation
 from kaggle_researcher.retrieval.source_quality import rerank_by_source_quality, source_quality_summary
 from kaggle_researcher.retriever import hybrid_search
 from kaggle_researcher.schemas import PlanData, ResearchRunResult, RetrievedDocument, SourceDocument
+from kaggle_researcher.store.domain_memory import DomainMemory
 from kaggle_researcher.store.pg_store import PgStore
 
 
@@ -113,10 +114,12 @@ async def run_research(
         dsn=settings.pg_dsn,
         embed_dim=settings.embed_dim,
     )
+    domain_memory = DomainMemory(dsn=settings.pg_dsn, embed_dim=settings.embed_dim)
 
     try:
         _stage("[1/8] Planning search queries...", show_progress)
         await store.init()
+        await domain_memory.init()
         client = DeepSeekClient(api_key=settings.deepseek_api_key)
         plan_data = await _build_plan(
             competition_desc=competition_desc,
@@ -153,6 +156,8 @@ async def run_research(
             batch_size=settings.max_embed_batch_size,
             show_progress=show_progress,
         )
+        if not embeddings:
+            raise RuntimeError("No embeddings were generated")
         if len(embeddings) != len(summarized_documents):
             raise RuntimeError("Embedding count does not match document count")
 
@@ -181,6 +186,7 @@ async def run_research(
             competition_desc=competition_desc,
             plan_data=plan_data,
             retrieved_documents=retrieved_documents,
+            domain_memory=domain_memory,
             client=client,
             model=settings.deepseek_v4_pro,
             run_dir=run_dir,
@@ -200,7 +206,7 @@ async def run_research(
         _stage(f"Report saved to: {actual_report_path}", show_progress)
         _write_json_artifact(run_dir, "warnings.json", warnings)
 
-        return ResearchRunResult(
+        result = ResearchRunResult(
             competition_id=resolved_competition_id,
             report_path=str(actual_report_path),
             num_documents=len(summarized_documents),
@@ -211,11 +217,14 @@ async def run_research(
             run_artifacts_path=str(run_dir),
             retrieved_evidence_count=len(retrieved_documents),
         )
+        _write_json_artifact(run_dir, "research_run.json", result)
+        return result
     except Exception:
         _write_json_artifact(run_dir, "warnings.json", warnings)
         raise
     finally:
         await store.close()
+        await domain_memory.close()
 
 
 async def summarize_documents(
@@ -286,16 +295,19 @@ async def _collect_sources(
     show_progress: bool,
 ) -> list[SourceDocument]:
     documents: list[SourceDocument] = []
-    documents.extend(
-        await asyncio.to_thread(
-            _collect_kaggle_sources,
-            plan_data,
-            competition_id,
-            settings,
-            warnings,
-            show_progress,
+    try:
+        documents.extend(
+            await asyncio.to_thread(
+                _collect_kaggle_sources,
+                plan_data,
+                competition_id,
+                settings,
+                warnings,
+                show_progress,
+            )
         )
-    )
+    except Exception as exc:
+        warnings.append(f"Kaggle source collection failed: {exc}")
     _stage("[3/8] Collecting papers and repos...", show_progress)
     _stage("Processing arXiv PDFs...", show_progress)
     documents.extend(
@@ -530,6 +542,7 @@ async def _build_report_text(
     competition_desc: str,
     plan_data: PlanData,
     retrieved_documents: list[RetrievedDocument],
+    domain_memory: DomainMemory,
     client: DeepSeekClient,
     model: str,
     run_dir: Path,
@@ -544,6 +557,7 @@ async def _build_report_text(
             competition_desc=competition_desc,
             plan_data=plan_data,
             retrieved_documents=retrieved_documents,
+            domain_memory=domain_memory,
             client=client,
             model=model,
             run_dir=run_dir,
@@ -560,14 +574,40 @@ async def _build_full_report_text(
     competition_desc: str,
     plan_data: PlanData,
     retrieved_documents: list[RetrievedDocument],
+    domain_memory: DomainMemory,
     client: DeepSeekClient,
     model: str,
     run_dir: Path,
     show_progress: bool,
 ) -> str:
-    domain_patterns: list[dict[str, Any]] = []
+    domain_patterns = await _run_reasoning_stage(
+        "domain_memory",
+        lambda: domain_memory.find_similar(
+            task_type=plan_data.task_type,
+            domain=plan_data.domain,
+            top_k=5,
+        ),
+        show_progress,
+    )
     _write_json_artifact(run_dir, "domain_patterns.json", domain_patterns)
     provenance_sections: dict[str, Any] = {}
+
+    metric_result = await _run_reasoning_stage(
+        "metric_specialist",
+        lambda: analyze_metric(
+            plan_data=plan_data,
+            retrieved_documents=retrieved_documents,
+            client=client,
+            model=model,
+        ),
+        show_progress,
+    )
+    _write_json_artifact(run_dir, "metric_result.json", metric_result)
+    provenance_sections["metric"] = attach_default_provenance(
+        "metric",
+        metric_result.model_dump(mode="json"),
+        retrieved_documents,
+    )
 
     validation_result = await _run_reasoning_stage(
         "validation_architect",
@@ -605,20 +645,22 @@ async def _build_full_report_text(
         retrieved_documents,
     )
 
-    metric_result = await _run_reasoning_stage(
-        "metric_specialist",
-        lambda: analyze_metric(
+    lb_audit = await _run_reasoning_stage(
+        "leaderboard_auditor",
+        lambda: audit_leaderboard_risk(
+            competition_desc=competition_desc,
             plan_data=plan_data,
+            validation_result=validation_result,
             retrieved_documents=retrieved_documents,
             client=client,
             model=model,
         ),
         show_progress,
     )
-    _write_json_artifact(run_dir, "metric_result.json", metric_result)
-    provenance_sections["metric"] = attach_default_provenance(
-        "metric",
-        metric_result.model_dump(mode="json"),
+    _write_json_artifact(run_dir, "leaderboard_audit.json", lb_audit)
+    provenance_sections["leaderboard"] = attach_default_provenance(
+        "leaderboard",
+        lb_audit.model_dump(mode="json"),
         retrieved_documents,
     )
 
@@ -638,25 +680,6 @@ async def _build_full_report_text(
     provenance_sections["experiments"] = attach_default_provenance(
         "experiments",
         [item.model_dump(mode="json") for item in experiments],
-        retrieved_documents,
-    )
-
-    lb_audit = await _run_reasoning_stage(
-        "leaderboard_auditor",
-        lambda: audit_leaderboard_risk(
-            competition_desc=competition_desc,
-            plan_data=plan_data,
-            validation_result=validation_result,
-            retrieved_documents=retrieved_documents,
-            client=client,
-            model=model,
-        ),
-        show_progress,
-    )
-    _write_json_artifact(run_dir, "leaderboard_audit.json", lb_audit)
-    provenance_sections["leaderboard"] = attach_default_provenance(
-        "leaderboard",
-        lb_audit.model_dump(mode="json"),
         retrieved_documents,
     )
 
