@@ -1,0 +1,52 @@
+[
+  {
+    "competition_family": "credit_risk_tabular",
+    "task_type": "binary_classification",
+    "domain": "credit risk tabular",
+    "typical_models": ["LightGBM", "CatBoost", "XGBoost", "logistic regression baseline"],
+    "typical_features": ["bureau aggregates", "payment history aggregates", "time-window features", "target encoding"],
+    "typical_validation": "Out-of-time or grouped validation when customer/time leakage is plausible; stratified folds only as a diagnostic.",
+    "common_traps": ["customer leakage", "future-period features", "public leaderboard overfitting"],
+    "source_competition_id": "seed-credit-risk-tabular"
+  },
+  {
+    "competition_family": "medical_imaging",
+    "task_type": "classification",
+    "domain": "medical imaging",
+    "typical_models": ["EfficientNet", "ConvNeXt", "Vision Transformer", "DICOM preprocessing baseline"],
+    "typical_features": ["image normalization", "augmentation", "metadata joins", "patient-level aggregation"],
+    "typical_validation": "Group splits by patient/site with careful leakage checks across repeated scans.",
+    "common_traps": ["patient overlap", "site shortcut learning", "metadata leakage"],
+    "source_competition_id": "seed-medical-imaging"
+  },
+  {
+    "competition_family": "recommender",
+    "task_type": "ranking",
+    "domain": "recommender systems",
+    "typical_models": ["matrix factorization", "LightFM", "two-tower retrieval", "gradient boosted ranker"],
+    "typical_features": ["user history", "item popularity", "candidate generation scores", "recency features"],
+    "typical_validation": "Temporal holdout with candidate generation evaluated before ranker tuning.",
+    "common_traps": ["training on future interactions", "candidate leakage", "popularity-only public LB gains"],
+    "source_competition_id": "seed-recommender"
+  },
+  {
+    "competition_family": "time_series",
+    "task_type": "forecasting",
+    "domain": "time series",
+    "typical_models": ["LightGBM lag model", "ETS/ARIMA baseline", "Temporal Fusion Transformer", "N-BEATS"],
+    "typical_features": ["lags", "rolling statistics", "calendar features", "hierarchical aggregates"],
+    "typical_validation": "Rolling or expanding-window validation preserving chronology.",
+    "common_traps": ["future leakage in rolling windows", "random folds", "holiday/calendar mismatch"],
+    "source_competition_id": "seed-time-series"
+  },
+  {
+    "competition_family": "nlp_classification",
+    "task_type": "classification",
+    "domain": "natural language processing",
+    "typical_models": ["TF-IDF logistic regression", "DeBERTa", "RoBERTa", "sentence-transformer classifier"],
+    "typical_features": ["text normalization", "language/domain tags", "length features", "embedding features"],
+    "typical_validation": "Stratified validation unless author/topic groups or temporal drift require grouped/temporal splits.",
+    "common_traps": ["near-duplicate leakage", "author leakage", "domain shift between public and private data"],
+    "source_competition_id": "seed-nlp-classification"
+  }
+]
