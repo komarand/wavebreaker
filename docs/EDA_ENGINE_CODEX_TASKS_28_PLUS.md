@@ -731,6 +731,49 @@ Large data policy:
 
 ---
 
+## 39a_eda_metric_registry_and_validation_policy
+
+### Goal
+
+Make EDA Engine generic for tabular Kaggle tasks, not Home Credit-specific.
+
+### Codex prompt
+
+Implement:
+- MetricSpec
+- MetricRegistry
+- ValidationPolicySelector
+
+Support metric families:
+- ranking_metric: auc, gini, map@k, ndcg
+- probabilistic_metric: logloss
+- threshold_metric: f1, accuracy, precision, recall
+- regression_metric: rmse, rmsle, mae, mape, smape, r2
+- ordinal_metric: quadratic_weighted_kappa
+- survival_metric: concordance_index
+- unknown_metric
+
+Validation policies:
+- stratified_kfold
+- kfold
+- group_kfold
+- stratified_group_kfold
+- temporal_holdout
+- expanding_window
+- ranking_group_cv
+- custom_required
+
+Rules:
+- Temporal CV is primary only if time evidence exists or metric/task requires temporal validation.
+- Group CV is primary if group/entity leakage risk exists.
+- StratifiedKFold is valid for ordinary iid classification.
+- KFold is valid for ordinary iid regression.
+- Unknown/custom metric should produce local_metric_available=false and recommended manual metric implementation.
+
+Do not remove Home Credit heuristics; move them into presets.
+
+---
+
 ## 39_eda_metric_analyzer_basic
 
 ### Goal

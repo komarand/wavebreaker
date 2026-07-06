@@ -7,6 +7,56 @@
 
 ---
 
+
+1. task_type должен быть enum:
+   - binary_classification
+   - multiclass_classification
+   - regression
+   - ranking
+   - survival
+   - forecasting_tabular
+   - multilabel_classification
+
+2. metric_analyzer должен поддерживать registry:
+   - auc / roc_auc
+   - gini / normalized_gini
+   - logloss
+   - accuracy
+   - f1 / macro_f1
+   - quadratic_weighted_kappa
+   - rmse / rmsle / mae
+   - mape / smape
+   - r2
+   - map@k / ndcg
+   - concordance_index / c-index
+   - custom / unknown
+
+3. validation_analyzer не должен всегда тянуть temporal CV.
+   Он должен выбирать policy по evidence:
+   - есть time + metric/time split risk → temporal CV
+   - есть group/id/entity leakage risk → GroupKFold
+   - обычный iid binary/multiclass → StratifiedKFold
+   - regression iid → KFold
+   - ranking/query groups → GroupKFold by query/group
+   - forecasting → rolling/expanding
+   - survival → stratified/group/time-aware depending on columns
+
+4. baseline_runner должен выбирать модель по task_type:
+   - binary/multiclass → classifier
+   - regression → regressor
+   - ranking → optional skipped/not_testable in MVP
+   - survival → skipped/not_testable in MVP
+   - forecasting → skipped or simple lag baseline later
+
+5. schema_inferer должен искать не только:
+   target/case_id/WEEK_NUM
+   но generic:
+   - target/name from sample_submission
+   - id column from sample_submission join
+   - group/entity columns
+   - time/date columns
+   - query_id/session_id/user_id for ranking/recommender
+
 ## 1. Purpose
 
 `Kaggle EDA Engine` is the data-execution layer of KaggleResearcher v5.
