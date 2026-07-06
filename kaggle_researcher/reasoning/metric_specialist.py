@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from kaggle_researcher.clients.deepseek_client import DeepSeekClient
-from kaggle_researcher.reasoning.common import call_reasoning_json, format_retrieved_documents
+from kaggle_researcher.reasoning.common import (
+    call_reasoning_json,
+    format_retrieved_documents,
+    validate_evidence_ids,
+)
 from kaggle_researcher.schemas import MetricResult, PlanData, RetrievedDocument
 
 
@@ -16,14 +20,15 @@ async def analyze_metric(
     if client is None:
         raise ValueError("client is required")
     docs = retrieved_documents if retrieved_documents is not None else chunks or []
-    return await call_reasoning_json(
+    result = await call_reasoning_json(
         client=client,
         model=model,
         system_prompt=(
             "You are the Metric Specialist. Explain metric implications. Guidance: "
             "AUC/Gini -> ranking and rank averaging; LogLoss -> calibration and clipping; "
             "F1/Dice -> threshold search; RMSE/RMSLE -> target transforms and clipping; "
-            "MAP@K/NDCG -> ranking and candidate generation. Do not claim dataset analysis. "
+            "MAP@K/NDCG -> ranking and candidate generation. "
+            "Do not claim dataset was analyzed. "
             "Important metric claims must include provenance labels such as arxiv, kaggle, "
             "heuristic, and not_verified_on_data."
         ),
@@ -34,3 +39,7 @@ async def analyze_metric(
         },
         result_model=MetricResult,
     )
+    unknown_ids = validate_evidence_ids(result, docs)
+    if unknown_ids:
+        raise ValueError(f"MetricResult contains unknown evidence_ids: {unknown_ids}")
+    return result

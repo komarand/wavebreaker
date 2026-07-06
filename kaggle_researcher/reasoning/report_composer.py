@@ -34,6 +34,12 @@ SECTION_HEADINGS = [
 ]
 
 
+def format_section_for_prompt(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, indent=2)
+
+
 async def compose_report(
     competition_desc: str,
     plan_data: PlanData,
@@ -49,6 +55,7 @@ async def compose_report(
 ) -> str:
     if client is None:
         raise ValueError("client is required")
+    review_payload = review.model_dump(mode="json")
     payload = {
         "competition_desc": competition_desc,
         "plan_data": plan_data.model_dump(),
@@ -58,7 +65,11 @@ async def compose_report(
         "metric_result": metric_result.model_dump(),
         "experiments": [item.model_dump() for item in experiments],
         "leaderboard_audit": lb_audit.model_dump(),
-        "review_result": review.model_dump(),
+        "review_result": review_payload,
+        "review_revised_sections_for_prompt": {
+            name: format_section_for_prompt(section)
+            for name, section in review_payload.get("revised_sections", {}).items()
+        },
         "required_sections": SECTION_HEADINGS,
     }
     return await client.chat_text(

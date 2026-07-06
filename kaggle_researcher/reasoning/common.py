@@ -1,20 +1,16 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
+from pydantic_core import ValidationError
 
 from kaggle_researcher.clients.deepseek_client import DeepSeekClient
+from kaggle_researcher.reasoning.prompts import SYSTEM_RULES
 from kaggle_researcher.schemas import RetrievedDocument
 
-
-SYSTEM_RULES = """Return JSON only.
-Separate facts, hypotheses, and recommendations.
-Include confidence and evidence_ids.
-Do not claim real train/test analysis was performed.
-Do not claim leakage was found or confirmed based only on text sources.
-Do not include raw chain-of-thought."""
 
 ResultModel = TypeVar("ResultModel", bound=BaseModel)
 
@@ -44,6 +40,9 @@ async def call_reasoning_json(
     system_prompt: str,
     user_payload: dict[str, Any],
     result_model: type[ResultModel],
+    *,
+    artifact_dir: Path | str | None = None,
+    raw_artifact_name: str | None = None,
 ) -> ResultModel:
     response = await client.chat_json(
         model=model,
@@ -51,10 +50,30 @@ async def call_reasoning_json(
         user_prompt=json.dumps(user_payload, ensure_ascii=False, indent=2),
         timeout=120,
     )
-    return result_model.model_validate(response)
+    try:
+        return result_model.model_validate(response)
+    except ValidationError as exc:
+        if artifact_dir is not None and raw_artifact_name is not None:
+            path = Path(artifact_dir) / raw_artifact_name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(response, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        returned_keys: object
+        if isinstance(response, dict):
+            returned_keys = list(response.keys())
+        else:
+            returned_keys = type(response).__name__
+        raise RuntimeError(
+            f"Failed to validate reasoning response from model {model!r} as "
+            f"{result_model.__name__}. Returned keys: {returned_keys}. "
+            f"Validation error: {exc}"
+        ) from exc
 
 
-def validate_evidence_ids(result: BaseModel, docs: list[RetrievedDocument]) -> list[str]:
+def validate_evidence_ids(result: BaseModel | dict[str, Any], docs: list[RetrievedDocument]) -> list[str]:
     known_ids = {doc.id for doc in docs}
-    evidence_ids = getattr(result, "evidence_ids", [])
+    if isinstance(result, dict):
+        evidence_ids = result.get("evidence_ids", [])
+    else:
+        evidence_ids = getattr(result, "evidence_ids", [])
     return [evidence_id for evidence_id in evidence_ids if evidence_id not in known_ids]

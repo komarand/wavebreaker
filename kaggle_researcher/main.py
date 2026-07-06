@@ -674,6 +674,7 @@ async def _build_full_report_text(
             retrieved_documents=retrieved_documents,
             client=client,
             model=model,
+            artifact_dir=run_dir,
         ),
         show_progress,
     )

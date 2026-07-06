@@ -10,7 +10,17 @@ import pytest
 from kaggle_researcher import main as main_module
 from kaggle_researcher.main import build_parser, run_research, validate_full_roadmap
 from kaggle_researcher.reasoning.report_composer import SECTION_HEADINGS
-from kaggle_researcher.schemas import PlanData, RetrievedDocument, SourceDocument
+from kaggle_researcher.schemas import (
+    ExperimentItem,
+    LeaderboardAuditResult,
+    LeakageRiskResult,
+    MetricResult,
+    PlanData,
+    RetrievedDocument,
+    ReviewResult,
+    SourceDocument,
+    ValidationResult,
+)
 
 
 @dataclass(slots=True)
@@ -207,3 +217,89 @@ def test_models_used_artifact_contains_configured_model_ids(
     assert '"summarizer": "deepseek-v4-flash"' in payload
     assert '"report_composer": "deepseek-v4-pro"' in payload
     assert '"embedder": "Qwen/Qwen3-Embedding-4B"' in payload
+
+
+def test_full_report_passes_artifact_dir_only_to_reviewer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seen_calls: dict[str, dict[str, Any]] = {}
+
+    async def fake_design_validation(**kwargs: Any) -> ValidationResult:
+        seen_calls["validation"] = kwargs
+        return ValidationResult(
+            confidence="medium",
+            evidence_ids=[],
+            recommended_cv="temporal",
+            validation_risk="high",
+            likely_split="time",
+            reasoning="reason",
+        )
+
+    async def fake_analyze_leakage_risk(**kwargs: Any) -> LeakageRiskResult:
+        return LeakageRiskResult(confidence="low", evidence_ids=[], risk_level="medium")
+
+    async def fake_analyze_metric(**kwargs: Any) -> MetricResult:
+        return MetricResult(
+            confidence="medium",
+            evidence_ids=[],
+            metric_explanation="gini",
+            needs_calibration=False,
+            rank_averaging_useful=True,
+            threshold_search_needed=False,
+            surrogate_loss_suggestion="auc",
+        )
+
+    async def fake_plan_experiments(**kwargs: Any) -> list[ExperimentItem]:
+        return [
+            ExperimentItem(
+                priority="P0",
+                experiment="baseline",
+                why="why",
+                cost="low",
+                expected_gain="medium",
+                risk="low",
+            )
+        ]
+
+    async def fake_audit_leaderboard_risk(**kwargs: Any) -> LeaderboardAuditResult:
+        return LeaderboardAuditResult(
+            confidence="medium",
+            evidence_ids=[],
+            shake_up_risk="high",
+            submission_selection_rule="cv",
+            public_lb_trust="low",
+        )
+
+    async def fake_review(**kwargs: Any) -> ReviewResult:
+        seen_calls["review"] = kwargs
+        return ReviewResult(confidence="medium", evidence_ids=[])
+
+    async def fake_compose_report(**kwargs: Any) -> str:
+        return "\n\n".join(
+            f"## {heading}\n" + ("Detailed guidance. " * 25)
+            for heading in SECTION_HEADINGS
+        )
+
+    monkeypatch.setattr(main_module, "design_validation", fake_design_validation)
+    monkeypatch.setattr(main_module, "analyze_leakage_risk", fake_analyze_leakage_risk)
+    monkeypatch.setattr(main_module, "analyze_metric", fake_analyze_metric)
+    monkeypatch.setattr(main_module, "plan_experiments", fake_plan_experiments)
+    monkeypatch.setattr(main_module, "audit_leaderboard_risk", fake_audit_leaderboard_risk)
+    monkeypatch.setattr(main_module, "review", fake_review)
+    monkeypatch.setattr(main_module, "compose_report", fake_compose_report)
+
+    run(
+        main_module._build_full_report_text(
+            competition_desc="desc",
+            plan_data=PlanData(task_type="classification", metric="gini", domain="credit"),
+            retrieved_documents=[retrieved_doc()],
+            client=FakeClient(api_key="secret"),
+            model="model",
+            run_dir=tmp_path,
+            show_progress=False,
+        )
+    )
+
+    assert "artifact_dir" not in seen_calls["validation"]
+    assert seen_calls["review"]["artifact_dir"] == tmp_path

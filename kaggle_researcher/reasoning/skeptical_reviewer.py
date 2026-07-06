@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from kaggle_researcher.clients.deepseek_client import DeepSeekClient
@@ -14,6 +15,7 @@ async def review(
     model: str = "deepseek-v4-pro",
     *,
     chunks: list[RetrievedDocument] | None = None,
+    artifact_dir: Path | str | None = None,
 ) -> ReviewResult:
     if client is None:
         raise ValueError("client is required")
@@ -25,6 +27,10 @@ async def review(
             "Act as a critical Kaggle Grandmaster reviewer. Do not add new facts. "
             "Identify unsupported claims, generic advice, and unnecessary experiments. "
             "Return revised_sections with the same high-level keys as draft_sections. "
+            "Return revised_sections as structured JSON. Each value may be a string, a dict "
+            "preserving the original section structure, or a list of experiment dicts. Do not "
+            "stringify structured sections. Preserve provenance fields when present. Preserve "
+            "confidence fields when present. Preserve supporting_source_ids when present. "
             "Flag key claims that lack provenance."
         ),
         user_payload={
@@ -33,4 +39,6 @@ async def review(
             "expected_schema": ReviewResult.model_json_schema(),
         },
         result_model=ReviewResult,
+        artifact_dir=artifact_dir,
+        raw_artifact_name="review_result_raw.json",
     )

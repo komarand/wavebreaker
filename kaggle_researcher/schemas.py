@@ -113,7 +113,8 @@ class ExperimentItem(BaseModel):
 
 
 class ReviewResult(ReasoningBaseResult):
+    confidence: ConfidenceLevel = "medium"
     unsupported_claims: list[str] = Field(default_factory=list)
     too_generic: list[str] = Field(default_factory=list)
     unnecessary_experiments: list[str] = Field(default_factory=list)
-    revised_sections: dict[str, str] = Field(default_factory=dict)
+    revised_sections: dict[str, Any] = Field(default_factory=dict)
