@@ -333,14 +333,32 @@ class MetricEvidence(BaseModel):
 
 
 class ValidationEvidence(BaseModel):
+    target_available: bool = False
+    id_column_available: bool = False
+    target_column: str | None = None
+    id_column: str | None = None
+
     time_columns: list[dict[str, Any]] = Field(default_factory=list)
+    group_columns: list[dict[str, Any]] = Field(default_factory=list)
+    query_columns: list[dict[str, Any]] = Field(default_factory=list)
+
+    class_balance: dict[str, Any] = Field(default_factory=dict)
+    target_summary: dict[str, Any] = Field(default_factory=dict)
     target_by_period: list[dict[str, Any]] = Field(default_factory=list)
+    target_by_group: list[dict[str, Any]] = Field(default_factory=list)
 
     test_time_relation: dict[str, Any] = Field(default_factory=dict)
+    test_group_relation: dict[str, Any] = Field(default_factory=dict)
     oot_holdout: dict[str, Any] = Field(default_factory=dict)
     temporal_folds: dict[str, Any] = Field(default_factory=dict)
 
+    primary_validation: dict[str, Any] = Field(default_factory=dict)
+    diagnostic_validations: list[dict[str, Any]] = Field(default_factory=list)
+    rejected_validations: list[dict[str, Any]] = Field(default_factory=list)
     recommended_validation: dict[str, Any] = Field(default_factory=dict)
+    confidence: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
+    reasoning_summary: str | None = None
 
     warnings: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)

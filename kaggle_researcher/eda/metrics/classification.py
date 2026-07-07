@@ -5,33 +5,12 @@ from collections.abc import Sequence
 
 from kaggle_researcher.eda.metrics.gini import _binary_auc
 
-try:  # pragma: no cover - availability depends on the local environment.
-    from sklearn.metrics import accuracy_score as _sk_accuracy_score
-    from sklearn.metrics import f1_score as _sk_f1_score
-    from sklearn.metrics import log_loss as _sk_log_loss
-    from sklearn.metrics import roc_auc_score as _sk_roc_auc_score
-except Exception:  # pragma: no cover
-    _sk_accuracy_score = None
-    _sk_f1_score = None
-    _sk_log_loss = None
-    _sk_roc_auc_score = None
-
 
 def sklearn_available() -> bool:
-    return all(
-        helper is not None
-        for helper in (
-            _sk_accuracy_score,
-            _sk_f1_score,
-            _sk_log_loss,
-            _sk_roc_auc_score,
-        )
-    )
+    return False
 
 
 def binary_roc_auc(y_true: Sequence[float], y_score: Sequence[float]) -> float:
-    if _sk_roc_auc_score is not None:
-        return float(_sk_roc_auc_score(y_true, y_score))
     return _binary_auc(_as_float_list(y_true), _as_float_list(y_score))
 
 
@@ -40,9 +19,6 @@ def logloss(
     y_prob: Sequence[float],
     eps: float = 1e-15,
 ) -> float:
-    if _sk_log_loss is not None:
-        return float(_sk_log_loss(y_true, y_prob))
-
     labels = _as_float_list(y_true)
     probabilities = [min(max(value, eps), 1 - eps) for value in _as_float_list(y_prob)]
     if len(labels) != len(probabilities):
@@ -57,8 +33,6 @@ def logloss(
 
 
 def accuracy(y_true: Sequence[object], y_pred: Sequence[object]) -> float:
-    if _sk_accuracy_score is not None:
-        return float(_sk_accuracy_score(y_true, y_pred))
     if len(y_true) != len(y_pred):
         raise ValueError("y_true and y_pred must have the same length")
     if len(y_true) == 0:
@@ -68,8 +42,6 @@ def accuracy(y_true: Sequence[object], y_pred: Sequence[object]) -> float:
 
 
 def f1(y_true: Sequence[int], y_pred: Sequence[int]) -> float:
-    if _sk_f1_score is not None:
-        return float(_sk_f1_score(y_true, y_pred))
     if len(y_true) != len(y_pred):
         raise ValueError("y_true and y_pred must have the same length")
     true_positive = sum(
