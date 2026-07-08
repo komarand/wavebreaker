@@ -9,7 +9,9 @@ from kaggle_researcher.eda.io.dataset_reader import DatasetReader
 from kaggle_researcher.eda.schemas import EdaTaskPlan, ResearchHypotheses, competition_ids_match
 
 
-FIXTURE_DIR = Path("tests/fixtures/eda/home_credit_tiny")
+FIXTURE_ROOT = Path("tests/fixtures/eda")
+FIXTURE_DIR = FIXTURE_ROOT / "home_credit_tiny"
+GENERIC_FIXTURES = ("iid_binary_tiny", "regression_tiny")
 CSV_FILES = [
     "train_base.csv",
     "test_base.csv",
@@ -106,3 +108,28 @@ def test_home_credit_tiny_json_files_are_plain_json_objects() -> None:
 
         assert isinstance(payload, dict)
         assert payload["competition_id"] == "home_credit_tiny"
+
+
+def test_generic_offline_fixtures_exist_and_validate() -> None:
+    for fixture_name in GENERIC_FIXTURES:
+        fixture_dir = FIXTURE_ROOT / fixture_name
+        for filename in (
+            "train_base.csv",
+            "test_base.csv",
+            "sample_submission.csv",
+            "research_hypotheses.json",
+            "eda_task_plan.json",
+        ):
+            assert (fixture_dir / filename).is_file()
+
+        hypotheses = ResearchHypotheses.model_validate_json(
+            (fixture_dir / "research_hypotheses.json").read_text(encoding="utf-8")
+        )
+        task_plan = EdaTaskPlan.model_validate_json(
+            (fixture_dir / "eda_task_plan.json").read_text(encoding="utf-8")
+        )
+        assert competition_ids_match(hypotheses, task_plan)
+
+        reader = DatasetReader(fixture_dir)
+        assert reader.count_rows("train_base.csv") > 0
+        assert reader.count_rows("test_base.csv") > 0

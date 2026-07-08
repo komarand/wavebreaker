@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "competition_id": "iid_binary_tiny",
+  "created_at": "2026-07-07T00:00:00+03:00",
+  "hypotheses": [
+    {
+      "hypothesis_id": "schema_001",
+      "category": "schema",
+      "claim": "Generic train/test base tables expose row_id, target, date, numeric, and categorical columns.",
+      "rationale": "Fixture uses non-Home-Credit column names.",
+      "expected_eda_checks": ["schema_inferer.roles"],
+      "priority": "P0",
+      "confidence_before_eda": "medium"
+    },
+    {
+      "hypothesis_id": "metric_001",
+      "category": "metric",
+      "claim": "ROC AUC requires probability or rank-style scores rather than hard labels.",
+      "rationale": "The task plan declares roc_auc.",
+      "expected_eda_checks": ["metric_analyzer.registry"],
+      "priority": "P0",
+      "confidence_before_eda": "medium"
+    },
+    {
+      "hypothesis_id": "val_001",
+      "category": "validation",
+      "claim": "IID binary classification should use stratified validation; the event_date column should be diagnostic only.",
+      "rationale": "Dates are mixed across train/test and are not evidence of an out-of-time split.",
+      "expected_eda_checks": ["validation_analyzer.policy"],
+      "priority": "P0",
+      "confidence_before_eda": "medium"
+    },
+    {
+      "hypothesis_id": "leak_001",
+      "category": "leakage",
+      "claim": "Direct leakage checks should pass except for ordinary warnings.",
+      "rationale": "The target is absent from test and row IDs do not overlap.",
+      "expected_eda_checks": ["leakage_checker.direct_checks"],
+      "priority": "P0",
+      "confidence_before_eda": "medium"
+    }
+  ],
+  "eda_tasks": [],
+  "structured_findings": [],
+  "scout_limitations": [],
+  "models_used": {}
+}

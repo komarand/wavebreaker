@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "competition_id": "messy_schema_tiny",
+  "created_at": "2026-07-07T00:00:00+03:00",
+  "hypotheses": [
+    {"hypothesis_id": "schema_001", "category": "schema", "claim": "Schema inference should identify label as target and record_key as the primary id.", "rationale": "The fixture avoids target/id naming.", "expected_eda_checks": ["schema_inferer.roles"], "priority": "P0", "confidence_before_eda": "medium"},
+    {"hypothesis_id": "metric_001", "category": "metric", "claim": "AUC requires probability or rank-style scores.", "rationale": "The task plan declares auc.", "expected_eda_checks": ["metric_analyzer.registry"], "priority": "P0", "confidence_before_eda": "medium"},
+    {"hypothesis_id": "val_001", "category": "validation", "claim": "Binary classification should still run validation on a messy schema.", "rationale": "Train/test filenames are train.csv and test.csv.", "expected_eda_checks": ["validation_analyzer.policy"], "priority": "P0", "confidence_before_eda": "medium"},
+    {"hypothesis_id": "leak_001", "category": "leakage", "claim": "Direct leakage checks should degrade gracefully on a messy schema.", "rationale": "The target is absent from test.", "expected_eda_checks": ["leakage_checker.direct_checks"], "priority": "P0", "confidence_before_eda": "medium"}
+  ],
+  "eda_tasks": [],
+  "structured_findings": [],
+  "scout_limitations": [],
+  "models_used": {}
+}

@@ -242,6 +242,7 @@ def _check_numeric_target_association(
     train_schema: list[dict[str, str]],
 ) -> LeakageCheckResult:
     target_col = schema.target_column
+    excluded_columns = _excluded_feature_columns(schema, train_schema)
     if (
         schema.train_base_table is None
         or target_col is None
@@ -256,7 +257,7 @@ def _check_numeric_target_association(
     numeric_columns = [
         column["name"]
         for column in train_schema
-        if column["name"] != target_col and _is_numeric_dtype(column["dtype"])
+        if column["name"] not in excluded_columns and _is_numeric_dtype(column["dtype"])
     ]
     if not numeric_columns:
         return _result(
@@ -431,6 +432,21 @@ def _read_value_set(reader: DatasetReader, table: str, column: str) -> set[Any]:
 
 def _schema_names(schema: list[dict[str, str]]) -> set[str]:
     return {column["name"] for column in schema}
+
+
+def _excluded_feature_columns(
+    schema: InferredSchema,
+    train_schema: list[dict[str, str]],
+) -> set[str]:
+    excluded = {schema.target_column, schema.primary_id_column}
+    for column in train_schema:
+        normalized = column["name"].lower()
+        if any(
+            token in normalized
+            for token in ("id", "group", "session", "query", "customer", "client", "user")
+        ):
+            excluded.add(column["name"])
+    return {column for column in excluded if column is not None}
 
 
 def _row_tuple(row: dict[str, Any]) -> tuple[tuple[str, Any], ...]:

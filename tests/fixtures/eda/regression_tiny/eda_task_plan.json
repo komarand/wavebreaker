@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "competition_id": "regression_tiny",
+  "task_type": "regression",
+  "metric": {
+    "name": "rmse"
+  },
+  "dataset": {
+    "download_required": false,
+    "local_dataset_path": "tests/fixtures/eda/regression_tiny"
+  },
+  "eda_tasks": [
+    {
+      "task_id": "schema_001",
+      "module": "schema_inferer",
+      "priority": "P0"
+    },
+    {
+      "task_id": "validation_001",
+      "module": "validation_analyzer",
+      "priority": "P0"
+    }
+  ]
+}

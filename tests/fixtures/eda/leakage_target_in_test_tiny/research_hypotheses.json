@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "competition_id": "leakage_target_in_test_tiny",
+  "created_at": "2026-07-07T00:00:00+03:00",
+  "hypotheses": [
+    {"hypothesis_id": "schema_001", "category": "schema", "claim": "Generic binary train/test base tables expose id and target columns.", "rationale": "The fixture intentionally includes target in test.", "expected_eda_checks": ["schema_inferer.roles"], "priority": "P0", "confidence_before_eda": "medium"},
+    {"hypothesis_id": "metric_001", "category": "metric", "claim": "ROC AUC requires probability or rank-style scores.", "rationale": "The task plan declares roc_auc.", "expected_eda_checks": ["metric_analyzer.registry"], "priority": "P0", "confidence_before_eda": "medium"},
+    {"hypothesis_id": "val_001", "category": "validation", "claim": "Binary classification should use stratified validation when no group or temporal policy is required.", "rationale": "No group or date columns are present.", "expected_eda_checks": ["validation_analyzer.policy"], "priority": "P0", "confidence_before_eda": "medium"},
+    {"hypothesis_id": "leak_001", "category": "leakage", "claim": "Direct leakage risk should be detected by the leakage checker.", "rationale": "The target column is intentionally present in test.", "expected_eda_checks": ["leakage_checker.direct_checks"], "priority": "P0", "confidence_before_eda": "high"},
+    {"hypothesis_id": "leak_002", "category": "leakage", "claim": "Target present in test is a critical direct leakage issue.", "rationale": "test_base.csv includes target.", "expected_eda_checks": ["leakage_checker.target_in_test"], "priority": "P0", "confidence_before_eda": "high"}
+  ],
+  "eda_tasks": [],
+  "structured_findings": [],
+  "scout_limitations": [],
+  "models_used": {}
+}

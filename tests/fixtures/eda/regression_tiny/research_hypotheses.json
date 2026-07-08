@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "competition_id": "regression_tiny",
+  "hypotheses": [
+    {
+      "hypothesis_id": "schema_001",
+      "category": "schema",
+      "claim": "The dataset has generic train/test regression tables.",
+      "priority": "P0",
+      "confidence_before_eda": "medium"
+    },
+    {
+      "hypothesis_id": "validation_001",
+      "category": "validation",
+      "claim": "IID regression should use KFold validation.",
+      "priority": "P0",
+      "confidence_before_eda": "medium"
+    }
+  ]
+}

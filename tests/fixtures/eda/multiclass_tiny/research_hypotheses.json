@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "competition_id": "multiclass_tiny",
+  "created_at": "2026-07-07T00:00:00+03:00",
+  "hypotheses": [
+    {"hypothesis_id": "schema_001", "category": "schema", "claim": "Multiclass train/test tables expose id and target with multiple sample submission probability columns.", "rationale": "sample_submission has class_0, class_1, class_2.", "expected_eda_checks": ["schema_inferer.roles"], "priority": "P0", "confidence_before_eda": "medium"},
+    {"hypothesis_id": "metric_001", "category": "metric", "claim": "Multiclass logloss requires probability outputs.", "rationale": "The task plan declares logloss.", "expected_eda_checks": ["metric_analyzer.registry"], "priority": "P0", "confidence_before_eda": "medium"},
+    {"hypothesis_id": "val_001", "category": "validation", "claim": "Multiclass classification should use stratified validation.", "rationale": "Target has three classes.", "expected_eda_checks": ["validation_analyzer.policy"], "priority": "P0", "confidence_before_eda": "medium"},
+    {"hypothesis_id": "leak_001", "category": "leakage", "claim": "Direct leakage checks should not find target in test.", "rationale": "Test omits target.", "expected_eda_checks": ["leakage_checker.direct_checks"], "priority": "P0", "confidence_before_eda": "medium"}
+  ],
+  "eda_tasks": [],
+  "structured_findings": [],
+  "scout_limitations": [],
+  "models_used": {}
+}

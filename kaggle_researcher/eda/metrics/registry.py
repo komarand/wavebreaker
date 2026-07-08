@@ -184,6 +184,12 @@ def _coerce_metric_family(metric_family: MetricFamily | str) -> MetricFamily:
 
 def _normalize_metric_name(metric_name: str) -> str:
     normalized = str(metric_name).strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized.startswith("ndcg@"):
+        return "ndcg"
+    if normalized.startswith("map@"):
+        return "map@k"
+    if normalized.startswith("recall@"):
+        return "recall@k"
     aliases = {
         "mean_absolute_percentage_error": "mape",
         "symmetric_mean_absolute_percentage_error": "smape",

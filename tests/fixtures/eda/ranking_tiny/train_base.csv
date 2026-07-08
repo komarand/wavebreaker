@@ -1,0 +1,10 @@
+query_id,item_id,user_id,feature_score,target
+q1,i1,u1,0.91,3
+q1,i2,u1,0.30,0
+q1,i3,u1,0.42,1
+q2,i4,u2,0.88,2
+q2,i5,u2,0.11,0
+q2,i6,u2,0.54,1
+q3,i7,u3,0.73,2
+q3,i8,u3,0.27,0
+q3,i9,u3,0.65,1

@@ -14,8 +14,8 @@ from kaggle_researcher.eda.schemas import (
 
 
 READABLE_TABULAR_EXTENSIONS = {".csv", ".parquet", ".json", ".jsonl"}
-ID_NAMES = {"id"}
-TARGET_NAMES = {"target"}
+ID_NAMES = {"id", "row_id", "record_key", "record_id"}
+TARGET_NAMES = {"target", "label"}
 PREDICTION_NAMES = {"prediction", "pred", "probability"}
 GROUP_TOKENS = ("group", "fold", "customer", "client", "user")
 TIME_TOKENS = ("period", "month", "year", "quarter")
@@ -46,7 +46,8 @@ def infer_schema(
 
     target_column = _find_target_column(tables)
     primary_id_column = _find_primary_id_column(tables)
-    prediction_column = _find_prediction_column(tables)
+    prediction_columns = _find_prediction_columns(tables)
+    prediction_column = prediction_columns[0] if prediction_columns else None
 
     candidate_time_columns = _unique_column_names(tables, role="time")
     candidate_date_columns = _unique_column_names(tables, role="date")
@@ -81,6 +82,7 @@ def infer_schema(
         "candidate_date_columns": candidate_date_columns,
         "candidate_group_columns": candidate_group_columns,
         "candidate_join_keys": candidate_join_keys,
+        "prediction_columns": prediction_columns,
     }
 
     return InferredSchema(
@@ -192,6 +194,13 @@ def _infer_generic_column_role(column_name: str, *, table_role: str) -> ColumnRo
             confidence="high",
             reason="Column matches generic prediction names in sample submission.",
         )
+    if table_role == "submission" and normalized.startswith("class_"):
+        return ColumnRole(
+            name=column_name,
+            role="prediction",
+            confidence="medium",
+            reason="Column looks like one multiclass probability column in sample submission.",
+        )
     if any(token in normalized for token in GROUP_TOKENS):
         return ColumnRole(
             name=column_name,
@@ -284,6 +293,13 @@ def _find_table_path(
             continue
         if table_type is None or table.table_type == table_type:
             return table.path
+    if table_type == "base":
+        role_matches = [table for table in tables if table.role == role]
+        if len(role_matches) == 1:
+            return role_matches[0].path
+        for table in role_matches:
+            if table.table_name == role:
+                return table.path
     return None
 
 
@@ -297,14 +313,15 @@ def _find_target_column(tables: list[TableSchema]) -> str | None:
     return None
 
 
-def _find_prediction_column(tables: list[TableSchema]) -> str | None:
+def _find_prediction_columns(tables: list[TableSchema]) -> list[str]:
+    prediction_columns: list[str] = []
     for table in tables:
         if table.role != "submission":
             continue
         for column_role in table.column_roles:
             if column_role.role == "prediction":
-                return column_role.name
-    return None
+                prediction_columns.append(column_role.name)
+    return prediction_columns
 
 
 def _find_primary_id_column(tables: list[TableSchema]) -> str | None:
