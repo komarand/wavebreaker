@@ -61,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable the optional honest baseline module when implemented",
     )
     parser.add_argument(
+        "--enable-notebook-static-analysis",
+        action="store_true",
+        help="Enable optional static notebook pattern extraction when P1 modules run",
+    )
+    parser.add_argument(
         "--fail-fast",
         action="store_true",
         help="Stop on the first module failure when execution is implemented",
@@ -86,6 +91,7 @@ def run(argv: list[str] | None = None) -> int:
         skip_modules=args.skip_modules or [],
         enable_p1_modules=args.enable_p1_modules,
         enable_baseline=args.enable_baseline,
+        enable_notebook_static_analysis=args.enable_notebook_static_analysis,
         fail_fast=args.fail_fast,
         profile_sample_rows=settings.eda_profile_sample_rows,
         max_profile_rows_full_scan=settings.eda_max_profile_rows_full_scan,
