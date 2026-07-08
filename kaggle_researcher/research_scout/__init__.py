@@ -12,6 +12,7 @@ from kaggle_researcher.research_scout.schemas import (
     ScoutLimitation,
     ScoutStructuredFinding,
 )
+from kaggle_researcher.research_scout.scout import run_research_scout
 
 
 def _load_legacy_research_scout() -> Any:
@@ -40,6 +41,7 @@ __all__ = [
     "ScoutHypothesis",
     "ScoutLimitation",
     "ScoutStructuredFinding",
+    "run_research_scout",
     *[
         name
         for name in dir(_legacy)

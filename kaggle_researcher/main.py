@@ -37,6 +37,7 @@ from kaggle_researcher.planner import fallback_plan, plan
 from kaggle_researcher.research_scout import (
     build_research_hypotheses,
     build_research_scout_summary,
+    run_research_scout,
     split_eda_task_plan,
     validate_research_hypotheses,
 )
@@ -117,6 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write research_hypotheses_partial.json when Scout validation fails.",
     )
     parser.add_argument(
+        "--write-eda-plan",
+        action="store_true",
+        help="Write Research Scout hypotheses and EDA task plan artifacts during a research run.",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable verbose debug logging.",
@@ -148,6 +154,7 @@ async def run_research(
     mode: Literal["full", "scout", "minimal"] = "full",
     allow_minimal_fallback: bool = False,
     allow_partial_scout_output: bool = False,
+    write_eda_plan: bool = False,
     debug: bool = False,
     no_github: bool = False,
     fast: bool = False,
@@ -238,6 +245,23 @@ async def run_research(
             fast=fast,
         )
         _write_json_artifact(run_dir, "retrieved_documents.json", retrieved_documents)
+        scout_output_paths: dict[str, Path] = {}
+        scout_num_hypotheses = 0
+        scout_num_eda_tasks = 0
+        if write_eda_plan and mode != "scout":
+            _stage("[7/8] Running Research Scout...", show_progress)
+            scout_output_paths, scout_num_hypotheses, scout_num_eda_tasks = (
+                await _write_research_scout_outputs(
+                    competition_id=resolved_competition_id,
+                    competition_url=competition_url,
+                    competition_desc=competition_desc,
+                    plan_data=plan_data,
+                    retrieved_documents=retrieved_documents,
+                    client=client,
+                    model=settings.deepseek_v4_pro,
+                    run_dir=run_dir,
+                )
+            )
         if mode == "scout":
             _stage("[7/8] Running Research Scout...", show_progress)
             domain_patterns = await domain_memory.find_similar(
@@ -358,6 +382,17 @@ async def run_research(
             report_mode=report_mode,
             run_artifacts_path=str(run_dir),
             retrieved_evidence_count=len(retrieved_documents),
+            research_hypotheses_path=str(scout_output_paths["research_hypotheses"])
+            if scout_output_paths
+            else None,
+            eda_task_plan_path=str(scout_output_paths["eda_task_plan"])
+            if scout_output_paths
+            else None,
+            summary_path=str(scout_output_paths["research_scout_summary"])
+            if scout_output_paths
+            else None,
+            num_hypotheses=scout_num_hypotheses,
+            num_eda_tasks=scout_num_eda_tasks,
         )
         run_summary = _build_research_run_summary(
             result=result,
@@ -1007,6 +1042,30 @@ def _write_text_artifact(run_dir: Path, filename: str, value: str) -> None:
     (run_dir / filename).write_text(value, encoding="utf-8")
 
 
+async def _write_research_scout_outputs(
+    *,
+    competition_id: str,
+    competition_url: str,
+    competition_desc: str,
+    plan_data: PlanData,
+    retrieved_documents: list[RetrievedDocument],
+    client: DeepSeekClient,
+    model: str,
+    run_dir: Path,
+) -> tuple[dict[str, Path], int, int]:
+    scout_output = await run_research_scout(
+        competition_id=competition_id,
+        competition_url=competition_url,
+        competition_desc=competition_desc,
+        plan_data=plan_data,
+        retrieved_documents=retrieved_documents,
+        client=client,
+        model=model,
+    )
+    paths = scout_output.write_outputs(run_dir)
+    return paths, len(scout_output.hypotheses), len(scout_output.eda_task_plan.eda_tasks)
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json")
@@ -1161,6 +1220,7 @@ async def run() -> int:
         mode=mode,
         allow_minimal_fallback=args.allow_minimal_fallback,
         allow_partial_scout_output=args.allow_partial_scout_output,
+        write_eda_plan=args.write_eda_plan,
         debug=args.debug,
         no_github=args.no_github,
         fast=args.fast,
