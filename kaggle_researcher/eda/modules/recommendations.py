@@ -28,6 +28,11 @@ def build_recommended_next_actions(
     relationship_action = _relationship_action(evidence_pack_partial)
     if relationship_action is not None:
         actions.append(relationship_action)
+    actions.extend(_relationship_evidence_actions(evidence_pack_partial))
+    actions.extend(_drift_actions(evidence_pack_partial))
+    actions.extend(_baseline_actions(evidence_pack_partial))
+    actions.extend(_feature_probe_actions(evidence_pack_partial))
+    actions.extend(_notebook_actions(evidence_pack_partial))
 
     return _sort_and_dedupe(actions)
 
@@ -162,6 +167,134 @@ def _relationship_action(evidence_pack: dict[str, Any]) -> RecommendedNextAction
             ["table_profiles"],
         )
     return None
+
+
+def _relationship_evidence_actions(evidence_pack: dict[str, Any]) -> list[RecommendedNextAction]:
+    relationship_evidence = _as_dict(evidence_pack.get("relationship_evidence"))
+    relationships = [_as_dict(item) for item in relationship_evidence.get("relationships", [])]
+    risky = [
+        item
+        for item in relationships
+        if item.get("relationship_type") in {"one_to_many", "many_to_many"}
+        or item.get("requires_aggregation")
+    ]
+    if not risky:
+        return []
+    tables = ", ".join(str(item.get("table")) for item in risky if item.get("table"))
+    return [
+        _action(
+            "P1",
+            "Aggregate one-to-many secondary tables before joining.",
+            f"Relationship evidence found row-multiplying relationships: {tables}.",
+            ["relationship_evidence.relationships"],
+        )
+    ]
+
+
+def _drift_actions(evidence_pack: dict[str, Any]) -> list[RecommendedNextAction]:
+    drift = _as_dict(evidence_pack.get("drift_evidence"))
+    if drift.get("severity") not in {"medium", "high", "critical"}:
+        return []
+    return [
+        _action(
+            "P1",
+            "Treat train/test drift as leaderboard-risk diagnostics.",
+            "Drift evidence shows medium/high severity; keep validation robust and avoid public LB overfitting.",
+            ["drift_evidence"],
+        )
+    ]
+
+
+def _baseline_actions(evidence_pack: dict[str, Any]) -> list[RecommendedNextAction]:
+    baseline = _as_dict(evidence_pack.get("baseline_evidence"))
+    if baseline.get("status") != "completed":
+        return []
+    metric_value = baseline.get("metric_value")
+    suffix = f" (metric={metric_value})" if metric_value is not None else ""
+    return [
+        _action(
+            "P1",
+            f"Use the honest baseline as a sanity floor{suffix}.",
+            "Baseline evidence completed under the selected validation policy; it is not a final solution.",
+            ["baseline_evidence"],
+        )
+    ]
+
+
+def _feature_probe_actions(evidence_pack: dict[str, Any]) -> list[RecommendedNextAction]:
+    probes = [_as_dict(item) for item in evidence_pack.get("feature_probe_evidence", [])]
+    actions: list[RecommendedNextAction] = []
+    high_potential = [
+        item for item in probes if item.get("status") == "high_potential"
+    ]
+    if high_potential:
+        families = ", ".join(str(item.get("feature_family")) for item in high_potential)
+        actions.append(
+            _action(
+                "P1",
+                f"Prioritize high-potential feature families: {families}.",
+                "Feature probe evidence marked these families as high potential.",
+                ["feature_probe_evidence"],
+            )
+        )
+    unsafe = [item for item in probes if item.get("status") == "unsafe"]
+    if unsafe:
+        families = ", ".join(str(item.get("feature_family")) for item in unsafe)
+        actions.append(
+            _action(
+                "P1",
+                f"Audit or avoid risky feature families: {families}.",
+                "Feature probe evidence marked these families as unsafe or leakage-prone.",
+                ["feature_probe_evidence"],
+            )
+        )
+    regression_transform = next(
+        (
+            item
+            for item in probes
+            if item.get("feature_family") == "regression_target_transform"
+            and item.get("status") in {"medium_potential", "high_potential"}
+        ),
+        None,
+    )
+    if regression_transform is not None:
+        actions.append(
+            _action(
+                "P1",
+                "Evaluate a regression target transform inside validation.",
+                "Feature probe evidence reports skewed regression target behavior.",
+                ["feature_probe_evidence"],
+            )
+        )
+    return actions
+
+
+def _notebook_actions(evidence_pack: dict[str, Any]) -> list[RecommendedNextAction]:
+    notebook = _as_dict(evidence_pack.get("notebook_static_analysis"))
+    risky = notebook.get("suspicious_leaderboard_overfit_patterns", []) if notebook else []
+    feature_patterns = notebook.get("feature_families", []) if notebook else []
+    if not risky and not feature_patterns:
+        return []
+    actions: list[RecommendedNextAction] = []
+    if risky:
+        actions.append(
+            _action(
+                "P1",
+                "Audit risky public-notebook patterns before copying them.",
+                "Static notebook analysis observed leaderboard-overfit or risky notebook patterns.",
+                ["notebook_static_analysis.suspicious_leaderboard_overfit_patterns"],
+            )
+        )
+    if feature_patterns:
+        actions.append(
+            _action(
+                "P2",
+                "Use notebook feature patterns only as static inspiration.",
+                "Notebook patterns are observations, not proof; validate any copied idea locally.",
+                ["notebook_static_analysis.feature_families"],
+            )
+        )
+    return actions
 
 
 def _has_actionable_hypotheses(hypothesis_results: list[HypothesisResult]) -> bool:

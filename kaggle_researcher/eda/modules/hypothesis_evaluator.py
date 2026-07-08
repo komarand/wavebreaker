@@ -23,7 +23,7 @@ CATEGORY_MODULES = {
     "metric": "metric_analyzer",
     "validation": "validation_analyzer",
     "leakage": "leakage_checker",
-    "relationship": "relationship_analyzer",
+    "relationship": "relationship_inferer",
     "drift": "drift_analyzer",
     "baseline": "baseline_runner",
     "feature": "feature_probe",
@@ -56,6 +56,16 @@ def evaluate_hypotheses(
             results.append(_evaluate_validation(hypothesis, evidence_pack_partial))
         elif category == "leakage":
             results.append(_evaluate_leakage(hypothesis, evidence_pack_partial))
+        elif category == "relationship":
+            results.append(_evaluate_relationship(hypothesis, evidence_pack_partial))
+        elif category == "drift":
+            results.append(_evaluate_drift(hypothesis, evidence_pack_partial))
+        elif category == "baseline":
+            results.append(_evaluate_baseline(hypothesis, evidence_pack_partial))
+        elif category == "feature":
+            results.append(_evaluate_feature(hypothesis, evidence_pack_partial))
+        elif category == "notebook":
+            results.append(_evaluate_notebook(hypothesis, evidence_pack_partial))
         elif category in SUPPORTED_CATEGORIES:
             results.append(_evaluate_presence_category(hypothesis, evidence_pack_partial))
         else:
@@ -311,6 +321,200 @@ def _evaluate_presence_category(
             evidence_refs=[evidence_key],
         )
     return _not_testable(hypothesis, f"{evidence_key} is unavailable.")
+
+
+def _evaluate_relationship(
+    hypothesis: ResearchHypothesis,
+    evidence_pack: dict,
+) -> HypothesisResult:
+    relationship = _as_dict(evidence_pack.get("relationship_evidence"))
+    relationships = [_as_dict(item) for item in relationship.get("relationships", [])]
+    if not relationship:
+        return _not_testable(hypothesis, "Relationship evidence is unavailable.")
+    usable = [
+        item
+        for item in relationships
+        if item.get("selected_join_key")
+        and item.get("relationship_type") != "unknown"
+        and (item.get("coverage_left_to_right") or 0) > 0
+    ]
+    weak = [
+        item
+        for item in relationships
+        if item.get("candidate_join_keys") or item.get("selected_join_key")
+    ]
+    if usable:
+        keys = ", ".join(
+            sorted({str(item.get("selected_join_key")) for item in usable})
+        )
+        return _make_result(
+            hypothesis,
+            status="confirmed",
+            confidence="high",
+            finding=f"Relationship evidence found usable join key(s): {keys}.",
+            impact="Use relationship evidence before secondary-table aggregation or joins.",
+            evidence_refs=["relationship_evidence.relationships"],
+        )
+    if weak:
+        return _make_result(
+            hypothesis,
+            status="partially_confirmed",
+            confidence="medium",
+            finding="Relationship evidence found weak candidate keys but no strong usable join.",
+            impact="Manually inspect candidate keys before feature engineering secondary tables.",
+            evidence_refs=["relationship_evidence.relationships"],
+            limitations=["Candidate join keys were weak or relationship type was unknown."],
+        )
+    return _not_testable(hypothesis, "No usable relationship keys were found.")
+
+
+def _evaluate_drift(
+    hypothesis: ResearchHypothesis,
+    evidence_pack: dict,
+) -> HypothesisResult:
+    drift = _as_dict(evidence_pack.get("drift_evidence"))
+    if not drift:
+        return _not_testable(hypothesis, "Drift evidence is unavailable.")
+    if drift.get("status") in {"skipped", "not_testable"}:
+        return _not_testable(
+            hypothesis,
+            str(drift.get("reason") or "Drift evidence was skipped or not testable."),
+        )
+    if not drift.get("shared_columns") and drift.get("test_table") is not None:
+        return _not_testable(hypothesis, "Train/test shared columns were unavailable for drift checks.")
+
+    severity = str(drift.get("severity") or "unknown")
+    if severity in {"medium", "high", "critical"}:
+        return _make_result(
+            hypothesis,
+            status="confirmed",
+            confidence="high" if severity == "high" else "medium",
+            finding=f"Drift evidence reports {severity} severity.",
+            impact="Treat drift as diagnostic evidence for validation robustness and leaderboard risk.",
+            evidence_refs=["drift_evidence"],
+        )
+    if severity == "low":
+        return _make_result(
+            hypothesis,
+            status="rejected",
+            confidence="medium",
+            finding="Drift checks show low-severity/stable distributions.",
+            impact="Do not add drift-specific strategy changes unless new evidence appears.",
+            evidence_refs=["drift_evidence"],
+        )
+    return _not_testable(hypothesis, "Drift severity could not be resolved.")
+
+
+def _evaluate_baseline(
+    hypothesis: ResearchHypothesis,
+    evidence_pack: dict,
+) -> HypothesisResult:
+    baseline = _as_dict(evidence_pack.get("baseline_evidence"))
+    if not baseline:
+        return _not_testable(hypothesis, "Baseline evidence is unavailable.")
+    status = str(baseline.get("status") or "")
+    reason = str(baseline.get("reason") or "")
+    if status == "completed":
+        return _make_result(
+            hypothesis,
+            status="confirmed",
+            confidence="medium",
+            finding="Honest baseline completed for the supported task type.",
+            impact="Use the baseline as a sanity floor, not as a final solution.",
+            evidence_refs=["baseline_evidence"],
+        )
+    if status == "skipped" and "enable_baseline" in reason:
+        return _make_result(
+            hypothesis,
+            status="skipped",
+            confidence="low",
+            finding="Baseline runner was disabled.",
+            impact="Do not draw baseline conclusions until baseline is explicitly enabled.",
+            limitations=[reason],
+        )
+    if status == "skipped":
+        return _not_testable(hypothesis, reason or "Baseline was skipped for this task.")
+    return _not_testable(hypothesis, "Baseline evidence did not complete.")
+
+
+def _evaluate_feature(
+    hypothesis: ResearchHypothesis,
+    evidence_pack: dict,
+) -> HypothesisResult:
+    feature_probe = [_as_dict(item) for item in evidence_pack.get("feature_probe_evidence", [])]
+    if not feature_probe:
+        return _not_testable(hypothesis, "Feature probe evidence is unavailable.")
+    high = [item for item in feature_probe if item.get("status") == "high_potential"]
+    medium = [item for item in feature_probe if item.get("status") == "medium_potential"]
+    unsafe = [item for item in feature_probe if item.get("status") == "unsafe"]
+    if high:
+        families = ", ".join(str(item.get("feature_family")) for item in high)
+        return _make_result(
+            hypothesis,
+            status="confirmed",
+            confidence="high",
+            finding=f"Feature probe found high-potential families: {families}.",
+            impact="Prioritize high-potential feature families as P1/P2 experiments.",
+            evidence_refs=["feature_probe_evidence"],
+        )
+    if medium:
+        families = ", ".join(str(item.get("feature_family")) for item in medium)
+        return _make_result(
+            hypothesis,
+            status="partially_confirmed",
+            confidence="medium",
+            finding=f"Feature probe found medium-potential families: {families}.",
+            impact="Try medium-potential feature families after P0 validation and leakage checks.",
+            evidence_refs=["feature_probe_evidence"],
+            limitations=(
+                ["Unsafe feature families were also detected and must be avoided."]
+                if unsafe
+                else []
+            ),
+        )
+    if unsafe:
+        return _make_result(
+            hypothesis,
+            status="rejected",
+            confidence="medium",
+            finding="Feature probe found only unsafe or leakage-prone feature families.",
+            impact="Avoid unsafe feature families unless a fold-safe implementation is designed.",
+            evidence_refs=["feature_probe_evidence"],
+        )
+    return _not_testable(hypothesis, "Feature probe did not find testable feature families.")
+
+
+def _evaluate_notebook(
+    hypothesis: ResearchHypothesis,
+    evidence_pack: dict,
+) -> HypothesisResult:
+    notebook = _as_dict(evidence_pack.get("notebook_static_analysis"))
+    if not notebook:
+        return _not_testable(hypothesis, "Notebook static analysis evidence is unavailable.")
+    if notebook.get("status") == "skipped":
+        return _not_testable(hypothesis, "Notebook static analysis was skipped.")
+    pattern_count = sum(
+        len(notebook.get(field_name, []) or [])
+        for field_name in (
+            "cv_strategy",
+            "feature_families",
+            "model_families",
+            "metric_code",
+            "postprocessing",
+            "suspicious_leaderboard_overfit_patterns",
+        )
+    )
+    if pattern_count:
+        return _make_result(
+            hypothesis,
+            status="confirmed",
+            confidence="medium",
+            finding=f"Static notebook analysis observed {pattern_count} reusable pattern(s).",
+            impact="Treat notebook patterns as observations for audit, not as factual performance proof.",
+            evidence_refs=["notebook_static_analysis"],
+            limitations=["Notebook code was not executed and scores are not proof."],
+        )
+    return _not_testable(hypothesis, "No notebook patterns were observed.")
 
 
 def _skipped_result_if_needed(
