@@ -48,6 +48,21 @@ class DatasetReader:
         except Exception as exc:
             raise ReaderError(f"Could not count rows for {relative_path}: {exc}") from exc
 
+    def file_info(self, relative_path: str | Path) -> dict[str, Any]:
+        path = self.resolve_path(relative_path)
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            raise ReaderError(f"Could not stat dataset file {relative_path}: {exc}") from exc
+        return {
+            "path": str(Path(relative_path)),
+            "extension": path.suffix.lower(),
+            "size_bytes": int(stat.st_size),
+        }
+
+    def file_size_bytes(self, relative_path: str | Path) -> int:
+        return int(self.file_info(relative_path)["size_bytes"])
+
     def sample_table(
         self,
         relative_path: str | Path,

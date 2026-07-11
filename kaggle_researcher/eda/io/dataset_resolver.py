@@ -15,6 +15,9 @@ class DatasetNotFoundError(DatasetResolverError):
     pass
 
 
+SUPPORTED_DATA_EXTENSIONS = {".csv", ".parquet", ".json", ".jsonl"}
+
+
 def derive_competition_slug(
     competition_id: str,
     competition_url: str | None = None,
@@ -47,7 +50,16 @@ def resolve_dataset(
     competition_slug = derive_competition_slug(competition_id, competition_url)
     cached_dataset_path = Path(cache_dir) / competition_slug
     if cached_dataset_path.is_dir() and not force_download:
-        return cached_dataset_path.resolve()
+        if _has_supported_data_file(cached_dataset_path):
+            return cached_dataset_path.resolve()
+        _unzip_archives(cached_dataset_path)
+        if _has_supported_data_file(cached_dataset_path):
+            return cached_dataset_path.resolve()
+        if not download:
+            raise DatasetNotFoundError(
+                f"Cached dataset at {cached_dataset_path} contains no supported data files "
+                "(.csv, .parquet, .json, .jsonl), and dataset download is disabled."
+            )
 
     if not download:
         raise DatasetNotFoundError(
@@ -61,6 +73,13 @@ def resolve_dataset(
 
     if not cached_dataset_path.is_dir():
         raise DatasetNotFoundError(f"Dataset download did not create {cached_dataset_path}")
+    if not _has_supported_data_file(cached_dataset_path):
+        archive_count = len(list(cached_dataset_path.glob("*.zip")))
+        archive_hint = " after extracting archives" if archive_count else ""
+        raise DatasetNotFoundError(
+            f"Dataset cache at {cached_dataset_path} contains no supported data files"
+            f"{archive_hint}. Expected one of: .csv, .parquet, .json, .jsonl."
+        )
 
     return cached_dataset_path.resolve()
 
@@ -99,6 +118,13 @@ def _unzip_archives(dataset_path: Path) -> None:
     for archive_path in sorted(dataset_path.glob("*.zip")):
         with zipfile.ZipFile(archive_path) as archive:
             archive.extractall(dataset_path)
+
+
+def _has_supported_data_file(dataset_path: Path) -> bool:
+    return any(
+        path.is_file() and path.suffix.lower() in SUPPORTED_DATA_EXTENSIONS
+        for path in dataset_path.rglob("*")
+    )
 
 
 def _sanitize_error_message(message: str) -> str:

@@ -26,30 +26,52 @@ Current status: bootstrap only; external APIs, retrieval, embeddings, and report
 
 ## Kaggle EDA Engine
 
-KaggleResearcher v5 adds the Kaggle EDA Engine as a separate Stage 2 Data Evidence Layer. The existing research/reasoning pipeline remains text-source based and does not inspect train/test data by default.
+KaggleResearcher v5 includes the Kaggle EDA Engine as a separate Stage 2 Data Evidence Layer. The research/reasoning pipeline remains source-based; it reads public sources and does not inspect train/test data unless EDA is explicitly run.
 
-The EDA Engine consumes Research Scout outputs plus a Kaggle dataset or local dataset path:
+EDA consumes:
 
 - `research_hypotheses.json`
 - `eda_task_plan.json`
-- Kaggle competition data or a local fixture/dataset directory
+- a Kaggle competition dataset or `--local-dataset-path`
 
-It produces machine-readable evidence for the Final Synthesizer:
+EDA produces:
 
 - `eda_evidence_pack.json`
 - `eda_summary.md`
-- module-level JSON artifacts
-- `artifacts/`
+- `module_statuses.json`
+- module-level JSON artifacts and `artifacts/`
 
-Dataset execution is allowed only inside `kaggle_researcher/eda/` and `kaggle_eda_engine/`. Notebook execution remains forbidden.
-
-Placeholder CLI:
+Local fixture run:
 
 ```powershell
-python -m kaggle_eda_engine.main `
-  --competition-id fixture_competition `
+E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_eda_engine.main `
+  --competition-id home_credit_tiny `
   --hypotheses-path tests\fixtures\eda\home_credit_tiny\research_hypotheses.json `
   --task-plan-path tests\fixtures\eda\home_credit_tiny\eda_task_plan.json `
   --local-dataset-path tests\fixtures\eda\home_credit_tiny `
   --no-download-dataset
 ```
+
+P1 evidence modules:
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_eda_engine.main `
+  --competition-id home_credit_tiny `
+  --hypotheses-path tests\fixtures\eda\home_credit_tiny\research_hypotheses.json `
+  --task-plan-path tests\fixtures\eda\home_credit_tiny\eda_task_plan.json `
+  --local-dataset-path tests\fixtures\eda\home_credit_tiny `
+  --no-download-dataset `
+  --enable-p1-modules
+```
+
+Dataset execution is allowed only inside `kaggle_researcher/eda/` and `kaggle_eda_engine/`. Notebook execution is never performed. Baseline output is an evidence sanity check, not final score optimization. Large datasets may be sampled; when `sampled=true` appears in table profiles, downstream conclusions must respect that limit.
+
+Generic tabular behavior is evidence-based:
+
+- ordinary classification can use StratifiedKFold;
+- ordinary regression can use KFold;
+- grouped tasks can use group-aware validation;
+- temporal validation is primary only when evidence supports it;
+- Gini Stability is supported, but it is not the default worldview.
+
+See `docs/RUNBOOK.md` for production command sequences and expected outputs.

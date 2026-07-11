@@ -6,6 +6,7 @@ from typing import Any
 import polars as pl
 
 from kaggle_researcher.eda.io.dataset_reader import DatasetReader, ReaderError
+from kaggle_researcher.eda.modules.column_policy import ColumnRolePolicy
 from kaggle_researcher.eda.schemas import InferredSchema, ValidationEvidence
 
 
@@ -30,6 +31,7 @@ def analyze_drift(
 
     warnings: list[str] = []
     limitations: list[str] = []
+    sampling = {"sampled": False, "sample_rows": None}
     train_table = inferred_schema.train_base_table
     test_table = inferred_schema.test_base_table
     if train_table is None:
@@ -50,6 +52,14 @@ def analyze_drift(
     train_names = _schema_names(train_schema)
     test_names = _schema_names(test_schema)
     shared_columns = sorted(train_names & test_names)
+    policy = ColumnRolePolicy(inferred_schema)
+    safe_shared_columns = policy.safe_columns(shared_columns, table=train_table, context="drift")
+    excluded_columns = policy.excluded_columns(sorted(train_names), table=train_table, context="drift")
+    schema_only_differences = {
+        "train_only_columns": sorted(train_names - test_names),
+        "test_only_columns": sorted(test_names - train_names),
+    }
+    id_artifact_drift: dict[str, Any] = {"status": "skipped", "columns": []}
 
     time_column = _select_time_column(
         validation_evidence,
@@ -65,6 +75,7 @@ def analyze_drift(
         max_rows=max_rows,
         warnings=warnings,
         limitations=limitations,
+        sampling=sampling,
     )
 
     if test_table is None:
@@ -98,40 +109,67 @@ def analyze_drift(
             max_rows=max_rows,
             warnings=warnings,
             limitations=limitations,
+            sampling=sampling,
         )
-        missingness_drift = _missingness_drift(train_frame, test_frame, shared_columns)
-        numeric_psi = _numeric_psi(train_frame, test_frame, train_schema, test_schema)
-        categorical_shift = _categorical_shift(train_frame, test_frame, train_schema, test_schema)
+        missingness_drift = _missingness_drift(train_frame, test_frame, safe_shared_columns)
+        numeric_psi = _numeric_psi(
+            train_frame,
+            test_frame,
+            train_schema,
+            test_schema,
+            candidate_columns=safe_shared_columns,
+        )
+        categorical_shift = _categorical_shift(
+            train_frame,
+            test_frame,
+            train_schema,
+            test_schema,
+            candidate_columns=safe_shared_columns,
+        )
+        id_artifact_drift = _id_artifact_drift(train_frame, test_frame, excluded_columns)
         adversarial = _adversarial_validation(
             train_frame,
             test_frame,
             inferred_schema,
             validation_evidence,
+            feature_columns=safe_shared_columns,
+            excluded_columns=excluded_columns,
             random_seed=random_seed,
             warnings=warnings,
             limitations=limitations,
+            sampling=sampling,
         )
 
-    severity = _overall_severity(
+    feature_drift_severity = _overall_severity(
         [
-            temporal_drift.get("severity"),
             missingness_drift.get("severity"),
             numeric_psi.get("severity"),
             categorical_shift.get("severity"),
             adversarial.get("severity"),
         ]
     )
+    artifact_warning = _high_cardinality_adversarial_warning(adversarial, train_schema, test_schema)
+    if artifact_warning:
+        warnings.append(artifact_warning)
     return {
         "status": "completed",
-        "severity": severity,
+        "severity": feature_drift_severity,
+        "feature_drift_severity": feature_drift_severity,
         "train_table": train_table,
         "test_table": test_table,
         "shared_columns": shared_columns,
+        "safe_feature_columns": safe_shared_columns,
+        "excluded_columns": excluded_columns,
+        "id_artifact_drift": id_artifact_drift,
+        "schema_only_differences": schema_only_differences,
         "temporal_drift": temporal_drift,
         "missingness_drift": missingness_drift,
         "numeric_psi": numeric_psi,
         "categorical_shift": categorical_shift,
         "adversarial_validation": adversarial,
+        "drift_interpretation": _drift_interpretation(feature_drift_severity, id_artifact_drift),
+        "sampled": bool(sampling["sampled"]),
+        "sample_rows": sampling["sample_rows"],
         "warnings": _unique(warnings),
         "limitations": _unique(limitations),
     }
@@ -147,6 +185,7 @@ def _temporal_drift(
     max_rows: int,
     warnings: list[str],
     limitations: list[str],
+    sampling: dict[str, Any],
 ) -> dict[str, Any]:
     if time_column is None:
         limitations.append("No time column exists; temporal drift diagnostics were skipped.")
@@ -161,7 +200,7 @@ def _temporal_drift(
     columns = [time_column]
     if target_column is not None and target_column in _schema_names(train_schema):
         columns.append(target_column)
-    frame = _safe_read_columns(reader, train_table, columns, max_rows, warnings, limitations)
+    frame = _safe_read_columns(reader, train_table, columns, max_rows, warnings, limitations, sampling)
     if frame is None or frame.is_empty():
         return {
             "status": "skipped",
@@ -246,6 +285,7 @@ def _numeric_psi(
     test_frame: pl.DataFrame | None,
     train_schema: list[dict[str, str]],
     test_schema: list[dict[str, str]],
+    candidate_columns: list[str] | None = None,
 ) -> dict[str, Any]:
     if train_frame is None or test_frame is None:
         return {"status": "skipped", "columns": [], "severity": "unknown"}
@@ -254,7 +294,7 @@ def _numeric_psi(
     test_dtypes = _schema_dtypes(test_schema)
     columns = [
         column
-        for column in train_frame.columns
+        for column in (candidate_columns or train_frame.columns)
         if _is_numeric_dtype(train_dtypes.get(column, ""))
         and _is_numeric_dtype(test_dtypes.get(column, ""))
     ]
@@ -284,6 +324,7 @@ def _categorical_shift(
     test_frame: pl.DataFrame | None,
     train_schema: list[dict[str, str]],
     test_schema: list[dict[str, str]],
+    candidate_columns: list[str] | None = None,
 ) -> dict[str, Any]:
     if train_frame is None or test_frame is None:
         return {"status": "skipped", "columns": [], "severity": "unknown"}
@@ -292,7 +333,7 @@ def _categorical_shift(
     test_dtypes = _schema_dtypes(test_schema)
     columns = [
         column
-        for column in train_frame.columns
+        for column in (candidate_columns or train_frame.columns)
         if _is_categorical_dtype(train_dtypes.get(column, ""))
         and _is_categorical_dtype(test_dtypes.get(column, ""))
     ]
@@ -322,21 +363,22 @@ def _adversarial_validation(
     inferred_schema: InferredSchema,
     validation_evidence: ValidationEvidence,
     *,
+    feature_columns: list[str],
+    excluded_columns: list[dict[str, str]],
     random_seed: int,
     warnings: list[str],
     limitations: list[str],
+    sampling: dict[str, Any],
 ) -> dict[str, Any]:
     if train_frame is None or test_frame is None:
         return {"status": "skipped", "reason": "Train/test frames are unavailable."}
 
-    feature_columns, excluded_columns = _adversarial_feature_columns(
-        train_frame.columns,
-        inferred_schema,
-        validation_evidence,
-    )
     base_result: dict[str, Any] = {
         "feature_columns": feature_columns,
-        "excluded_columns": excluded_columns,
+        "excluded_columns": [item["column"] for item in excluded_columns],
+        "excluded_column_details": excluded_columns,
+        "sampled": bool(sampling["sampled"]),
+        "sample_rows": sampling["sample_rows"],
     }
     if not feature_columns:
         limitations.append("Adversarial validation skipped because no safe shared features exist.")
@@ -442,37 +484,6 @@ def _adversarial_validation(
         }
 
 
-def _adversarial_feature_columns(
-    columns: list[str],
-    inferred_schema: InferredSchema,
-    validation_evidence: ValidationEvidence,
-) -> tuple[list[str], list[str]]:
-    explicit_exclusions = {
-        inferred_schema.target_column,
-        inferred_schema.primary_id_column,
-        inferred_schema.prediction_column,
-    }
-    for candidate in [
-        *validation_evidence.group_columns,
-        *validation_evidence.query_columns,
-    ]:
-        name = candidate.get("name") if isinstance(candidate, dict) else None
-        explicit_exclusions.add(str(name) if name is not None else None)
-
-    excluded: list[str] = []
-    features: list[str] = []
-    for column in columns:
-        normalized = column.lower()
-        if column in explicit_exclusions or any(token in normalized for token in GROUP_ID_TOKENS):
-            excluded.append(column)
-        else:
-            features.append(column)
-    for column in explicit_exclusions:
-        if column is not None and column not in excluded:
-            excluded.append(column)
-    return features, excluded
-
-
 def _row_count_by_period(frame: pl.DataFrame, time_column: str) -> list[dict[str, Any]]:
     rows = (
         frame.group_by(time_column)
@@ -522,9 +533,10 @@ def _read_shared_frames(
     max_rows: int,
     warnings: list[str],
     limitations: list[str],
+    sampling: dict[str, Any],
 ) -> tuple[pl.DataFrame | None, pl.DataFrame | None]:
-    train_frame = _safe_read_columns(reader, train_table, columns, max_rows, warnings, limitations)
-    test_frame = _safe_read_columns(reader, test_table, columns, max_rows, warnings, limitations)
+    train_frame = _safe_read_columns(reader, train_table, columns, max_rows, warnings, limitations, sampling)
+    test_frame = _safe_read_columns(reader, test_table, columns, max_rows, warnings, limitations, sampling)
     if train_frame is not None or test_frame is not None:
         limitations.append(f"Drift checks use at most {max_rows} rows per base table.")
     return train_frame, test_frame
@@ -549,13 +561,55 @@ def _safe_read_columns(
     max_rows: int,
     warnings: list[str],
     limitations: list[str],
+    sampling: dict[str, Any],
 ) -> pl.DataFrame | None:
     try:
-        return reader.read_columns(table, columns=_unique(columns), n_rows=max_rows)
+        frame = reader.read_columns(table, columns=_unique(columns), n_rows=max_rows)
+        _record_row_cap(
+            reader=reader,
+            table=table,
+            frame=frame,
+            max_rows=max_rows,
+            warnings=warnings,
+            limitations=limitations,
+            sampling=sampling,
+        )
+        return frame
     except ReaderError as exc:
         warnings.append(str(exc))
         limitations.append(f"Could not read drift columns from {table}.")
         return None
+
+
+def _record_row_cap(
+    *,
+    reader: DatasetReader,
+    table: str,
+    frame: pl.DataFrame,
+    max_rows: int,
+    warnings: list[str],
+    limitations: list[str],
+    sampling: dict[str, Any],
+) -> None:
+    try:
+        row_count = reader.count_rows(table)
+    except ReaderError as exc:
+        warnings.append(f"Could not verify drift row cap for {table}: {exc}")
+        row_count = None
+    if row_count is not None and row_count > frame.height:
+        sampling["sampled"] = True
+        current_sample_rows = sampling.get("sample_rows")
+        sampling["sample_rows"] = max(
+            int(current_sample_rows or 0),
+            int(frame.height),
+        )
+        warnings.append(
+            f"Drift analysis capped {table} at {frame.height} rows due "
+            f"EDA_MAX_ADVERSARIAL_ROWS={max_rows}."
+        )
+        limitations.append(
+            f"Drift analysis used a bounded sample for {table}; full rows={row_count}."
+        )
 
 
 def _select_time_column(
@@ -644,6 +698,78 @@ def _top_feature_scores(
             )
         scores.append({"feature": column, "shift_score": round(float(score), 6)})
     return sorted(scores, key=lambda item: item["shift_score"], reverse=True)[:10]
+
+
+def _id_artifact_drift(
+    train_frame: pl.DataFrame | None,
+    test_frame: pl.DataFrame | None,
+    excluded_columns: list[dict[str, str]],
+) -> dict[str, Any]:
+    if train_frame is None or test_frame is None:
+        return {"status": "skipped", "columns": []}
+    artifact_columns = [
+        item["column"]
+        for item in excluded_columns
+        if item.get("reason") in {"primary_id", "group_column", "metadata_column"}
+        and item.get("column") in train_frame.columns
+        and item.get("column") in test_frame.columns
+    ]
+    rows = []
+    for column in artifact_columns:
+        rows.append(
+            {
+                "column": column,
+                "reason": next(item["reason"] for item in excluded_columns if item["column"] == column),
+                "train_unique_ratio": _unique_ratio(train_frame[column]),
+                "test_unique_ratio": _unique_ratio(test_frame[column]),
+                "train_missing_pct": _missing_pct(train_frame[column]),
+                "test_missing_pct": _missing_pct(test_frame[column]),
+            }
+        )
+    return {
+        "status": "computed" if rows else "skipped",
+        "columns": rows,
+        "interpretation": (
+            "Excluded id/group/metadata columns may show distribution artifacts; "
+            "they are not used for feature drift severity."
+            if rows
+            else "No excluded id/group/metadata drift artifacts were detected."
+        ),
+    }
+
+
+def _high_cardinality_adversarial_warning(
+    adversarial: dict[str, Any],
+    train_schema: list[dict[str, str]],
+    test_schema: list[dict[str, str]],
+) -> str | None:
+    if adversarial.get("severity") != "high":
+        return None
+    dtypes = {**_schema_dtypes(train_schema), **_schema_dtypes(test_schema)}
+    top_features = [str(item.get("feature")) for item in adversarial.get("top_features", [])[:5]]
+    if any(_is_categorical_dtype(dtypes.get(feature, "")) for feature in top_features):
+        return (
+            "High adversarial validation may reflect high-cardinality identifier-like "
+            "or free-text columns; validate feature treatment carefully."
+        )
+    return None
+
+
+def _drift_interpretation(feature_drift_severity: str, id_artifact_drift: dict[str, Any]) -> str:
+    artifact_count = len(id_artifact_drift.get("columns", []))
+    if feature_drift_severity == "high":
+        return "Safe train/test features show high drift; treat validation and leaderboard risk carefully."
+    if feature_drift_severity == "medium":
+        return "Safe train/test features show moderate drift; monitor shifted features in validation."
+    if artifact_count:
+        return "Feature drift is low after excluding ID/group artifacts."
+    return "No material safe-feature drift was detected by generic diagnostics."
+
+
+def _unique_ratio(series: pl.Series) -> float:
+    if len(series) == 0:
+        return 0.0
+    return round(float(series.n_unique()) / len(series), 6)
 
 
 def _missing_pct(series: pl.Series) -> float:

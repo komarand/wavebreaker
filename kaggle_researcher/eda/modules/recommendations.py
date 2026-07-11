@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from kaggle_researcher.eda.schemas import HypothesisResult, RecommendedNextAction
@@ -17,23 +18,33 @@ def build_recommended_next_actions(
     if not _has_actionable_hypotheses(hypothesis_results):
         return []
 
-    actions: list[RecommendedNextAction] = []
+    hint_actions = _prefer_unique_primary_intents(
+        _strategy_hint_actions(evidence_pack_partial)
+    )
+    legacy_actions: list[RecommendedNextAction] = []
     validation = _as_dict(evidence_pack_partial.get("validation_evidence"))
     metric = _as_dict(evidence_pack_partial.get("metric_evidence"))
     leakage = [_as_dict(item) for item in evidence_pack_partial.get("leakage_evidence", [])]
 
-    actions.extend(_validation_actions(validation))
-    actions.extend(_metric_actions(metric))
-    actions.extend(_leakage_actions(leakage))
+    legacy_actions.extend(_validation_actions(validation))
+    legacy_actions.extend(_metric_actions(metric))
+    legacy_actions.extend(_leakage_actions(leakage))
     relationship_action = _relationship_action(evidence_pack_partial)
     if relationship_action is not None:
-        actions.append(relationship_action)
-    actions.extend(_relationship_evidence_actions(evidence_pack_partial))
-    actions.extend(_drift_actions(evidence_pack_partial))
-    actions.extend(_baseline_actions(evidence_pack_partial))
-    actions.extend(_feature_probe_actions(evidence_pack_partial))
-    actions.extend(_notebook_actions(evidence_pack_partial))
+        legacy_actions.append(relationship_action)
+    legacy_actions.extend(_relationship_evidence_actions(evidence_pack_partial))
+    legacy_actions.extend(_drift_actions(evidence_pack_partial))
+    legacy_actions.extend(_baseline_actions(evidence_pack_partial))
+    legacy_actions.extend(_feature_probe_actions(evidence_pack_partial))
+    legacy_actions.extend(_notebook_actions(evidence_pack_partial))
 
+    actions = list(hint_actions)
+    covered_intents = {_action_intent(action) for action in hint_actions}
+    actions.extend(
+        action
+        for action in legacy_actions
+        if _action_intent(action) not in covered_intents
+    )
     return _sort_and_dedupe(actions)
 
 
@@ -297,6 +308,28 @@ def _notebook_actions(evidence_pack: dict[str, Any]) -> list[RecommendedNextActi
     return actions
 
 
+def _strategy_hint_actions(evidence_pack: dict[str, Any]) -> list[RecommendedNextAction]:
+    hints = _as_dict(evidence_pack.get("eda_strategy_hints"))
+    actions: list[RecommendedNextAction] = []
+    for items in hints.values():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            payload = _as_dict(item)
+            refs = payload.get("evidence_refs") or []
+            if not refs:
+                continue
+            actions.append(
+                _action(
+                    str(payload.get("priority") or "P2"),
+                    str(payload.get("action") or "Follow EDA strategy hint."),
+                    str(payload.get("why") or "Generated from EDA strategy hints."),
+                    [str(ref) for ref in refs],
+                )
+            )
+    return actions
+
+
 def _has_actionable_hypotheses(hypothesis_results: list[HypothesisResult]) -> bool:
     return any(
         result.status in {"confirmed", "partially_confirmed"}
@@ -319,12 +352,12 @@ def _action(
 
 
 def _sort_and_dedupe(actions: list[RecommendedNextAction]) -> list[RecommendedNextAction]:
-    seen: set[tuple[str, tuple[str, ...]]] = set()
+    seen: set[tuple[str, str]] = set()
     deduped: list[RecommendedNextAction] = []
     for action in actions:
         if not action.evidence_refs:
             continue
-        key = (action.action, tuple(action.evidence_refs))
+        key = (_normalize_action_text(action.action), _evidence_category(action.evidence_refs))
         if key in seen:
             continue
         seen.add(key)
@@ -333,6 +366,58 @@ def _sort_and_dedupe(actions: list[RecommendedNextAction]) -> list[RecommendedNe
         deduped,
         key=lambda item: (ACTION_PRIORITY_ORDER[item.priority], item.action),
     )
+
+
+def _action_intent(action: RecommendedNextAction) -> str:
+    text = _normalize_action_text(action.action)
+    evidence = " ".join(action.evidence_refs).lower()
+    if "threshold" in text:
+        return "threshold_tuning"
+    if "validation_evidence.primary_validation" in evidence or (
+        "validation" in text and any(token in text for token in ("kfold", "split", "cv"))
+    ):
+        return "validation_policy"
+    if "baseline" in text or "baseline_evidence" in evidence:
+        return "baseline"
+    if "probabil" in text or "requires_probabilities" in evidence:
+        return "probability_output"
+    if "leak" in text or "leakage_evidence" in evidence:
+        return "leakage_safety"
+    if "drift" in text or "drift_evidence" in evidence:
+        return "drift_diagnostic"
+    return f"{_evidence_category(action.evidence_refs)}:{text}"
+
+
+def _prefer_unique_primary_intents(
+    actions: list[RecommendedNextAction],
+) -> list[RecommendedNextAction]:
+    singletons = {"validation_policy", "threshold_tuning", "baseline"}
+    seen: set[str] = set()
+    result: list[RecommendedNextAction] = []
+    for action in actions:
+        intent = _action_intent(action)
+        if intent in singletons and intent in seen:
+            continue
+        seen.add(intent)
+        result.append(action)
+    return result
+
+
+def _normalize_action_text(value: str) -> str:
+    text = value.lower().replace("stratifiedkfold", "stratified kfold")
+    text = text.replace("stratified k-fold", "stratified kfold")
+    text = text.replace("cross-validation", "cv").replace("cross validation", "cv")
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def _evidence_category(evidence_refs: list[str]) -> str:
+    categories = []
+    for ref in evidence_refs:
+        category = str(ref).split(".", 1)[0]
+        if category and category not in categories:
+            categories.append(category)
+    return "+".join(sorted(categories)) or "unknown"
 
 
 def _normalize_method(method: Any) -> str:

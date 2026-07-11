@@ -97,6 +97,9 @@ def run(argv: list[str] | None = None) -> int:
         max_profile_rows_full_scan=settings.eda_max_profile_rows_full_scan,
         max_adversarial_rows=settings.eda_max_adversarial_rows,
         max_baseline_rows=settings.eda_max_baseline_rows,
+        max_table_bytes=settings.eda_max_table_bytes,
+        max_column_cardinality_scan_rows=settings.eda_max_column_cardinality_scan_rows,
+        module_timeout_sec=settings.eda_module_timeout_sec,
         random_seed=settings.eda_random_seed,
     )
     result = asyncio.run(run_eda(config))

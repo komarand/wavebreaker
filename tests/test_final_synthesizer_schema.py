@@ -3,14 +3,11 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from kaggle_researcher.eda.schemas import EdaEvidencePack, ResearchHypotheses
 from kaggle_researcher.reasoning.final_synthesizer import (
     FinalStrategyAction,
     FinalStrategyResult,
     FinalStrategySection,
-    synthesize_final_strategy,
 )
-from kaggle_researcher.schemas import PlanData, RetrievedDocument
 
 
 def test_final_strategy_result_validates_linked_strategy_contract() -> None:
@@ -103,43 +100,6 @@ def test_action_accepts_required_contract_fields_only() -> None:
 
     assert action.action_id is None
     assert action.eda_result_refs == ["validation_evidence.primary_validation"]
-
-
-@pytest.mark.asyncio
-async def test_synthesize_final_strategy_placeholder_raises_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        await synthesize_final_strategy(
-            competition_desc="Generic binary classification.",
-            plan_data=PlanData(
-                task_type="binary_classification",
-                metric="roc_auc",
-                domain="generic_tabular",
-            ),
-            retrieved_documents=[
-                RetrievedDocument(
-                    id="retrieved-1",
-                    competition_id="generic-binary",
-                    source="kaggle",
-                    title="Evidence",
-                    url="https://example.com/evidence",
-                    content="Use stratified CV for iid binary classification.",
-                    score=0.9,
-                    rrf_score=0.2,
-                )
-            ],
-            domain_patterns=[],
-            research_hypotheses=ResearchHypotheses(
-                competition_id="generic-binary"
-            ),
-            eda_evidence_pack=EdaEvidencePack(
-                competition_id="generic-binary",
-                created_at="2026-07-08T12:00:00+03:00",
-                run_id="generic-binary_20260708_120000",
-            ),
-            reasoning_outputs={},
-            client=object(),
-            model="deepseek-v4-pro",
-        )
 
 
 def _action(

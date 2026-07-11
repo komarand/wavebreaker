@@ -110,6 +110,65 @@ def test_metric_specific_recommendations_still_cite_metric_evidence() -> None:
     assert "metric_evidence.metric_family" in metric_refs
 
 
+def test_strategy_hints_do_not_duplicate_primary_action_intents() -> None:
+    actions = build_recommended_next_actions(
+        {
+            "validation_evidence": {
+                "primary_validation": {"method": "stratified_kfold"}
+            },
+            "metric_evidence": {"requires_threshold": True},
+            "baseline_evidence": {"status": "completed", "metric_value": 0.72},
+            "eda_strategy_hints": {
+                "validation": [
+                    {
+                        "priority": "P0",
+                        "action": "Use StratifiedKFold for model validation.",
+                        "why": "Selected by EDA.",
+                        "evidence_refs": ["validation_evidence.primary_validation"],
+                    },
+                    {
+                        "priority": "P0",
+                        "action": "Tune thresholds only inside validation folds.",
+                        "why": "Required by the metric.",
+                        "evidence_refs": ["metric_evidence.requires_threshold"],
+                    },
+                ],
+                "baseline": [
+                    {
+                        "priority": "P1",
+                        "action": "Use the EDA baseline as a reproducible sanity floor.",
+                        "why": "Baseline completed.",
+                        "evidence_refs": ["baseline_evidence"],
+                    }
+                ],
+                "first_experiments": [
+                    {
+                        "priority": "P0",
+                        "action": "Build a baseline with safe features.",
+                        "why": "Start simply.",
+                        "evidence_refs": ["validation_evidence.primary_validation"],
+                    },
+                    {
+                        "priority": "P1",
+                        "action": "Run validation-only threshold tuning.",
+                        "why": "Metric requires it.",
+                        "evidence_refs": ["metric_evidence.requires_threshold"],
+                    },
+                ],
+            },
+        },
+        [_confirmed_result("validation")],
+    )
+
+    assert sum("threshold" in action.action.lower() for action in actions) == 1
+    assert sum("baseline" in action.action.lower() for action in actions) == 1
+    assert sum(
+        "validation_evidence.primary_validation" in action.evidence_refs
+        and any(token in action.action.lower() for token in ("kfold", "validation"))
+        for action in actions
+    ) == 1
+
+
 def _confirmed_result(category: str) -> HypothesisResult:
     return HypothesisResult(
         hypothesis_id=f"{category}_001",

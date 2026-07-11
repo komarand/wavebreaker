@@ -67,6 +67,10 @@ class ResearchRunResult(BaseModel):
     summary_path: str | None = None
     num_hypotheses: int = 0
     num_eda_tasks: int = 0
+    eda_evidence_pack_path: str | None = None
+    eda_summary_path: str | None = None
+    final_strategy_path: str | None = None
+    final_strategy_summary_path: str | None = None
 
 
 class ReasoningBaseResult(BaseModel):

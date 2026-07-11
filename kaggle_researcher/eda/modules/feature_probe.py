@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from kaggle_researcher.eda.modules.column_policy import ColumnRolePolicy
 from kaggle_researcher.eda.schemas import (
     InferredSchema,
     LeakageCheckResult,
@@ -16,7 +17,8 @@ FEATURE_FAMILIES = (
     "date_features",
     "secondary_table_aggregations",
     "high_cardinality_encoding",
-    "target_encoding_or_woe",
+    "naive_target_encoding_or_woe",
+    "oof_target_encoding_or_woe",
     "monotonic_or_binning_features",
     "ranking_group_features",
     "regression_target_transform",
@@ -34,13 +36,14 @@ def probe_feature_families(
     leakage_evidence: list[LeakageCheckResult],
     baseline_evidence: dict,
     metric_evidence: dict | None = None,
+    validation_evidence: dict | None = None,
 ) -> list[dict[str, Any]]:
     """Assess feature-family potential from existing EDA evidence only."""
 
     metric = _as_dict(metric_evidence)
     base_profile = _base_profile(inferred_schema, table_profiles)
     secondary_profiles = _secondary_profiles(inferred_schema, table_profiles)
-    excluded_columns = _excluded_columns(inferred_schema, leakage_evidence)
+    excluded_columns = _excluded_columns(inferred_schema, leakage_evidence, metric)
 
     probes = [
         _base_numeric_features(base_profile, excluded_columns),
@@ -49,7 +52,13 @@ def probe_feature_families(
         _date_features(inferred_schema, base_profile),
         _secondary_table_aggregations(secondary_profiles, relationship_evidence),
         _high_cardinality_encoding(base_profile, excluded_columns),
-        _target_encoding_or_woe(base_profile, excluded_columns, baseline_evidence),
+        _naive_target_encoding_or_woe(base_profile, excluded_columns),
+        _oof_target_encoding_or_woe(
+            base_profile,
+            excluded_columns,
+            baseline_evidence,
+            _as_dict(validation_evidence),
+        ),
         _monotonic_or_binning_features(base_profile, excluded_columns, metric),
         _ranking_group_features(inferred_schema, table_profiles, metric),
         _regression_target_transform(inferred_schema, base_profile, metric),
@@ -252,35 +261,58 @@ def _high_cardinality_encoding(
     )
 
 
-def _target_encoding_or_woe(
+def _naive_target_encoding_or_woe(
     base_profile: TableProfile | None,
     excluded_columns: set[str],
-    baseline_evidence: dict,
 ) -> dict[str, Any]:
     categorical_columns = _feature_columns(base_profile, excluded_columns, kind="categorical")
-    safe_oof_policy = _has_oof_safe_policy(baseline_evidence)
     if not categorical_columns:
         return _probe(
-            "target_encoding_or_woe",
+            "naive_target_encoding_or_woe",
             "not_testable",
-            "medium",
+            "high",
             {"categorical_columns": []},
-            "No categorical columns were found for target encoding or WoE.",
-        )
-    if safe_oof_policy:
-        return _probe(
-            "target_encoding_or_woe",
-            "medium_potential",
-            "medium",
-            {"categorical_columns": categorical_columns, "safe_policy": True},
-            "Consider only out-of-fold target encoding aligned to the selected validation policy.",
+            "No categorical columns were found for naive target encoding or WoE.",
         )
     return _probe(
-        "target_encoding_or_woe",
+        "naive_target_encoding_or_woe",
         "unsafe",
         "high",
         {"categorical_columns": categorical_columns, "safe_policy": False},
-        "Do not use naive target encoding or WoE; it is high leakage risk without OOF/group/time-safe fitting.",
+        "Do not use naive target encoding or WoE; global target statistics leak labels across validation folds.",
+    )
+
+
+def _oof_target_encoding_or_woe(
+    base_profile: TableProfile | None,
+    excluded_columns: set[str],
+    baseline_evidence: dict,
+    validation_evidence: dict,
+) -> dict[str, Any]:
+    categorical_columns = _feature_columns(base_profile, excluded_columns, kind="categorical")
+    safe_oof_policy = _has_oof_safe_policy(baseline_evidence, validation_evidence)
+    if not categorical_columns:
+        return _probe(
+            "oof_target_encoding_or_woe",
+            "not_testable",
+            "medium",
+            {"categorical_columns": [], "safe_policy": False},
+            "No categorical columns were found for out-of-fold target encoding or WoE.",
+        )
+    if safe_oof_policy:
+        return _probe(
+            "oof_target_encoding_or_woe",
+            "medium_potential",
+            "medium",
+            {"categorical_columns": categorical_columns, "safe_policy": True},
+            "Test only out-of-fold target encoding aligned to the selected validation policy.",
+        )
+    return _probe(
+        "oof_target_encoding_or_woe",
+        "not_testable",
+        "high",
+        {"categorical_columns": categorical_columns, "safe_policy": False},
+        "A supported validation policy is required before testing fold-fitted target encoding.",
     )
 
 
@@ -456,7 +488,10 @@ def _feature_columns(
 def _excluded_columns(
     inferred_schema: InferredSchema,
     leakage_evidence: list[LeakageCheckResult],
+    metric: dict[str, Any],
 ) -> set[str]:
+    policy = ColumnRolePolicy(inferred_schema, metric)
+    base_table = inferred_schema.train_base_table
     excluded = {
         column
         for column in (
@@ -466,6 +501,13 @@ def _excluded_columns(
         )
         if column is not None
     }
+    for table in inferred_schema.tables:
+        if base_table is not None and table.path != base_table:
+            continue
+        for role in table.column_roles:
+            reason = policy.exclusion_reason(role.name, table=table.path, context="model_feature")
+            if reason is not None:
+                excluded.add(role.name)
     for item in leakage_evidence:
         payload = _as_dict(item)
         if payload.get("severity") != "critical":
@@ -505,19 +547,24 @@ def _skew_proxy(column: Any | None) -> float:
         return 0.0
 
 
-def _has_oof_safe_policy(baseline_evidence: dict) -> bool:
+def _has_oof_safe_policy(
+    baseline_evidence: dict,
+    validation_evidence: dict,
+) -> bool:
     evidence = _as_dict(baseline_evidence)
-    if evidence.get("status") != "completed":
-        return False
-    policy = _as_dict(evidence.get("validation_policy"))
+    policy = _as_dict(validation_evidence.get("primary_validation"))
+    if not policy:
+        policy = _as_dict(evidence.get("validation_policy"))
     method = str(policy.get("method") or "").lower()
-    return bool(evidence.get("fold_results")) and method in {
+    return method in {
         "kfold",
         "stratified_kfold",
         "group_kfold",
         "stratified_group_kfold",
         "temporal_holdout",
+        "temporal_cv",
         "expanding_window",
+        "ranking_group_cv",
     }
 
 

@@ -91,6 +91,9 @@ class EdaRunConfig(BaseModel):
     max_profile_rows_full_scan: int = 2_000_000
     max_adversarial_rows: int = 500_000
     max_baseline_rows: int = 1_000_000
+    max_table_bytes: int = 512 * 1024 * 1024
+    max_column_cardinality_scan_rows: int = 200_000
+    module_timeout_sec: int = 900
 
     enable_p1_modules: bool = False
     enable_baseline: bool = False
@@ -418,6 +421,8 @@ class EdaEvidencePack(BaseModel):
     drift_evidence: dict[str, Any] = Field(default_factory=dict)
     baseline_evidence: dict[str, Any] = Field(default_factory=dict)
     feature_probe_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    feature_diagnostics: dict[str, Any] = Field(default_factory=dict)
+    eda_strategy_hints: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     notebook_static_analysis: dict[str, Any] = Field(default_factory=dict)
 
     hypothesis_results: list[HypothesisResult] = Field(default_factory=list)

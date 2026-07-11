@@ -55,6 +55,9 @@ class ArtifactWriter:
         path.write_text(text, encoding="utf-8")
         return path
 
+    def write_module_statuses(self, statuses: dict[str, Any]) -> Path:
+        return self.write_json("module_statuses.json", statuses)
+
     def copy_input(self, path: Path, name: str) -> Path:
         source_path = Path(path)
         if not source_path.is_file():

@@ -2828,6 +2828,12 @@ tests/eda/test_eda_integration_full_p1.py
 
 ## 32. Production runbook examples
 
+The copy-pasteable production runbook lives in `docs/RUNBOOK.md`. All Windows commands use the project-local virtual environment:
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe
+```
+
 ### 32.1 Install dependencies
 
 ```powershell
@@ -2835,38 +2841,106 @@ E:\wavebreaker\.venv-win\Scripts\python.exe -m pip install -r requirements.txt
 E:\wavebreaker\.venv-win\Scripts\python.exe -m pip install -e .
 ```
 
-### 32.2 Run EDA on local dataset
+### 32.2 Run research-only pipeline
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_researcher.main `
+  "https://www.kaggle.com/competitions/example-competition" `
+  "Short competition description, target, metric, and known constraints." `
+  --competition-id example-competition `
+  --output-dir reports
+```
+
+Expected outputs include the research DOCX report, `roadmap.md`, `research_run.json`, and retrieval/reasoning artifacts. This mode does not inspect train/test data.
+
+### 32.3 Generate Research Scout EDA plan
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_researcher.main `
+  "https://www.kaggle.com/competitions/example-competition" `
+  "Short competition description, target, metric, and known constraints." `
+  --competition-id example-competition `
+  --mode scout `
+  --output-dir reports
+```
+
+Expected outputs include `research_hypotheses.json`, `eda_task_plan.json`, `research_scout_summary.md`, and `research_scout_validation.json`.
+
+### 32.4 Run EDA on local dataset
 
 ```powershell
 E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_eda_engine.main `
-  --competition-id home-credit-credit-risk-model-stability `
-  --hypotheses-path "runs\home_credit\research_hypotheses.json" `
-  --task-plan-path "runs\home_credit\eda_task_plan.json" `
-  --local-dataset-path "data\kaggle_datasets\home-credit-credit-risk-model-stability" `
+  --competition-id example-competition `
+  --hypotheses-path runs\example-competition_YYYYMMDD_HHMMSS\research_hypotheses.json `
+  --task-plan-path runs\example-competition_YYYYMMDD_HHMMSS\eda_task_plan.json `
+  --local-dataset-path data\kaggle_datasets\example-competition `
+  --output-dir data\eda_runs `
   --no-download-dataset
 ```
 
-### 32.3 Run EDA with P1 modules
+Expected outputs include `eda_evidence_pack.json`, `eda_summary.md`, `module_statuses.json`, module JSON artifacts, and `artifacts/`.
+
+### 32.5 Run EDA with P1 modules
 
 ```powershell
 E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_eda_engine.main `
-  --competition-id home-credit-credit-risk-model-stability `
-  --hypotheses-path "runs\home_credit\research_hypotheses.json" `
-  --task-plan-path "runs\home_credit\eda_task_plan.json" `
-  --local-dataset-path "data\kaggle_datasets\home-credit-credit-risk-model-stability" `
+  --competition-id example-competition `
+  --hypotheses-path runs\example-competition_YYYYMMDD_HHMMSS\research_hypotheses.json `
+  --task-plan-path runs\example-competition_YYYYMMDD_HHMMSS\eda_task_plan.json `
+  --local-dataset-path data\kaggle_datasets\example-competition `
+  --output-dir data\eda_runs `
+  --no-download-dataset `
   --enable-p1-modules
 ```
 
-### 32.4 Run EDA with baseline
+Additional outputs can include `relationship_evidence.json`, `drift_evidence.json`, `feature_probe_evidence.json`, and optional static notebook analysis artifacts. Notebook execution is still forbidden.
+
+### 32.6 Run EDA with baseline
 
 ```powershell
 E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_eda_engine.main `
-  --competition-id home-credit-credit-risk-model-stability `
-  --hypotheses-path "runs\home_credit\research_hypotheses.json" `
-  --task-plan-path "runs\home_credit\eda_task_plan.json" `
-  --local-dataset-path "data\kaggle_datasets\home-credit-credit-risk-model-stability" `
+  --competition-id example-competition `
+  --hypotheses-path runs\example-competition_YYYYMMDD_HHMMSS\research_hypotheses.json `
+  --task-plan-path runs\example-competition_YYYYMMDD_HHMMSS\eda_task_plan.json `
+  --local-dataset-path data\kaggle_datasets\example-competition `
+  --output-dir data\eda_runs `
+  --no-download-dataset `
   --enable-p1-modules `
   --enable-baseline
+```
+
+Baseline output is a sanity check for metric, split, and target handling. It is not a final model or public leaderboard optimization.
+
+### 32.7 Full research to EDA to final strategy workflow
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_researcher.main `
+  "https://www.kaggle.com/competitions/example-competition" `
+  "Short competition description, target, metric, and known constraints." `
+  --competition-id example-competition `
+  --write-eda-plan `
+  --run-eda `
+  --local-dataset-path data\kaggle_datasets\example-competition `
+  --eda-output-dir data\eda_runs `
+  --final-synthesis `
+  --output-dir reports
+```
+
+Expected outputs include `research_hypotheses.json`, `eda_task_plan.json`, `eda_evidence_pack.json`, `eda_summary.md`, `final_strategy.json`, `final_strategy.md`, and `final_strategy.docx` when document export is enabled for final strategy.
+
+### 32.8 Production safety notes
+
+```text
+- Kaggle rules must be accepted before dataset download.
+- Prefer local dataset mode for repeatability.
+- Notebook execution is never performed.
+- Baseline is a sanity check, not final score optimization.
+- Large datasets may be sampled; sampled=true must be preserved in conclusions.
+- Ordinary classification can use StratifiedKFold.
+- Ordinary regression can use KFold.
+- Grouped tasks can use group-aware validation.
+- Temporal validation is primary only when evidence supports it.
+- Gini Stability is supported but not the default worldview.
 ```
 
 ---

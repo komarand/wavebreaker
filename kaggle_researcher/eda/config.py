@@ -13,6 +13,9 @@ DEFAULT_EDA_PROFILE_SAMPLE_ROWS = 200_000
 DEFAULT_EDA_MAX_PROFILE_ROWS_FULL_SCAN = 2_000_000
 DEFAULT_EDA_MAX_ADVERSARIAL_ROWS = 500_000
 DEFAULT_EDA_MAX_BASELINE_ROWS = 1_000_000
+DEFAULT_EDA_MAX_TABLE_BYTES = 512 * 1024 * 1024
+DEFAULT_EDA_MAX_COLUMN_CARDINALITY_SCAN_ROWS = 200_000
+DEFAULT_EDA_MODULE_TIMEOUT_SEC = 900
 DEFAULT_EDA_RANDOM_SEED = 42
 
 load_dotenv(".env")
@@ -31,6 +34,9 @@ class EdaSettings:
     eda_max_profile_rows_full_scan: int = DEFAULT_EDA_MAX_PROFILE_ROWS_FULL_SCAN
     eda_max_adversarial_rows: int = DEFAULT_EDA_MAX_ADVERSARIAL_ROWS
     eda_max_baseline_rows: int = DEFAULT_EDA_MAX_BASELINE_ROWS
+    eda_max_table_bytes: int = DEFAULT_EDA_MAX_TABLE_BYTES
+    eda_max_column_cardinality_scan_rows: int = DEFAULT_EDA_MAX_COLUMN_CARDINALITY_SCAN_ROWS
+    eda_module_timeout_sec: int = DEFAULT_EDA_MODULE_TIMEOUT_SEC
     eda_random_seed: int = DEFAULT_EDA_RANDOM_SEED
     kaggle_username: str | None = None
     kaggle_key: str | None = field(default=None, repr=False)
@@ -56,6 +62,18 @@ def load_eda_config() -> EdaSettings:
         eda_max_baseline_rows=_get_positive_int_env(
             "EDA_MAX_BASELINE_ROWS",
             DEFAULT_EDA_MAX_BASELINE_ROWS,
+        ),
+        eda_max_table_bytes=_get_positive_int_env(
+            "EDA_MAX_TABLE_BYTES",
+            DEFAULT_EDA_MAX_TABLE_BYTES,
+        ),
+        eda_max_column_cardinality_scan_rows=_get_positive_int_env(
+            "EDA_MAX_COLUMN_CARDINALITY_SCAN_ROWS",
+            DEFAULT_EDA_MAX_COLUMN_CARDINALITY_SCAN_ROWS,
+        ),
+        eda_module_timeout_sec=_get_positive_int_env(
+            "EDA_MODULE_TIMEOUT_SEC",
+            DEFAULT_EDA_MODULE_TIMEOUT_SEC,
         ),
         eda_random_seed=_get_positive_int_env("EDA_RANDOM_SEED", DEFAULT_EDA_RANDOM_SEED),
         kaggle_username=os.getenv("KAGGLE_USERNAME"),

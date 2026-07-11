@@ -63,11 +63,31 @@ def test_target_encoding_is_high_leakage_risk_without_safe_oof_policy() -> None:
     schema, profiles, metric = _fixture_context("iid_binary_tiny")
 
     probes = probe_feature_families(schema, profiles, {}, [], {}, metric)
-    target_encoding = _probe(probes, "target_encoding_or_woe")
+    target_encoding = _probe(probes, "naive_target_encoding_or_woe")
 
     assert target_encoding["status"] == "unsafe"
     assert target_encoding["leakage_risk"] == "high"
     assert target_encoding["evidence"]["categorical_columns"]
+
+
+def test_oof_target_encoding_can_be_medium_potential_with_supported_validation() -> None:
+    schema, profiles, metric = _fixture_context("iid_binary_tiny")
+
+    probes = probe_feature_families(
+        schema,
+        profiles,
+        {},
+        [],
+        {},
+        metric,
+        validation_evidence={
+            "primary_validation": {"method": "stratified_kfold"}
+        },
+    )
+    target_encoding = _probe(probes, "oof_target_encoding_or_woe")
+
+    assert target_encoding["status"] == "medium_potential"
+    assert target_encoding["evidence"]["safe_policy"] is True
 
 
 def test_regression_outlier_fixture_recommends_target_transform_for_skewed_target() -> None:

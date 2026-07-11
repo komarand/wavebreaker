@@ -7,6 +7,7 @@ from typing import Any
 import polars as pl
 
 from kaggle_researcher.eda.io.dataset_reader import DatasetReader, ReaderError
+from kaggle_researcher.eda.modules.column_policy import ColumnRolePolicy
 from kaggle_researcher.eda.schemas import (
     InferredSchema,
     LeakageCheckResult,
@@ -51,12 +52,22 @@ def run_baseline(
             task_type=task_type,
             metric_name=metric_name,
             reason=f"{task_type} baseline is not supported in the MVP baseline runner.",
+            extra={
+                "preprocessing_policy": _preprocessing_policy(
+                    None, [], _role_exclusions(inferred_schema), validation_evidence
+                )
+            },
         )
     if task_type not in SUPPORTED_TASK_TYPES:
         return _skipped(
             task_type=task_type,
             metric_name=metric_name,
             reason="Unknown or unsupported task_type for baseline runner.",
+            extra={
+                "preprocessing_policy": _preprocessing_policy(
+                    None, [], _role_exclusions(inferred_schema), validation_evidence
+                )
+            },
         )
 
     train_table = inferred_schema.train_base_table
@@ -66,6 +77,11 @@ def run_baseline(
             task_type=task_type,
             metric_name=metric_name,
             reason="Train base table and target column are required.",
+            extra={
+                "preprocessing_policy": _preprocessing_policy(
+                    None, [], _role_exclusions(inferred_schema), validation_evidence
+                )
+            },
         )
 
     train_schema = _safe_schema(reader, train_table, warnings)
@@ -76,6 +92,11 @@ def run_baseline(
             metric_name=metric_name,
             reason=f"Target column '{target_column}' is not present in train base.",
             warnings=warnings,
+            extra={
+                "preprocessing_policy": _preprocessing_policy(
+                    None, [], _role_exclusions(inferred_schema), validation_evidence
+                )
+            },
         )
 
     feature_columns, excluded_columns = _feature_columns(
@@ -95,6 +116,12 @@ def run_baseline(
                 "feature_columns": [],
                 "excluded_columns": excluded_columns,
                 "validation_policy": _validation_policy(validation_evidence),
+                "preprocessing_policy": _preprocessing_policy(
+                    None,
+                    [],
+                    excluded_columns,
+                    validation_evidence,
+                ),
             },
         )
 
@@ -117,6 +144,12 @@ def run_baseline(
                 "feature_columns": feature_columns,
                 "excluded_columns": excluded_columns,
                 "validation_policy": _validation_policy(validation_evidence),
+                "preprocessing_policy": _preprocessing_policy(
+                    frame,
+                    feature_columns,
+                    excluded_columns,
+                    validation_evidence,
+                ),
             },
         )
 
@@ -146,6 +179,12 @@ def run_baseline(
                 "feature_columns": feature_columns,
                 "excluded_columns": excluded_columns,
                 "validation_policy": _validation_policy(validation_evidence),
+                "preprocessing_policy": _preprocessing_policy(
+                    frame,
+                    feature_columns,
+                    excluded_columns,
+                    validation_evidence,
+                ),
             },
         )
 
@@ -213,6 +252,12 @@ def run_baseline(
                 "feature_columns": feature_columns,
                 "excluded_columns": excluded_columns,
                 "validation_policy": _validation_policy(validation_evidence),
+                "preprocessing_policy": _preprocessing_policy(
+                    frame,
+                    feature_columns,
+                    excluded_columns,
+                    validation_evidence,
+                ),
             },
         )
 
@@ -238,6 +283,12 @@ def run_baseline(
         "fold_results": fold_results,
         "feature_columns": feature_columns,
         "excluded_columns": excluded_columns,
+        "preprocessing_policy": _preprocessing_policy(
+            frame,
+            feature_columns,
+            excluded_columns,
+            validation_evidence,
+        ),
         "train_table": train_table,
         "train_rows": frame.height,
         "sampled": _is_sampled(reader, train_table, frame.height, max_rows),
@@ -508,6 +559,15 @@ def _feature_columns(
         inferred_schema.primary_id_column,
         inferred_schema.prediction_column,
     }
+    policy = ColumnRolePolicy(inferred_schema)
+    excluded.update(
+        item["column"]
+        for item in policy.excluded_columns(
+            [column["name"] for column in train_schema],
+            table=inferred_schema.train_base_table,
+            context="model_feature",
+        )
+    )
     excluded.update(_critical_leakage_columns(leakage_evidence, train_schema))
 
     method = str(validation_evidence.primary_validation.get("method") or "").lower()
@@ -622,6 +682,63 @@ def _validation_policy(validation_evidence: ValidationEvidence) -> dict[str, Any
         "method": primary.get("method", "kfold"),
         "group_column": primary.get("group_column"),
     }
+
+
+def _preprocessing_policy(
+    frame: pl.DataFrame | None,
+    feature_columns: list[str],
+    excluded_columns: list[str],
+    validation_evidence: ValidationEvidence,
+) -> dict[str, Any]:
+    numeric_columns = [
+        column
+        for column in feature_columns
+        if frame is not None and column in frame.columns and frame[column].dtype.is_numeric()
+    ]
+    categorical_columns = [
+        column for column in feature_columns if column not in numeric_columns
+    ]
+    high_cardinality_columns = []
+    if frame is not None and frame.height:
+        high_cardinality_columns = [
+            column
+            for column in categorical_columns
+            if frame[column].n_unique() > 100
+            or frame[column].n_unique() / frame.height >= 0.5
+        ]
+    return {
+        "imputation": {
+            "numeric": "median",
+            "categorical": "most_frequent",
+            "fit_scope": "training_fold_only",
+        },
+        "categorical_encoding": {
+            "method": "one_hot",
+            "handle_unknown": "ignore",
+            "fit_scope": "training_fold_only",
+        },
+        "high_cardinality_handling": {
+            "columns": high_cardinality_columns,
+            "policy": "one_hot_with_unknown_ignore",
+            "target_encoding": "disabled",
+        },
+        "excluded_columns": list(excluded_columns),
+        "validation_split_policy": _validation_policy(validation_evidence),
+    }
+
+
+def _role_exclusions(inferred_schema: InferredSchema) -> list[str]:
+    return _unique(
+        [
+            column
+            for column in (
+                inferred_schema.target_column,
+                inferred_schema.primary_id_column,
+                inferred_schema.prediction_column,
+            )
+            if column
+        ]
+    )
 
 
 def _task_type(metric_evidence: MetricEvidence) -> str:

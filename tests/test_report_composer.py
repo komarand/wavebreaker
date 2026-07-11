@@ -8,6 +8,8 @@ import pytest
 from kaggle_researcher.reasoning.report_composer import (
     SECTION_HEADINGS,
     compose_report,
+    extract_report_sections,
+    repair_composed_report,
     validate_composed_report,
 )
 from kaggle_researcher.schemas import (
@@ -127,6 +129,29 @@ def _run_compose(client: FakeClient) -> str:
     )
 
 
+def _repair_inputs() -> dict[str, object]:
+    return {
+        "competition_desc": "Credit competition with tabular applications.",
+        "plan_data": PlanData(task_type="classification", metric="gini", domain="credit").model_dump(),
+        "domain_patterns": [{"competition_family": "credit_risk_tabular", "typical_validation": "time split"}],
+        "validation_result": _validation().model_dump(),
+        "leakage_result": _leakage().model_dump(),
+        "metric_result": _metric().model_dump(),
+        "experiments": [_experiment().model_dump()],
+        "lb_audit": _lb_audit().model_dump(),
+        "review": ReviewResult(
+            confidence="medium",
+            evidence_ids=[],
+            unnecessary_experiments=["Large ensemble before baseline."],
+            unsupported_claims=["Claiming train/test data was inspected."],
+        ).model_dump(),
+    }
+
+
+def test_validate_composed_report_accepts_exact_15_sections() -> None:
+    validate_composed_report(_full_report())
+
+
 def test_compose_report_returns_report_with_all_15_required_headings() -> None:
     client = FakeClient(_full_report())
 
@@ -185,6 +210,33 @@ def test_validate_composed_report_rejects_missing_sections() -> None:
         validate_composed_report("## Executive summary\nConfidence: medium.")
 
 
+def test_repair_composed_report_adds_missing_sections() -> None:
+    malformed = "## Executive summary\nLLM summary.\n\n## РџР»Р°РЅ baseline\nStart simple."
+
+    repaired = repair_composed_report(malformed, **_repair_inputs())
+
+    validate_composed_report(repaired)
+    assert [heading for heading in SECTION_HEADINGS if f"## {heading}" in repaired] == SECTION_HEADINGS
+    assert repaired.count("This section was reconstructed because") >= 13
+    assert "Dataset anatomy is based on source descriptions only" in repaired
+    assert "Public notebooks were analyzed only as text/source material; notebooks were not executed." in repaired
+
+
+def test_repair_composed_report_preserves_recovered_content() -> None:
+    malformed = (
+        "## Executive summary\nKeep this executive content.\n\n"
+        "## РћС‡РµСЂРµРґСЊ СЌРєСЃРїРµСЂРёРјРµРЅС‚РѕРІ\nRecovered experiment queue."
+    )
+
+    repaired = repair_composed_report(malformed, **_repair_inputs())
+    sections = extract_report_sections(repaired)
+
+    validate_composed_report(repaired)
+    assert "Keep this executive content." in sections[SECTION_HEADINGS[0]]
+    assert "Recovered experiment queue." in sections[SECTION_HEADINGS[11]]
+    assert f"## {SECTION_HEADINGS[11]}" in repaired
+
+
 def test_validate_composed_report_rejects_forbidden_data_execution_claims() -> None:
     report = _full_report("EDA showed strong leakage.")
 
@@ -197,3 +249,24 @@ def test_compose_report_rejects_forbidden_llm_output() -> None:
 
     with pytest.raises(RuntimeError, match="forbidden data-execution"):
         _run_compose(client)
+
+
+def test_compose_report_repairs_after_invalid_llm_retry() -> None:
+    first = "\n\n".join(
+        [
+            "## Executive summary\nInitial short answer.",
+            "## РџР»Р°РЅ baseline\nBaseline text.",
+        ]
+    )
+    retry = "\n\n".join(
+        f"## {heading}\nRecovered body for {index}."
+        for index, heading in enumerate(SECTION_HEADINGS[:12], start=1)
+    )
+    client = SequentialFakeClient([first, retry])
+
+    result = _run_compose(client)
+
+    assert len(client.calls) == 2
+    validate_composed_report(result)
+    assert "Recovered body for 12." in result
+    assert "This section was reconstructed because the LLM response did not provide a valid canonical section." in result

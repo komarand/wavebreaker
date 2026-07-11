@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ from kaggle_researcher.eda.io.dataset_reader import DatasetReader
 from kaggle_researcher.eda.io.dataset_resolver import resolve_dataset
 from kaggle_researcher.eda.modules.baseline_runner import run_baseline
 from kaggle_researcher.eda.modules.drift_analyzer import analyze_drift
+from kaggle_researcher.eda.modules.feature_diagnostics import diagnose_features
 from kaggle_researcher.eda.modules.feature_probe import probe_feature_families
 from kaggle_researcher.eda.modules.file_inventory import build_file_inventory
 from kaggle_researcher.eda.modules.hypothesis_evaluator import evaluate_hypotheses
@@ -21,6 +23,7 @@ from kaggle_researcher.eda.modules.notebook_static_analyzer import analyze_noteb
 from kaggle_researcher.eda.modules.recommendations import build_recommended_next_actions
 from kaggle_researcher.eda.modules.relationship_inferer import infer_relationships
 from kaggle_researcher.eda.modules.schema_inferer import infer_schema
+from kaggle_researcher.eda.modules.strategy_hints import build_eda_strategy_hints
 from kaggle_researcher.eda.modules.table_profiler import profile_tables
 from kaggle_researcher.eda.modules.validation_analyzer import analyze_validation
 from kaggle_researcher.eda.presets import get_preset
@@ -32,6 +35,7 @@ from kaggle_researcher.eda.schemas import (
     ResearchHypotheses,
     competition_ids_match,
 )
+from kaggle_researcher.eda.summary import build_eda_summary
 
 
 P1_PLACEHOLDERS = {
@@ -56,6 +60,7 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
     output_root = Path(config.output_dir or settings.eda_runs_dir)
     cache_dir = Path(settings.kaggle_datasets_dir)
     module_statuses: dict[str, str] = {}
+    module_status_details: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
     limitations: list[str] = []
 
@@ -75,6 +80,43 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
     run_dir = writer.create_run_dir(config.competition_id)
     writer.copy_input(config.hypotheses_path, "input_research_hypotheses.json")
     writer.copy_input(config.task_plan_path, "input_eda_task_plan.json")
+    dataset_path: Path | None = None
+    file_inventory: Any = None
+    inferred_schema: Any = None
+    table_profiles: list[Any] = []
+    metric_evidence: Any = None
+    validation_evidence: Any = None
+    leakage_evidence: list[Any] = []
+    feature_diagnostics: dict[str, Any] = {}
+    eda_strategy_hints: dict[str, list[dict[str, Any]]] = {}
+    p1_evidence: dict[str, Any] = {
+        key: _copy_placeholder(value) for key, value in P1_PLACEHOLDERS.items()
+    }
+
+    def write_partial_failure(exc: Exception) -> None:
+        sanitized = _sanitize_error(exc)
+        warnings.append(f"EDA run failed before completion: {sanitized}")
+        limitations.append("Partial EDA evidence pack; unsupported conclusions were omitted.")
+        writer.write_module_statuses(module_status_details)
+        _write_partial_evidence_pack(
+            config=config,
+            writer=writer,
+            run_dir=run_dir,
+            dataset_path=dataset_path,
+            file_inventory=file_inventory,
+            inferred_schema=inferred_schema,
+            table_profiles=table_profiles,
+            metric_evidence=metric_evidence,
+            validation_evidence=validation_evidence,
+            leakage_evidence=leakage_evidence,
+            feature_diagnostics=feature_diagnostics,
+            eda_strategy_hints=eda_strategy_hints,
+            p1_evidence=p1_evidence,
+            module_statuses=module_statuses,
+            module_status_details=module_status_details,
+            warnings=warnings,
+            limitations=limitations,
+        )
 
     dataset_path = resolve_dataset(
         competition_id=config.competition_id,
@@ -87,39 +129,96 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
     reader = DatasetReader(dataset_path)
     preset = get_preset(config.competition_id)
 
-    file_inventory = build_file_inventory(dataset_path, preset=preset)
-    module_statuses["file_inventory"] = "completed"
+    try:
+        file_inventory = _run_blocking_module(
+            "file_inventory",
+            module_statuses,
+            module_status_details,
+            lambda: build_file_inventory(dataset_path, preset=preset),
+        )
+        _ensure_supported_data_files(file_inventory)
+    except Exception as exc:
+        write_partial_failure(exc)
+        raise
     writer.write_json("file_inventory.json", file_inventory)
 
-    inferred_schema = infer_schema(file_inventory, reader, preset=preset)
-    module_statuses["schema_inferer"] = "completed"
+    try:
+        inferred_schema = _run_blocking_module(
+            "schema_inferer",
+            module_statuses,
+            module_status_details,
+            lambda: infer_schema(
+                file_inventory,
+                reader,
+                preset=preset,
+                task_type_hint=task_plan.task_type,
+                metric_hint=str((task_plan.metric or {}).get("name") or ""),
+            ),
+        )
+    except Exception as exc:
+        write_partial_failure(exc)
+        raise
     writer.write_json("inferred_schema.json", inferred_schema)
 
-    table_profiles = profile_tables(
-        file_inventory,
-        inferred_schema,
-        reader,
-        sample_rows=config.profile_sample_rows,
-        max_full_scan_rows=config.max_profile_rows_full_scan,
-    )
-    module_statuses["table_profiler"] = "completed"
+    try:
+        table_profiles = _run_blocking_module(
+            "table_profiler",
+            module_statuses,
+            module_status_details,
+            lambda: profile_tables(
+                file_inventory,
+                inferred_schema,
+                reader,
+                sample_rows=config.profile_sample_rows,
+                max_full_scan_rows=config.max_profile_rows_full_scan,
+                max_table_bytes=config.max_table_bytes,
+                max_column_cardinality_scan_rows=config.max_column_cardinality_scan_rows,
+            ),
+        )
+    except Exception as exc:
+        write_partial_failure(exc)
+        raise
     writer.write_json("table_profiles.json", table_profiles)
 
-    metric_evidence = analyze_metric(task_plan, inferred_schema, table_profiles)
-    module_statuses["metric_analyzer"] = "completed"
+    try:
+        metric_evidence = _run_blocking_module(
+            "metric_analyzer",
+            module_statuses,
+            module_status_details,
+            lambda: analyze_metric(task_plan, inferred_schema, table_profiles),
+        )
+    except Exception as exc:
+        write_partial_failure(exc)
+        raise
     writer.write_json("metric_evidence.json", metric_evidence)
 
-    validation_evidence = analyze_validation(
-        inferred_schema,
-        table_profiles,
-        metric_evidence,
-        reader,
-    )
-    module_statuses["validation_analyzer"] = "completed"
+    try:
+        validation_evidence = _run_blocking_module(
+            "validation_analyzer",
+            module_statuses,
+            module_status_details,
+            lambda: analyze_validation(
+                inferred_schema,
+                table_profiles,
+                metric_evidence,
+                reader,
+            ),
+        )
+    except Exception as exc:
+        write_partial_failure(exc)
+        raise
     writer.write_json("validation_evidence.json", validation_evidence)
 
-    leakage_evidence = check_leakage(inferred_schema, validation_evidence, reader)
-    module_statuses["leakage_checker"] = "completed"
+    try:
+        leakage_evidence = _run_blocking_module(
+            "leakage_checker",
+            module_statuses,
+            module_status_details,
+            lambda: check_leakage(inferred_schema, validation_evidence, reader),
+        )
+    except Exception as exc:
+        write_partial_failure(exc)
+        raise
     writer.write_json("leakage_evidence.json", leakage_evidence)
 
     p1_evidence = _run_p1_modules(
@@ -134,9 +233,29 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
         leakage_evidence=leakage_evidence,
         reader=reader,
         module_statuses=module_statuses,
+        module_status_details=module_status_details,
         warnings=warnings,
     )
-    writer.write_json("module_statuses.json", module_statuses)
+    writer.write_module_statuses(module_status_details)
+
+    try:
+        feature_diagnostics = _run_blocking_module(
+            "feature_diagnostics",
+            module_statuses,
+            module_status_details,
+            lambda: diagnose_features(
+                inferred_schema,
+                table_profiles,
+                metric_evidence,
+                p1_evidence.get("drift_evidence"),
+                reader,
+                max_rows=min(config.profile_sample_rows, 200_000),
+            ),
+        )
+    except Exception as exc:
+        write_partial_failure(exc)
+        raise
+    writer.write_json("feature_diagnostics.json", feature_diagnostics)
 
     evidence_pack_partial = {
         "file_inventory": file_inventory,
@@ -145,8 +264,12 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
         "metric_evidence": metric_evidence,
         "validation_evidence": validation_evidence,
         "leakage_evidence": leakage_evidence,
+        "feature_diagnostics": feature_diagnostics,
         **p1_evidence,
     }
+    eda_strategy_hints = build_eda_strategy_hints(evidence_pack_partial)
+    evidence_pack_partial["eda_strategy_hints"] = eda_strategy_hints
+    writer.write_json("eda_strategy_hints.json", eda_strategy_hints)
     hypothesis_results = evaluate_hypotheses(
         hypotheses.hypotheses,
         evidence_pack_partial,
@@ -169,7 +292,7 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
             "dataset_path": str(dataset_path),
             "source": "local" if config.local_dataset_path else "cache",
         },
-        file_inventory=file_inventory.model_dump(mode="json"),
+        file_inventory=_file_inventory_payload(file_inventory, inferred_schema),
         inferred_schema=inferred_schema.model_dump(mode="json"),
         table_profiles=[profile.model_dump(mode="json") for profile in table_profiles],
         metric_evidence=metric_evidence.model_dump(mode="json"),
@@ -179,6 +302,8 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
         drift_evidence=p1_evidence["drift_evidence"],
         baseline_evidence=p1_evidence["baseline_evidence"],
         feature_probe_evidence=p1_evidence["feature_probe_evidence"],
+        feature_diagnostics=feature_diagnostics,
+        eda_strategy_hints=eda_strategy_hints,
         notebook_static_analysis=p1_evidence["notebook_static_analysis"],
         hypothesis_results=hypothesis_results,
         recommended_next_actions=recommended_next_actions,
@@ -187,12 +312,13 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
         artifacts={
             "run_dir": str(run_dir),
             "module_statuses": module_statuses,
+            "module_status_details": module_status_details,
         },
     )
     evidence_pack_path = writer.write_json("eda_evidence_pack.json", evidence_pack)
     summary_path = writer.write_markdown(
         "eda_summary.md",
-        _summary_markdown(evidence_pack, module_statuses),
+        build_eda_summary(evidence_pack),
     )
 
     return EdaRunResult(
@@ -214,11 +340,244 @@ def _load_model(path: Path, model_type: Any) -> Any:
     return model_type(**payload)
 
 
+def _ensure_supported_data_files(file_inventory: Any) -> None:
+    supported_extensions = {".csv", ".parquet", ".json", ".jsonl"}
+    files = getattr(file_inventory, "files", [])
+    supported_files = [
+        file
+        for file in files
+        if getattr(file, "can_read", False)
+        and getattr(file, "extension", "").lower() in supported_extensions
+    ]
+    if supported_files:
+        return
+    archive_files = [
+        getattr(file, "path", getattr(file, "name", "unknown"))
+        for file in files
+        if getattr(file, "extension", "").lower() == ".zip"
+    ]
+    if archive_files:
+        raise ValueError(
+            "No supported tabular data files were found after dataset discovery. "
+            f"Archive files are present but not extracted or contain no supported data: {archive_files}."
+        )
+    raise ValueError(
+        "No supported tabular data files were found in the dataset directory. "
+        "Expected at least one .csv, .parquet, .json, or .jsonl file."
+    )
+
+
+def _file_inventory_payload(file_inventory: Any, inferred_schema: Any) -> dict[str, Any]:
+    payload = file_inventory.model_dump(mode="json") if hasattr(file_inventory, "model_dump") else _jsonable_dict(file_inventory)
+    payload["reconciled_table_roles"] = _reconciled_table_roles(inferred_schema)
+    return payload
+
+
+def _reconciled_table_roles(inferred_schema: Any) -> dict[str, str]:
+    if inferred_schema is None:
+        return {}
+    roles: dict[str, str] = {}
+    train_base = getattr(inferred_schema, "train_base_table", None)
+    test_base = getattr(inferred_schema, "test_base_table", None)
+    sample = getattr(inferred_schema, "sample_submission_table", None)
+    for table in getattr(inferred_schema, "tables", []):
+        if table.path == train_base:
+            roles[table.path] = "train_base"
+        elif table.path == test_base:
+            roles[table.path] = "test_base"
+        elif table.path == sample:
+            roles[table.path] = "sample_submission"
+        elif table.role in {"train", "test"}:
+            suffix = table.table_type if table.table_type != "unknown" else "table"
+            roles[table.path] = f"{table.role}_{suffix}"
+        else:
+            roles[table.path] = table.role
+    return roles
+
+
 def _local_dataset_path(config: EdaRunConfig, task_plan: EdaTaskPlan) -> Path | None:
     if config.local_dataset_path is not None:
         return config.local_dataset_path
     local_path = task_plan.dataset.get("local_dataset_path")
     return Path(local_path) if local_path else None
+
+
+def _run_blocking_module(
+    module_name: str,
+    module_statuses: dict[str, str],
+    module_status_details: dict[str, dict[str, Any]],
+    factory: Any,
+) -> Any:
+    started_at = _now_iso()
+    started_perf = time.perf_counter()
+    try:
+        result = factory()
+    except Exception as exc:
+        _record_module_status(
+            module_name,
+            "failed",
+            module_statuses=module_statuses,
+            module_status_details=module_status_details,
+            legacy_status="failed",
+            started_at=started_at,
+            started_perf=started_perf,
+            error_message=_sanitize_error(exc),
+        )
+        raise
+    _record_module_status(
+        module_name,
+        "success",
+        module_statuses=module_statuses,
+        module_status_details=module_status_details,
+        legacy_status="completed",
+        started_at=started_at,
+        started_perf=started_perf,
+    )
+    return result
+
+
+def _record_module_status(
+    module_name: str,
+    status: str,
+    *,
+    module_statuses: dict[str, str],
+    module_status_details: dict[str, dict[str, Any]],
+    legacy_status: str,
+    started_at: str | None = None,
+    started_perf: float | None = None,
+    error_message: str | None = None,
+) -> None:
+    finished_at = _now_iso()
+    module_statuses[module_name] = legacy_status
+    module_status_details[module_name] = {
+        "module": module_name,
+        "status": status,
+        "started_at": started_at or finished_at,
+        "finished_at": finished_at,
+        "duration_sec": (
+            0.0
+            if started_perf is None
+            else round(max(0.0, time.perf_counter() - started_perf), 6)
+        ),
+        "error_message": error_message,
+    }
+
+
+def _detail_status_from_legacy(legacy_status: str) -> str:
+    if legacy_status == "completed":
+        return "success"
+    if legacy_status in {"failed", "skipped"}:
+        return legacy_status
+    return "success"
+
+
+def _now_iso() -> str:
+    return datetime.now().astimezone().isoformat()
+
+
+def _sanitize_error(exc: Exception) -> str:
+    message = str(exc) or exc.__class__.__name__
+    message = re.sub(r"[\r\n\t]+", " ", message)
+    message = re.sub(
+        r"(?i)\b(api[_-]?key|kaggle[_-]?key|token|secret|password|passwd|pwd|key)\s*[:=]\s*[^\s,;]+",
+        lambda match: f"{match.group(1)}=[REDACTED]",
+        message,
+    )
+    message = re.sub(
+        r"(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}",
+        "Bearer [REDACTED]",
+        message,
+    )
+    message = re.sub(r"\s{2,}", " ", message).strip()
+    if len(message) > 500:
+        message = f"{message[:497]}..."
+    return message
+
+
+def _write_partial_evidence_pack(
+    *,
+    config: EdaRunConfig,
+    writer: ArtifactWriter,
+    run_dir: Path,
+    dataset_path: Path | None,
+    file_inventory: Any,
+    inferred_schema: Any,
+    table_profiles: list[Any],
+    metric_evidence: Any,
+    validation_evidence: Any,
+    leakage_evidence: list[Any],
+    feature_diagnostics: dict[str, Any],
+    eda_strategy_hints: dict[str, list[dict[str, Any]]],
+    p1_evidence: dict[str, Any],
+    module_statuses: dict[str, str],
+    module_status_details: dict[str, dict[str, Any]],
+    warnings: list[str],
+    limitations: list[str],
+) -> None:
+    evidence_pack = EdaEvidencePack(
+        competition_id=config.competition_id,
+        created_at=_now_iso(),
+        run_id=run_dir.name,
+        dataset={
+            "dataset_path": str(dataset_path) if dataset_path is not None else None,
+            "source": "local" if config.local_dataset_path else "cache",
+            "partial": True,
+        },
+        file_inventory=_jsonable_dict(file_inventory),
+        inferred_schema=_jsonable_dict(inferred_schema),
+        table_profiles=_jsonable_list(table_profiles),
+        metric_evidence=_jsonable_dict(metric_evidence),
+        validation_evidence=_jsonable_dict(validation_evidence),
+        leakage_evidence=_jsonable_list(leakage_evidence),
+        relationship_evidence=_jsonable_dict(p1_evidence.get("relationship_evidence")),
+        drift_evidence=_jsonable_dict(p1_evidence.get("drift_evidence")),
+        baseline_evidence=_jsonable_dict(p1_evidence.get("baseline_evidence")),
+        feature_probe_evidence=_jsonable_list(p1_evidence.get("feature_probe_evidence")),
+        feature_diagnostics=_jsonable_dict(feature_diagnostics),
+        eda_strategy_hints=_jsonable_dict(eda_strategy_hints),
+        notebook_static_analysis=_jsonable_dict(p1_evidence.get("notebook_static_analysis")),
+        hypothesis_results=[],
+        recommended_next_actions=[],
+        warnings=list(warnings),
+        limitations=list(dict.fromkeys(limitations)),
+        artifacts={
+            "run_dir": str(run_dir),
+            "partial": True,
+            "module_statuses": dict(module_statuses),
+            "module_status_details": module_status_details,
+        },
+    )
+    writer.write_json("eda_evidence_pack_partial.json", evidence_pack)
+    writer.write_json("eda_evidence_pack.json", evidence_pack)
+
+
+def _jsonable_dict(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    jsonable = _jsonable_value(value)
+    return jsonable if isinstance(jsonable, dict) else {}
+
+
+def _jsonable_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    jsonable = _jsonable_value(value)
+    if isinstance(jsonable, list):
+        return jsonable
+    return []
+
+
+def _jsonable_value(value: Any) -> Any:
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="json")
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _jsonable_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable_value(item) for item in value]
+    return value
 
 
 def _run_p1_modules(
@@ -234,6 +593,7 @@ def _run_p1_modules(
     leakage_evidence: list[Any],
     reader: DatasetReader,
     module_statuses: dict[str, str],
+    module_status_details: dict[str, dict[str, Any]],
     warnings: list[str],
 ) -> dict[str, Any]:
     p1_evidence: dict[str, Any] = {
@@ -243,7 +603,13 @@ def _run_p1_modules(
     for module_name in P1_MODULES:
         artifact_name = _artifact_name_for_module(module_name)
         if not _should_run_p1_module(module_name, config, task_plan):
-            module_statuses[module_name] = "skipped"
+            _record_module_status(
+                module_name,
+                "skipped",
+                module_statuses=module_statuses,
+                module_status_details=module_status_details,
+                legacy_status="skipped",
+            )
             writer.write_json(f"{artifact_name}.json", p1_evidence[artifact_name])
             continue
         if module_name == "baseline_runner" and not config.enable_baseline:
@@ -251,11 +617,19 @@ def _run_p1_modules(
                 module_name,
                 "Baseline runner requires enable_baseline=true.",
             )
-            module_statuses[module_name] = "skipped"
+            _record_module_status(
+                module_name,
+                "skipped",
+                module_statuses=module_statuses,
+                module_status_details=module_status_details,
+                legacy_status="skipped",
+            )
             p1_evidence[artifact_name] = skipped
             writer.write_json(f"{artifact_name}.json", skipped)
             continue
 
+        started_perf = time.perf_counter()
+        started_at = _now_iso()
         try:
             if module_name == "relationship_inferer":
                 result = infer_relationships(inferred_schema, file_inventory, reader)
@@ -286,23 +660,43 @@ def _run_p1_modules(
                     leakage_evidence,
                     p1_evidence["baseline_evidence"],
                     metric_evidence=metric_evidence.model_dump(mode="json"),
+                    validation_evidence=validation_evidence.model_dump(mode="json"),
                 )
             else:
                 result = analyze_notebooks_static(
                     [],
                     output_dir=writer.artifact_path("notebooks"),
                 )
-            module_statuses[module_name] = _status_from_p1_result(result)
+            legacy_status = _status_from_p1_result(result)
+            detail_status = _detail_status_from_legacy(legacy_status)
+            _record_module_status(
+                module_name,
+                detail_status,
+                module_statuses=module_statuses,
+                module_status_details=module_status_details,
+                legacy_status=legacy_status,
+                started_at=started_at,
+                started_perf=started_perf,
+            )
             p1_evidence[artifact_name] = result
             writer.write_json(f"{artifact_name}.json", result)
         except Exception as exc:
             failed = _failed_p1_payload(module_name, exc)
-            module_statuses[module_name] = "failed"
+            _record_module_status(
+                module_name,
+                "failed",
+                module_statuses=module_statuses,
+                module_status_details=module_status_details,
+                legacy_status="failed",
+                started_at=started_at,
+                started_perf=started_perf,
+                error_message=_sanitize_error(exc),
+            )
             p1_evidence[artifact_name] = (
                 [failed] if artifact_name == "feature_probe_evidence" else failed
             )
             writer.write_json(f"{artifact_name}.json", p1_evidence[artifact_name])
-            warnings.append(f"{module_name} failed: {exc}")
+            warnings.append(f"{module_name} failed: {_sanitize_error(exc)}")
 
     return p1_evidence
 
@@ -342,7 +736,7 @@ def _failed_p1_payload(module_name: str, exc: Exception) -> dict[str, Any]:
     return {
         "status": "failed",
         "module": module_name,
-        "error_message": str(exc),
+        "error_message": _sanitize_error(exc),
     }
 
 
@@ -376,56 +770,6 @@ def _module_name_for_placeholder(artifact_name: str) -> str:
         "feature_probe_evidence": "feature_probe",
         "notebook_static_analysis": "notebook_static_analysis",
     }[artifact_name]
-
-
-def _summary_markdown(
-    evidence_pack: EdaEvidencePack,
-    module_statuses: dict[str, str],
-) -> str:
-    validation = evidence_pack.validation_evidence.get("primary_validation", {})
-    metric = evidence_pack.metric_evidence.get("metric_name", "unknown")
-    actions = "\n".join(
-        f"- {action.priority}: {action.action}"
-        for action in evidence_pack.recommended_next_actions
-    ) or "- None"
-    statuses = "\n".join(f"- {name}: {status}" for name, status in sorted(module_statuses.items()))
-    p1_summary = _p1_summary_markdown(evidence_pack)
-    return (
-        f"# EDA Summary\n\n"
-        f"Competition: `{evidence_pack.competition_id}`\n\n"
-        f"Metric: `{metric}`\n\n"
-        f"Primary validation: `{validation.get('method', 'unknown')}`\n\n"
-        f"{p1_summary}"
-        f"## Recommended Actions\n\n{actions}\n\n"
-        f"## Module Statuses\n\n{statuses}\n"
-    )
-
-
-def _p1_summary_markdown(evidence_pack: EdaEvidencePack) -> str:
-    sections: list[str] = []
-    relationship = evidence_pack.relationship_evidence
-    if relationship:
-        relationships = relationship.get("relationships", [])
-        sections.append(f"Relationships: `{len(relationships)}` checked")
-    drift = evidence_pack.drift_evidence
-    if drift:
-        sections.append(f"Drift severity: `{drift.get('severity', drift.get('status', 'unknown'))}`")
-    baseline = evidence_pack.baseline_evidence
-    if baseline:
-        sections.append(f"Baseline: `{baseline.get('status', 'unknown')}`")
-    feature_probe = evidence_pack.feature_probe_evidence
-    if feature_probe:
-        high_potential = sum(
-            1 for item in feature_probe if item.get("status") == "high_potential"
-        )
-        sections.append(f"Feature probes: `{len(feature_probe)}` families, `{high_potential}` high potential")
-    notebook = evidence_pack.notebook_static_analysis
-    if notebook:
-        sections.append(f"Notebook static analysis: `{notebook.get('status', 'unknown')}`")
-    if not sections:
-        return ""
-    body = "\n".join(f"- {section}" for section in sections)
-    return f"## P1 Evidence\n\n{body}\n\n"
 
 
 __all__ = ["run_eda"]

@@ -82,6 +82,7 @@ def infer_relationships(
         warnings.append(f"{base_table}: base id column could not be inferred.")
 
     relationships: list[dict[str, Any]] = []
+    rejected_relationships: list[dict[str, Any]] = []
     for dataset_file in file_inventory.files:
         if not _is_secondary_train_test_table(dataset_file, base_table=base_table):
             continue
@@ -111,50 +112,61 @@ def infer_relationships(
 
         if selected_join_key is None:
             relationships.append(
+                _unknown_relationship(
+                    table_path=table_path,
+                    role=dataset_file.role_hint,
+                    table_hint=dataset_file.table_hint,
+                    candidate_join_keys=candidate_join_keys,
+                    selected_join_key=None,
+                    candidate_group_keys=candidate_group_keys,
+                    candidate_date_cutoff_columns=candidate_date_cutoff_columns,
+                    warning="No shared id-like join key was found between base and secondary table.",
+                    sampled=False,
+                    sample_rows=None,
+                )
+            )
+            rejected_relationships.append(
                 {
-                    "table": table_path,
-                    "role": dataset_file.role_hint,
-                    "table_hint": dataset_file.table_hint,
+                    "left_table": base_table,
+                    "right_table": table_path,
                     "candidate_join_keys": candidate_join_keys,
-                    "selected_join_key": None,
-                    "relationship_type": "unknown",
-                    "coverage_left_to_right": None,
-                    "orphan_rate_right": None,
-                    "avg_rows_per_left": None,
-                    "max_rows_per_left": None,
-                    "row_multiplication_risk": "unknown",
-                    "requires_aggregation": False,
-                    "candidate_group_keys": candidate_group_keys,
-                    "candidate_date_cutoff_columns": candidate_date_cutoff_columns,
-                    "confidence": "low",
-                    "sampled": False,
-                    "sample_rows": None,
-                    "warnings": [
-                        "No shared id-like join key was found between base and secondary table."
-                    ],
+                    "reason": "No shared id-like join key was found between base and secondary table.",
                 }
             )
             continue
 
-        relationships.append(
-            _relationship_stats(
-                reader,
-                base_table=base_table,
-                table_path=table_path,
-                join_key=selected_join_key,
-                role=dataset_file.role_hint,
-                table_hint=dataset_file.table_hint,
-                candidate_join_keys=candidate_join_keys,
-                candidate_group_keys=candidate_group_keys,
-                candidate_date_cutoff_columns=candidate_date_cutoff_columns,
-                max_check_rows=max_check_rows,
-            )
+        relationship = _relationship_stats(
+            reader,
+            base_table=base_table,
+            table_path=table_path,
+            join_key=selected_join_key,
+            role=dataset_file.role_hint,
+            table_hint=dataset_file.table_hint,
+            candidate_join_keys=candidate_join_keys,
+            candidate_group_keys=candidate_group_keys,
+            candidate_date_cutoff_columns=candidate_date_cutoff_columns,
+            max_check_rows=max_check_rows,
         )
+        if relationship.get("coverage_left_to_right") == 0:
+            rejected_relationships.append(
+                {
+                    "left_table": base_table,
+                    "right_table": table_path,
+                    "selected_join_key": selected_join_key,
+                    "reason": (
+                        "zero join coverage between train/test or base/secondary tables"
+                    ),
+                    "coverage_left_to_right": 0,
+                }
+            )
+        else:
+            relationships.append(relationship)
 
     return {
         "base_table": base_table,
         "base_id_column": base_id_column,
         "relationships": relationships,
+        "rejected_relationships": rejected_relationships,
         "warnings": warnings,
     }
 

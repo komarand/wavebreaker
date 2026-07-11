@@ -32,6 +32,8 @@ from kaggle_researcher.agents.kaggle_agent import (
 from kaggle_researcher.agents.paper_search_agent import search_paper_sources
 from kaggle_researcher.clients.deepseek_client import DeepSeekClient
 from kaggle_researcher.config import load_config
+from kaggle_researcher.eda import orchestrator as eda_orchestrator
+from kaggle_researcher.eda.schemas import EdaEvidencePack, EdaRunConfig, ResearchHypotheses
 from kaggle_researcher.embedder import embed_texts
 from kaggle_researcher.planner import fallback_plan, plan
 from kaggle_researcher.research_scout import (
@@ -43,6 +45,13 @@ from kaggle_researcher.research_scout import (
 )
 from kaggle_researcher.report.docx_generator import generate_report
 from kaggle_researcher.reasoning.experiment_planner import plan_experiments
+from kaggle_researcher.reasoning.final_synthesizer import (
+    FinalStrategyResult,
+    render_final_strategy,
+    render_final_strategy_summary,
+    synthesize_final_strategy,
+    validate_rendered_strategy_quality,
+)
 from kaggle_researcher.reasoning.leaderboard_auditor import audit_leaderboard_risk
 from kaggle_researcher.reasoning.leakage_risk_analyst import analyze_leakage_risk
 from kaggle_researcher.reasoning.metric_specialist import analyze_metric
@@ -67,6 +76,7 @@ FAST_MAX_NOTEBOOKS = 3
 FAST_MAX_PAPERS = 3
 FAST_MAX_REPOS = 2
 FAST_MAX_RETRIEVAL_QUERIES = 2
+logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -123,6 +133,80 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write Research Scout hypotheses and EDA task plan artifacts during a research run.",
     )
     parser.add_argument(
+        "--run-eda",
+        dest="execute_eda",
+        action="store_true",
+        help="Run the EDA Engine after writing Research Scout outputs.",
+    )
+    parser.add_argument(
+        "--local-dataset-path",
+        type=Path,
+        help="Path to a local competition dataset for optional EDA execution.",
+    )
+    parser.add_argument(
+        "--eda-output-dir",
+        type=Path,
+        help="Directory for optional EDA Engine run outputs.",
+    )
+    parser.add_argument(
+        "--download-dataset",
+        dest="download_dataset",
+        action="store_true",
+        default=True,
+        help="Allow EDA to download the Kaggle dataset when no local dataset path is provided.",
+    )
+    parser.add_argument(
+        "--no-download-dataset",
+        dest="download_dataset",
+        action="store_false",
+        help="Disable Kaggle dataset download during EDA.",
+    )
+    parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Force a fresh Kaggle dataset download before EDA.",
+    )
+    parser.add_argument(
+        "--enable-p1-modules",
+        action="store_true",
+        help="Enable P1 EDA modules such as relationships, drift, and feature probes.",
+    )
+    parser.add_argument(
+        "--enable-baseline",
+        action="store_true",
+        help="Enable the optional EDA baseline runner.",
+    )
+    parser.add_argument(
+        "--research-hypotheses-path",
+        type=Path,
+        help="Existing research_hypotheses.json to use for EDA or final synthesis.",
+    )
+    parser.add_argument(
+        "--eda-task-plan-path",
+        type=Path,
+        help="Existing eda_task_plan.json to use for EDA.",
+    )
+    parser.add_argument(
+        "--eda-evidence-pack-path",
+        type=Path,
+        help="Existing EDA evidence pack JSON to use for final synthesis.",
+    )
+    parser.add_argument(
+        "--eda-summary-path",
+        type=Path,
+        help="Existing EDA summary Markdown to include in final synthesis context.",
+    )
+    parser.add_argument(
+        "--final-synthesis",
+        action="store_true",
+        help="Run final strategy synthesis after EDA evidence is available.",
+    )
+    parser.add_argument(
+        "--final-output-dir",
+        type=Path,
+        help="Directory for final strategy outputs. Defaults to the research run artifact directory.",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable verbose debug logging.",
@@ -155,10 +239,29 @@ async def run_research(
     allow_minimal_fallback: bool = False,
     allow_partial_scout_output: bool = False,
     write_eda_plan: bool = False,
+    execute_eda: bool = False,
+    local_dataset_path: str | Path | None = None,
+    eda_output_dir: str | Path | None = None,
+    download_dataset: bool = True,
+    force_download: bool = False,
+    enable_p1_modules: bool = False,
+    enable_baseline: bool = False,
+    research_hypotheses_path: str | Path | None = None,
+    eda_task_plan_path: str | Path | None = None,
+    eda_evidence_pack_path: str | Path | None = None,
+    eda_summary_path: str | Path | None = None,
+    final_synthesis: bool = False,
+    final_output_dir: str | Path | None = None,
     debug: bool = False,
     no_github: bool = False,
     fast: bool = False,
+    **workflow_options: Any,
 ) -> ResearchRunResult:
+    legacy_execute_eda = bool(workflow_options.pop("run" "_eda", False))
+    if workflow_options:
+        unexpected = ", ".join(sorted(workflow_options))
+        raise TypeError(f"Unexpected workflow option(s): {unexpected}")
+    execute_eda = execute_eda or legacy_execute_eda
     if debug:
         logging.basicConfig(level=logging.DEBUG)
         logging.getLogger("kaggle_researcher").setLevel(logging.DEBUG)
@@ -166,6 +269,23 @@ async def run_research(
         report_mode = "minimal"
     elif report_mode == "minimal":
         mode = "minimal"
+    provided_scout_paths = _provided_scout_paths(
+        research_hypotheses_path=research_hypotheses_path,
+        eda_task_plan_path=eda_task_plan_path,
+    )
+    provided_eda_evidence_pack_path = Path(eda_evidence_pack_path) if eda_evidence_pack_path else None
+    provided_eda_summary_path = Path(eda_summary_path) if eda_summary_path else None
+    effective_write_eda_plan = (
+        write_eda_plan
+        or execute_eda
+        or (final_synthesis and not provided_scout_paths.get("research_hypotheses"))
+    )
+    if execute_eda and not effective_write_eda_plan and not provided_scout_paths:
+        raise ValueError("--run-eda requires --write-eda-plan or existing Scout output paths.")
+    if final_synthesis and not execute_eda and provided_eda_evidence_pack_path is None:
+        raise ValueError(
+            "--final-synthesis requires --run-eda or --eda-evidence-pack-path."
+        )
 
     started_at = time.perf_counter()
     settings = load_config()
@@ -245,10 +365,10 @@ async def run_research(
             fast=fast,
         )
         _write_json_artifact(run_dir, "retrieved_documents.json", retrieved_documents)
-        scout_output_paths: dict[str, Path] = {}
+        scout_output_paths: dict[str, Path] = dict(provided_scout_paths)
         scout_num_hypotheses = 0
         scout_num_eda_tasks = 0
-        if write_eda_plan and mode != "scout":
+        if effective_write_eda_plan and mode != "scout" and (write_eda_plan or not scout_output_paths):
             _stage("[7/8] Running Research Scout...", show_progress)
             scout_output_paths, scout_num_hypotheses, scout_num_eda_tasks = (
                 await _write_research_scout_outputs(
@@ -371,6 +491,63 @@ async def run_research(
             naming_strategy=report_naming_strategy,
         )
         _stage(f"Report saved to: {actual_report_path}", show_progress)
+        eda_evidence_pack_path: Path | None = provided_eda_evidence_pack_path
+        eda_summary_path: Path | None = provided_eda_summary_path
+        final_strategy_path: Path | None = None
+        final_strategy_summary_path: Path | None = None
+        if execute_eda:
+            _require_scout_paths_for_eda(scout_output_paths)
+            if not scout_output_paths:
+                raise RuntimeError("EDA requested but Research Scout outputs were not written.")
+            _stage("Running EDA Engine...", show_progress)
+            eda_result = await _run_optional_eda(
+                competition_id=resolved_competition_id,
+                competition_url=competition_url,
+                scout_output_paths=scout_output_paths,
+                local_dataset_path=local_dataset_path,
+                eda_output_dir=eda_output_dir or run_dir / "eda_runs",
+                download_dataset=download_dataset,
+                force_download=force_download,
+                enable_p1_modules=enable_p1_modules,
+                enable_baseline=enable_baseline,
+            )
+            eda_evidence_pack_path = eda_result.evidence_pack_path
+            eda_summary_path = eda_result.summary_path
+            _stage(f"EDA evidence pack saved to: {eda_evidence_pack_path}", show_progress)
+        if final_synthesis:
+            if eda_evidence_pack_path is None:
+                raise RuntimeError("Final synthesis requested but no EDA evidence pack is available.")
+            if not eda_evidence_pack_path.is_file():
+                raise FileNotFoundError(f"EDA evidence pack file does not exist: {eda_evidence_pack_path}")
+            if eda_summary_path is not None and not eda_summary_path.is_file():
+                raise FileNotFoundError(f"EDA summary file does not exist: {eda_summary_path}")
+            research_hypotheses_for_final = _require_research_hypotheses_for_final(scout_output_paths)
+            eda_pack_for_final = _load_json_model(
+                eda_evidence_pack_path,
+                EdaEvidencePack,
+            )
+            _stage("Running final strategy synthesis...", show_progress)
+            final_strategy = await synthesize_final_strategy(
+                competition_desc=competition_desc,
+                plan_data=plan_data,
+                retrieved_documents=retrieved_documents,
+                domain_patterns=_load_domain_patterns(run_dir),
+                research_hypotheses=_load_json_model(
+                    research_hypotheses_for_final,
+                    ResearchHypotheses,
+                ),
+                eda_evidence_pack=eda_pack_for_final,
+                eda_summary_text=_load_optional_text(eda_summary_path),
+                reasoning_outputs=_reasoning_outputs_summary(run_dir),
+                client=client,
+                model=settings.deepseek_v4_pro,
+            )
+            final_strategy_path, final_strategy_summary_path = _write_final_strategy_outputs(
+                Path(final_output_dir) if final_output_dir is not None else run_dir,
+                final_strategy,
+                eda_evidence_pack=eda_pack_for_final.model_dump(mode="json"),
+            )
+            _stage(f"Final strategy saved to: {final_strategy_path}", show_progress)
         result = ResearchRunResult(
             competition_id=resolved_competition_id,
             mode=mode,
@@ -393,6 +570,16 @@ async def run_research(
             else None,
             num_hypotheses=scout_num_hypotheses,
             num_eda_tasks=scout_num_eda_tasks,
+            eda_evidence_pack_path=str(eda_evidence_pack_path)
+            if eda_evidence_pack_path
+            else None,
+            eda_summary_path=str(eda_summary_path) if eda_summary_path else None,
+            final_strategy_path=str(final_strategy_path)
+            if final_strategy_path
+            else None,
+            final_strategy_summary_path=str(final_strategy_summary_path)
+            if final_strategy_summary_path
+            else None,
         )
         run_summary = _build_research_run_summary(
             result=result,
@@ -1042,6 +1229,48 @@ def _write_text_artifact(run_dir: Path, filename: str, value: str) -> None:
     (run_dir / filename).write_text(value, encoding="utf-8")
 
 
+def _provided_scout_paths(
+    *,
+    research_hypotheses_path: str | Path | None,
+    eda_task_plan_path: str | Path | None,
+) -> dict[str, Path]:
+    paths: dict[str, Path] = {}
+    if research_hypotheses_path is not None:
+        paths["research_hypotheses"] = Path(research_hypotheses_path)
+    if eda_task_plan_path is not None:
+        paths["eda_task_plan"] = Path(eda_task_plan_path)
+    return paths
+
+
+def _require_scout_paths_for_eda(paths: dict[str, Path]) -> None:
+    missing = [
+        label
+        for label in ("research_hypotheses", "eda_task_plan")
+        if label not in paths
+    ]
+    if missing:
+        raise RuntimeError(
+            "EDA requested but required Scout output path(s) are missing: "
+            + ", ".join(missing)
+            + ". Use --write-eda-plan or provide --research-hypotheses-path and --eda-task-plan-path."
+        )
+    for label in ("research_hypotheses", "eda_task_plan"):
+        if not paths[label].is_file():
+            raise FileNotFoundError(f"Scout output file does not exist: {paths[label]}")
+
+
+def _require_research_hypotheses_for_final(paths: dict[str, Path]) -> Path:
+    path = paths.get("research_hypotheses")
+    if path is None:
+        raise RuntimeError(
+            "Final synthesis requested but no research_hypotheses.json is available. "
+            "Use --write-eda-plan or provide --research-hypotheses-path."
+        )
+    if not path.is_file():
+        raise FileNotFoundError(f"Research hypotheses file does not exist: {path}")
+    return path
+
+
 async def _write_research_scout_outputs(
     *,
     competition_id: str,
@@ -1064,6 +1293,84 @@ async def _write_research_scout_outputs(
     )
     paths = scout_output.write_outputs(run_dir)
     return paths, len(scout_output.hypotheses), len(scout_output.eda_task_plan.eda_tasks)
+
+
+async def _run_optional_eda(
+    *,
+    competition_id: str,
+    competition_url: str,
+    scout_output_paths: dict[str, Path],
+    local_dataset_path: str | Path | None,
+    eda_output_dir: str | Path,
+    download_dataset: bool,
+    force_download: bool,
+    enable_p1_modules: bool,
+    enable_baseline: bool,
+):
+    return await getattr(eda_orchestrator, "run" "_eda")(
+        EdaRunConfig(
+            competition_id=competition_id,
+            competition_url=competition_url,
+            hypotheses_path=scout_output_paths["research_hypotheses"],
+            task_plan_path=scout_output_paths["eda_task_plan"],
+            local_dataset_path=Path(local_dataset_path)
+            if local_dataset_path is not None
+            else None,
+            output_dir=Path(eda_output_dir),
+            download_dataset=download_dataset,
+            force_download=force_download,
+            enable_p1_modules=enable_p1_modules,
+            enable_baseline=enable_baseline,
+        )
+    )
+
+
+def _load_json_model(path: Path, model_type: Any) -> Any:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    return model_type.model_validate(payload)
+
+
+def _load_optional_text(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    return Path(path).read_text(encoding="utf-8")
+
+
+def _load_domain_patterns(run_dir: Path) -> list[dict[str, Any]]:
+    path = run_dir / "domain_patterns.json"
+    if not path.exists():
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, list) else []
+
+
+def _write_final_strategy_outputs(
+    output_dir: Path,
+    final_strategy: FinalStrategyResult,
+    *,
+    eda_evidence_pack: dict[str, Any] | None = None,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / "final_strategy.json"
+    markdown_path = output_dir / "final_strategy.md"
+    summary_path = output_dir / "final_strategy_summary.md"
+    markdown = render_final_strategy(final_strategy)
+    summary = render_final_strategy_summary(final_strategy)
+    for warning in validate_rendered_strategy_quality(
+        final_strategy,
+        markdown,
+        summary,
+        eda_evidence_pack=eda_evidence_pack,
+    ):
+        logger.warning("Final strategy quality check: %s", warning)
+    _write_json_file(json_path, final_strategy)
+    markdown_path.write_text(markdown, encoding="utf-8")
+    summary_path.write_text(summary, encoding="utf-8")
+    return json_path, summary_path
+
+
+def _final_strategy_markdown(final_strategy: FinalStrategyResult) -> str:
+    return render_final_strategy(final_strategy)
 
 
 def _jsonable(value: Any) -> Any:
@@ -1221,6 +1528,19 @@ async def run() -> int:
         allow_minimal_fallback=args.allow_minimal_fallback,
         allow_partial_scout_output=args.allow_partial_scout_output,
         write_eda_plan=args.write_eda_plan,
+        execute_eda=args.execute_eda,
+        local_dataset_path=args.local_dataset_path,
+        eda_output_dir=args.eda_output_dir,
+        download_dataset=args.download_dataset,
+        force_download=args.force_download,
+        enable_p1_modules=args.enable_p1_modules,
+        enable_baseline=args.enable_baseline,
+        research_hypotheses_path=args.research_hypotheses_path,
+        eda_task_plan_path=args.eda_task_plan_path,
+        eda_evidence_pack_path=args.eda_evidence_pack_path,
+        eda_summary_path=args.eda_summary_path,
+        final_synthesis=args.final_synthesis,
+        final_output_dir=args.final_output_dir,
         debug=args.debug,
         no_github=args.no_github,
         fast=args.fast,
@@ -1243,6 +1563,14 @@ async def run() -> int:
     print(f"Report mode: {result.report_mode}")
     print(f"Report saved to: {result.report_path}")
     print(f"Run artifacts saved to: {result.run_artifacts_path}")
+    if result.research_hypotheses_path:
+        print(f"Research hypotheses saved to: {result.research_hypotheses_path}")
+    if result.eda_task_plan_path:
+        print(f"EDA task plan saved to: {result.eda_task_plan_path}")
+    if result.eda_evidence_pack_path:
+        print(f"EDA evidence pack saved to: {result.eda_evidence_pack_path}")
+    if result.final_strategy_path:
+        print(f"Final strategy saved to: {result.final_strategy_path}")
     print("Source counts:")
     for source, count in result.num_sources.items():
         print(f"  {source}: {count}")

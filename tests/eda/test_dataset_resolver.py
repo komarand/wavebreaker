@@ -82,12 +82,41 @@ def test_invalid_local_dataset_path_raises_clear_error(tmp_path: Path) -> None:
         )
 
 
-def test_cached_dataset_path_returns_without_download(
+def test_empty_cached_dataset_path_redownloads_when_download_enabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cached_dataset = tmp_path / "cache" / "fixture-competition"
     cached_dataset.mkdir(parents=True)
+    calls: list[str] = []
+
+    def fake_download(competition_slug: str, destination_dir: Path) -> None:
+        calls.append(competition_slug)
+        (destination_dir / "train.csv").write_text("id,target\n1,0\n", encoding="utf-8")
+
+    monkeypatch.setattr(dataset_resolver, "_download_with_kaggle_cli", fake_download)
+
+    resolved = resolve_dataset(
+        competition_id="Fixture Competition",
+        competition_url=None,
+        local_dataset_path=None,
+        download=True,
+        force_download=False,
+        cache_dir=tmp_path / "cache",
+    )
+
+    assert resolved == cached_dataset.resolve()
+    assert calls == ["fixture-competition"]
+    assert (resolved / "train.csv").is_file()
+
+
+def test_cached_dataset_with_supported_file_returns_without_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cached_dataset = tmp_path / "cache" / "fixture-competition"
+    cached_dataset.mkdir(parents=True)
+    (cached_dataset / "train.csv").write_text("id,target\n1,0\n", encoding="utf-8")
 
     def fail_download(*args: object, **kwargs: object) -> None:
         raise AssertionError("download helper should not be called")

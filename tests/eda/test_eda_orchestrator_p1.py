@@ -34,7 +34,9 @@ def test_p1_run_writes_relationship_and_drift_evidence(tmp_path: Path) -> None:
     assert (result.output_dir / "drift_evidence.json").is_file()
     assert payload["relationship_evidence"]["relationships"]
     assert payload["drift_evidence"]["status"] == "completed"
-    assert "P1 Evidence" in result.summary_path.read_text(encoding="utf-8")
+    summary = result.summary_path.read_text(encoding="utf-8")
+    assert "## Relationships" in summary
+    assert "## Drift" in summary
 
 
 def test_baseline_does_not_run_without_enable_baseline(tmp_path: Path) -> None:

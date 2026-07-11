@@ -36,6 +36,14 @@ def test_binary_classification_fixture_baseline_runs(tmp_path: Path) -> None:
     assert "target" not in evidence["feature_columns"]
     assert "row_id" not in evidence["feature_columns"]
     assert "event_date" not in evidence["feature_columns"]
+    policy = evidence["preprocessing_policy"]
+    assert policy["imputation"]["numeric"] == "median"
+    assert policy["imputation"]["categorical"] == "most_frequent"
+    assert policy["categorical_encoding"]["method"] == "one_hot"
+    assert policy["categorical_encoding"]["handle_unknown"] == "ignore"
+    assert policy["high_cardinality_handling"]["target_encoding"] == "disabled"
+    assert {"target", "row_id", "event_date"} <= set(policy["excluded_columns"])
+    assert policy["validation_split_policy"]["method"] == "stratified_kfold"
     assert Path(evidence["artifacts"]["oof_predictions"]).is_file()
 
 

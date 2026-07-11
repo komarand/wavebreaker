@@ -112,7 +112,7 @@ def test_generic_schema_inference_works_without_preset(tmp_path: Path) -> None:
     assert schema.warnings == []
 
 
-def test_home_credit_specific_columns_require_preset_hints() -> None:
+def test_generic_schema_inference_uses_cross_table_id_and_prediction_evidence_without_preset() -> None:
     inventory = build_file_inventory(FIXTURE_DIR)
     reader = DatasetReader(FIXTURE_DIR)
 
@@ -127,12 +127,12 @@ def test_home_credit_specific_columns_require_preset_hints() -> None:
         for column_role in tables_by_path["sample_submission.csv"].column_roles
     }
 
-    assert schema.primary_id_column is None
-    assert schema.prediction_column is None
-    assert schema.candidate_time_columns == []
-    assert train_roles["case_id"] == "unknown"
-    assert train_roles["WEEK_NUM"] == "unknown"
-    assert submission_roles["score"] == "unknown"
+    assert schema.primary_id_column == "case_id"
+    assert schema.prediction_column == "score"
+    assert schema.candidate_time_columns == ["WEEK_NUM"]
+    assert train_roles["case_id"] == "primary_id"
+    assert train_roles["WEEK_NUM"] == "time"
+    assert submission_roles["score"] == "prediction"
 
 
 def test_missing_train_or_id_produces_degraded_confidence_and_warnings(tmp_path: Path) -> None:

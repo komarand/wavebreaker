@@ -28,6 +28,8 @@ def profile_tables(
     reader: DatasetReader,
     sample_rows: int = 200_000,
     max_full_scan_rows: int = 2_000_000,
+    max_table_bytes: int | None = None,
+    max_column_cardinality_scan_rows: int | None = None,
 ) -> list[TableProfile]:
     """Build safe profiles for readable tabular files."""
 
@@ -36,6 +38,13 @@ def profile_tables(
         raise ValueError("sample_rows must be a positive integer")
     if max_full_scan_rows < 0:
         raise ValueError("max_full_scan_rows must be non-negative")
+    if max_table_bytes is not None and max_table_bytes <= 0:
+        raise ValueError("max_table_bytes must be a positive integer")
+    if (
+        max_column_cardinality_scan_rows is not None
+        and max_column_cardinality_scan_rows <= 0
+    ):
+        raise ValueError("max_column_cardinality_scan_rows must be a positive integer")
 
     profiles: list[TableProfile] = []
     for dataset_file in file_inventory.files:
@@ -59,19 +68,31 @@ def profile_tables(
             continue
 
         columns = [column["name"] for column in schema]
-        sampled = n_rows is None or n_rows > max_full_scan_rows
+        sample_reasons = _sample_reasons(
+            reader=reader,
+            relative_path=dataset_file.path,
+            n_rows=n_rows,
+            max_full_scan_rows=max_full_scan_rows,
+            max_table_bytes=max_table_bytes,
+            max_column_cardinality_scan_rows=max_column_cardinality_scan_rows,
+            warnings=warnings,
+        )
+        sampled = bool(sample_reasons)
+        effective_sample_rows = _effective_sample_rows(
+            sample_rows,
+            max_column_cardinality_scan_rows=max_column_cardinality_scan_rows,
+        )
         frame = _read_profile_frame(
             reader,
             dataset_file.path,
             columns,
             sampled=sampled,
-            sample_rows=sample_rows,
+            sample_rows=effective_sample_rows,
             warnings=warnings,
         )
         if sampled:
-            warnings.append(
-                f"Profile is based on a bounded sample of {frame.height} rows."
-            )
+            warnings.extend(sample_reasons)
+            warnings.append(f"Profile is based on a bounded sample of {frame.height} rows.")
 
         column_profiles = [_profile_column(frame[column]) for column in frame.columns]
         mostly_missing_columns = [
@@ -99,6 +120,58 @@ def profile_tables(
         )
 
     return profiles
+
+
+def _sample_reasons(
+    *,
+    reader: DatasetReader,
+    relative_path: str,
+    n_rows: int | None,
+    max_full_scan_rows: int,
+    max_table_bytes: int | None,
+    max_column_cardinality_scan_rows: int | None,
+    warnings: list[str],
+) -> list[str]:
+    reasons: list[str] = []
+    if n_rows is None:
+        reasons.append("Profile sampled because row count is unavailable.")
+    elif n_rows > max_full_scan_rows:
+        reasons.append(
+            f"Profile sampled because row count {n_rows} exceeds "
+            f"EDA_MAX_PROFILE_ROWS_FULL_SCAN={max_full_scan_rows}."
+        )
+    if (
+        max_column_cardinality_scan_rows is not None
+        and n_rows is not None
+        and n_rows > max_column_cardinality_scan_rows
+    ):
+        reasons.append(
+            f"Profile sampled because row count {n_rows} exceeds "
+            "EDA_MAX_COLUMN_CARDINALITY_SCAN_ROWS="
+            f"{max_column_cardinality_scan_rows}."
+        )
+    if max_table_bytes is not None:
+        try:
+            size_bytes = reader.file_size_bytes(relative_path)
+        except ReaderError as exc:
+            warnings.append(f"Could not read file size for profiling: {exc}")
+        else:
+            if size_bytes > max_table_bytes:
+                reasons.append(
+                    f"Profile sampled because file size {size_bytes} bytes exceeds "
+                    f"EDA_MAX_TABLE_BYTES={max_table_bytes}."
+                )
+    return reasons
+
+
+def _effective_sample_rows(
+    sample_rows: int,
+    *,
+    max_column_cardinality_scan_rows: int | None,
+) -> int:
+    if max_column_cardinality_scan_rows is None:
+        return sample_rows
+    return min(sample_rows, max_column_cardinality_scan_rows)
 
 
 def _safe_count_rows(
