@@ -23,6 +23,34 @@ LeakageCheckStatus = Literal[
     "skipped",
 ]
 Severity = Literal["low", "medium", "high", "critical"]
+RiskSeverity = Literal["info", "low", "medium", "high", "critical"]
+RiskStatus = Literal[
+    "confirmed",
+    "suspected",
+    "mitigated_by_policy",
+    "not_testable",
+    "skipped",
+    "resolved",
+    "informational",
+]
+RiskType = Literal[
+    "schema",
+    "metric",
+    "validation",
+    "leakage",
+    "drift",
+    "missingness",
+    "high_cardinality",
+    "target",
+    "baseline",
+    "relationship",
+    "data_quality",
+    "submission",
+    "feature_engineering",
+    "leaderboard",
+    "notebook_source",
+    "unsupported",
+]
 HypothesisCategory = Literal[
     "schema",
     "metric",
@@ -91,12 +119,25 @@ class EdaRunConfig(BaseModel):
     max_profile_rows_full_scan: int = 2_000_000
     max_adversarial_rows: int = 500_000
     max_baseline_rows: int = 1_000_000
+    max_ablation_rows: int = 100_000
+    max_ablations: int = 12
+    max_ablation_runtime_sec: int | None = None
+    ablation_n_folds: int = 5
+    max_interaction_rows: int = 100_000
+    max_interaction_numeric_columns: int = 30
+    max_interaction_categorical_columns: int = 20
+    max_interaction_pair_candidates: int = 300
+    max_reported_interactions_per_type: int = 20
+    interaction_min_group_rows: int = 20
     max_table_bytes: int = 512 * 1024 * 1024
     max_column_cardinality_scan_rows: int = 200_000
     module_timeout_sec: int = 900
 
     enable_p1_modules: bool = False
     enable_baseline: bool = False
+    enable_baseline_ablations: bool = False
+    enable_interaction_diagnostics: bool = False
+    enable_source_claim_validation: bool = False
     enable_notebook_static_analysis: bool = False
 
     random_seed: int = 42
@@ -399,6 +440,26 @@ class RecommendedNextAction(BaseModel):
     action: str
     why: str
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    risk: Literal["low", "medium", "high"] | None = None
+    applies_to: list[str] = Field(default_factory=list)
+    source_categories: list[str] = Field(default_factory=list)
+
+
+class EdaRisk(BaseModel):
+    risk_id: str
+    risk_intent: str = ""
+    risk_type: RiskType
+    severity: RiskSeverity
+    status: RiskStatus
+    confidence: Confidence
+    title: str
+    finding: str
+    impact: str
+    mitigation: str | None = None
+    applies_to: list[str] = Field(default_factory=list)
+    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    related_actions: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
 
 
 class EdaEvidencePack(BaseModel):
@@ -420,8 +481,14 @@ class EdaEvidencePack(BaseModel):
     relationship_evidence: dict[str, Any] = Field(default_factory=dict)
     drift_evidence: dict[str, Any] = Field(default_factory=dict)
     baseline_evidence: dict[str, Any] = Field(default_factory=dict)
+    baseline_ablation_evidence: dict[str, Any] = Field(default_factory=dict)
     feature_probe_evidence: list[dict[str, Any]] = Field(default_factory=list)
     feature_diagnostics: dict[str, Any] = Field(default_factory=dict)
+    target_diagnostics: dict[str, Any] = Field(default_factory=dict)
+    interaction_diagnostics: dict[str, Any] = Field(default_factory=dict)
+    source_claim_validation: dict[str, Any] = Field(default_factory=dict)
+    eda_risk_register: list[EdaRisk] = Field(default_factory=list)
+    risk_summary: dict[str, Any] = Field(default_factory=dict)
     eda_strategy_hints: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     notebook_static_analysis: dict[str, Any] = Field(default_factory=dict)
 
@@ -449,6 +516,7 @@ __all__ = [
     "DatasetFile",
     "DatasetInfo",
     "EdaEvidencePack",
+    "EdaRisk",
     "EdaRunConfig",
     "EdaRunResult",
     "EdaTask",

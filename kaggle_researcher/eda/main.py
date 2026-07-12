@@ -61,6 +61,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable the optional honest baseline module when implemented",
     )
     parser.add_argument(
+        "--enable-baseline-ablations",
+        action="store_true",
+        help="Enable optional fold-safe baseline feature-block ablations",
+    )
+    parser.add_argument(
+        "--enable-interaction-diagnostics",
+        action="store_true",
+        help="Enable optional bounded pairwise interaction diagnostics",
+    )
+    parser.add_argument(
+        "--enable-source-claim-validation",
+        action="store_true",
+        help="Validate collected source claims against current EDA evidence",
+    )
+    parser.add_argument(
         "--enable-notebook-static-analysis",
         action="store_true",
         help="Enable optional static notebook pattern extraction when P1 modules run",
@@ -91,12 +106,21 @@ def run(argv: list[str] | None = None) -> int:
         skip_modules=args.skip_modules or [],
         enable_p1_modules=args.enable_p1_modules,
         enable_baseline=args.enable_baseline,
+        enable_baseline_ablations=args.enable_baseline_ablations,
+        enable_interaction_diagnostics=args.enable_interaction_diagnostics,
+        enable_source_claim_validation=args.enable_source_claim_validation,
         enable_notebook_static_analysis=args.enable_notebook_static_analysis,
         fail_fast=args.fail_fast,
         profile_sample_rows=settings.eda_profile_sample_rows,
         max_profile_rows_full_scan=settings.eda_max_profile_rows_full_scan,
         max_adversarial_rows=settings.eda_max_adversarial_rows,
         max_baseline_rows=settings.eda_max_baseline_rows,
+        max_ablation_rows=settings.eda_max_ablation_rows,
+        max_ablations=settings.eda_max_ablations,
+        max_interaction_rows=settings.eda_max_interaction_rows,
+        max_interaction_numeric_columns=settings.eda_max_interaction_numeric_columns,
+        max_interaction_categorical_columns=settings.eda_max_interaction_categorical_columns,
+        max_interaction_pair_candidates=settings.eda_max_interaction_pair_candidates,
         max_table_bytes=settings.eda_max_table_bytes,
         max_column_cardinality_scan_rows=settings.eda_max_column_cardinality_scan_rows,
         module_timeout_sec=settings.eda_module_timeout_sec,

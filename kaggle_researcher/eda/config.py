@@ -13,6 +13,12 @@ DEFAULT_EDA_PROFILE_SAMPLE_ROWS = 200_000
 DEFAULT_EDA_MAX_PROFILE_ROWS_FULL_SCAN = 2_000_000
 DEFAULT_EDA_MAX_ADVERSARIAL_ROWS = 500_000
 DEFAULT_EDA_MAX_BASELINE_ROWS = 1_000_000
+DEFAULT_EDA_MAX_ABLATION_ROWS = 100_000
+DEFAULT_EDA_MAX_ABLATIONS = 12
+DEFAULT_EDA_MAX_INTERACTION_ROWS = 100_000
+DEFAULT_EDA_MAX_INTERACTION_NUMERIC_COLUMNS = 30
+DEFAULT_EDA_MAX_INTERACTION_CATEGORICAL_COLUMNS = 20
+DEFAULT_EDA_MAX_INTERACTION_PAIR_CANDIDATES = 300
 DEFAULT_EDA_MAX_TABLE_BYTES = 512 * 1024 * 1024
 DEFAULT_EDA_MAX_COLUMN_CARDINALITY_SCAN_ROWS = 200_000
 DEFAULT_EDA_MODULE_TIMEOUT_SEC = 900
@@ -34,6 +40,12 @@ class EdaSettings:
     eda_max_profile_rows_full_scan: int = DEFAULT_EDA_MAX_PROFILE_ROWS_FULL_SCAN
     eda_max_adversarial_rows: int = DEFAULT_EDA_MAX_ADVERSARIAL_ROWS
     eda_max_baseline_rows: int = DEFAULT_EDA_MAX_BASELINE_ROWS
+    eda_max_ablation_rows: int = DEFAULT_EDA_MAX_ABLATION_ROWS
+    eda_max_ablations: int = DEFAULT_EDA_MAX_ABLATIONS
+    eda_max_interaction_rows: int = DEFAULT_EDA_MAX_INTERACTION_ROWS
+    eda_max_interaction_numeric_columns: int = DEFAULT_EDA_MAX_INTERACTION_NUMERIC_COLUMNS
+    eda_max_interaction_categorical_columns: int = DEFAULT_EDA_MAX_INTERACTION_CATEGORICAL_COLUMNS
+    eda_max_interaction_pair_candidates: int = DEFAULT_EDA_MAX_INTERACTION_PAIR_CANDIDATES
     eda_max_table_bytes: int = DEFAULT_EDA_MAX_TABLE_BYTES
     eda_max_column_cardinality_scan_rows: int = DEFAULT_EDA_MAX_COLUMN_CARDINALITY_SCAN_ROWS
     eda_module_timeout_sec: int = DEFAULT_EDA_MODULE_TIMEOUT_SEC
@@ -63,6 +75,18 @@ def load_eda_config() -> EdaSettings:
             "EDA_MAX_BASELINE_ROWS",
             DEFAULT_EDA_MAX_BASELINE_ROWS,
         ),
+        eda_max_ablation_rows=_get_positive_int_env(
+            "EDA_MAX_ABLATION_ROWS",
+            DEFAULT_EDA_MAX_ABLATION_ROWS,
+        ),
+        eda_max_ablations=_get_positive_int_env(
+            "EDA_MAX_ABLATIONS",
+            DEFAULT_EDA_MAX_ABLATIONS,
+        ),
+        eda_max_interaction_rows=_get_positive_int_env("EDA_MAX_INTERACTION_ROWS", DEFAULT_EDA_MAX_INTERACTION_ROWS),
+        eda_max_interaction_numeric_columns=_get_positive_int_env("EDA_MAX_INTERACTION_NUMERIC_COLUMNS", DEFAULT_EDA_MAX_INTERACTION_NUMERIC_COLUMNS),
+        eda_max_interaction_categorical_columns=_get_positive_int_env("EDA_MAX_INTERACTION_CATEGORICAL_COLUMNS", DEFAULT_EDA_MAX_INTERACTION_CATEGORICAL_COLUMNS),
+        eda_max_interaction_pair_candidates=_get_positive_int_env("EDA_MAX_INTERACTION_PAIR_CANDIDATES", DEFAULT_EDA_MAX_INTERACTION_PAIR_CANDIDATES),
         eda_max_table_bytes=_get_positive_int_env(
             "EDA_MAX_TABLE_BYTES",
             DEFAULT_EDA_MAX_TABLE_BYTES,

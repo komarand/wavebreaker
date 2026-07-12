@@ -11,20 +11,25 @@ from kaggle_researcher.eda.config import load_eda_config
 from kaggle_researcher.eda.io.artifact_writer import ArtifactWriter
 from kaggle_researcher.eda.io.dataset_reader import DatasetReader
 from kaggle_researcher.eda.io.dataset_resolver import resolve_dataset
+from kaggle_researcher.eda.modules.baseline_ablations import run_baseline_ablations
 from kaggle_researcher.eda.modules.baseline_runner import run_baseline
 from kaggle_researcher.eda.modules.drift_analyzer import analyze_drift
 from kaggle_researcher.eda.modules.feature_diagnostics import diagnose_features
 from kaggle_researcher.eda.modules.feature_probe import probe_feature_families
 from kaggle_researcher.eda.modules.file_inventory import build_file_inventory
 from kaggle_researcher.eda.modules.hypothesis_evaluator import evaluate_hypotheses
+from kaggle_researcher.eda.modules.interaction_diagnostics import diagnose_interactions
 from kaggle_researcher.eda.modules.leakage_checker import check_leakage
 from kaggle_researcher.eda.modules.metric_analyzer import analyze_metric
 from kaggle_researcher.eda.modules.notebook_static_analyzer import analyze_notebooks_static
 from kaggle_researcher.eda.modules.recommendations import build_recommended_next_actions
 from kaggle_researcher.eda.modules.relationship_inferer import infer_relationships
+from kaggle_researcher.eda.modules.risk_register import build_eda_risk_register, risk_summary
 from kaggle_researcher.eda.modules.schema_inferer import infer_schema
+from kaggle_researcher.eda.modules.source_claim_validation import collect_source_claims, validate_source_claims
 from kaggle_researcher.eda.modules.strategy_hints import build_eda_strategy_hints
 from kaggle_researcher.eda.modules.table_profiler import profile_tables
+from kaggle_researcher.eda.modules.target_diagnostics import diagnose_target
 from kaggle_researcher.eda.modules.validation_analyzer import analyze_validation
 from kaggle_researcher.eda.presets import get_preset
 from kaggle_researcher.eda.schemas import (
@@ -42,6 +47,9 @@ P1_PLACEHOLDERS = {
     "relationship_evidence": {},
     "drift_evidence": {},
     "baseline_evidence": {},
+    "baseline_ablation_evidence": {},
+    "interaction_diagnostics": {},
+    "source_claim_validation": {},
     "feature_probe_evidence": [],
     "notebook_static_analysis": {},
 }
@@ -88,6 +96,9 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
     validation_evidence: Any = None
     leakage_evidence: list[Any] = []
     feature_diagnostics: dict[str, Any] = {}
+    target_diagnostics: dict[str, Any] = {}
+    interaction_diagnostics: dict[str, Any] = {}
+    source_claim_validation: dict[str, Any] = {}
     eda_strategy_hints: dict[str, list[dict[str, Any]]] = {}
     p1_evidence: dict[str, Any] = {
         key: _copy_placeholder(value) for key, value in P1_PLACEHOLDERS.items()
@@ -110,6 +121,9 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
             validation_evidence=validation_evidence,
             leakage_evidence=leakage_evidence,
             feature_diagnostics=feature_diagnostics,
+            target_diagnostics=target_diagnostics,
+            interaction_diagnostics=interaction_diagnostics,
+            source_claim_validation=source_claim_validation,
             eda_strategy_hints=eda_strategy_hints,
             p1_evidence=p1_evidence,
             module_statuses=module_statuses,
@@ -257,6 +271,75 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
         raise
     writer.write_json("feature_diagnostics.json", feature_diagnostics)
 
+    baseline_ablation_evidence = _run_baseline_ablation_module(
+        config=config,
+        writer=writer,
+        inferred_schema=inferred_schema,
+        validation_evidence=validation_evidence,
+        metric_evidence=metric_evidence,
+        leakage_evidence=leakage_evidence,
+        feature_diagnostics=feature_diagnostics,
+        reader=reader,
+        baseline_evidence=p1_evidence.get("baseline_evidence"),
+        module_statuses=module_statuses,
+        module_status_details=module_status_details,
+        warnings=warnings,
+    )
+    p1_evidence["baseline_ablation_evidence"] = baseline_ablation_evidence
+    writer.write_module_statuses(module_status_details)
+
+    try:
+        target_diagnostics = _run_blocking_module(
+            "target_diagnostics",
+            module_statuses,
+            module_status_details,
+            lambda: diagnose_target(
+                inferred_schema,
+                metric_evidence,
+                validation_evidence,
+                feature_diagnostics,
+                table_profiles,
+                reader,
+                max_rows=min(config.profile_sample_rows, 200_000),
+            ),
+        )
+    except Exception as exc:
+        write_partial_failure(exc)
+        raise
+    writer.write_json("target_diagnostics.json", target_diagnostics)
+
+    interaction_diagnostics = _run_interaction_diagnostics_module(
+        config=config,
+        task_plan=task_plan,
+        writer=writer,
+        inferred_schema=inferred_schema,
+        table_profiles=table_profiles,
+        metric_evidence=metric_evidence,
+        reader=reader,
+        feature_diagnostics=feature_diagnostics,
+        target_diagnostics=target_diagnostics,
+        drift_evidence=p1_evidence.get("drift_evidence"),
+        baseline_ablation_evidence=p1_evidence.get("baseline_ablation_evidence"),
+        leakage_evidence=leakage_evidence,
+        module_statuses=module_statuses,
+        module_status_details=module_status_details,
+        warnings=warnings,
+    )
+    p1_evidence["interaction_diagnostics"] = interaction_diagnostics
+    writer.write_module_statuses(module_status_details)
+
+    source_claim_validation = _run_source_claim_validation_module(
+        config=config, task_plan=task_plan, writer=writer, hypotheses=hypotheses,
+        evidence_pack={
+            "inferred_schema": inferred_schema.model_dump(mode="json"), "metric_evidence": metric_evidence.model_dump(mode="json"),
+            "validation_evidence": validation_evidence.model_dump(mode="json"), "leakage_evidence": [item.model_dump(mode="json") for item in leakage_evidence],
+            "feature_diagnostics": feature_diagnostics, "target_diagnostics": target_diagnostics,
+            "interaction_diagnostics": interaction_diagnostics, **p1_evidence,
+        }, module_statuses=module_statuses, module_status_details=module_status_details, warnings=warnings,
+    )
+    p1_evidence["source_claim_validation"] = source_claim_validation
+    writer.write_module_statuses(module_status_details)
+
     evidence_pack_partial = {
         "file_inventory": file_inventory,
         "inferred_schema": inferred_schema,
@@ -265,8 +348,30 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
         "validation_evidence": validation_evidence,
         "leakage_evidence": leakage_evidence,
         "feature_diagnostics": feature_diagnostics,
+        "target_diagnostics": target_diagnostics,
+        "interaction_diagnostics": interaction_diagnostics,
+        "source_claim_validation": source_claim_validation,
         **p1_evidence,
     }
+    eda_risk_register = build_eda_risk_register(
+        inferred_schema=inferred_schema.model_dump(mode="json"),
+        metric_evidence=metric_evidence.model_dump(mode="json"),
+        validation_evidence=validation_evidence.model_dump(mode="json"),
+        target_diagnostics=target_diagnostics,
+        leakage_evidence=[item.model_dump(mode="json") for item in leakage_evidence],
+        drift_evidence=p1_evidence.get("drift_evidence"),
+        relationship_evidence=p1_evidence.get("relationship_evidence"),
+        feature_probe_evidence=p1_evidence.get("feature_probe_evidence"),
+        feature_diagnostics=feature_diagnostics,
+        baseline_evidence=p1_evidence.get("baseline_evidence"),
+        baseline_ablation_evidence=p1_evidence.get("baseline_ablation_evidence"),
+        interaction_diagnostics=interaction_diagnostics,
+        source_claim_validation=source_claim_validation,
+        notebook_static_analysis=p1_evidence.get("notebook_static_analysis"),
+    )
+    evidence_pack_partial["eda_risk_register"] = eda_risk_register
+    evidence_pack_partial["risk_summary"] = risk_summary(eda_risk_register)
+    writer.write_json("eda_risk_register.json", eda_risk_register)
     eda_strategy_hints = build_eda_strategy_hints(evidence_pack_partial)
     evidence_pack_partial["eda_strategy_hints"] = eda_strategy_hints
     writer.write_json("eda_strategy_hints.json", eda_strategy_hints)
@@ -301,8 +406,14 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
         relationship_evidence=p1_evidence["relationship_evidence"],
         drift_evidence=p1_evidence["drift_evidence"],
         baseline_evidence=p1_evidence["baseline_evidence"],
+        baseline_ablation_evidence=p1_evidence["baseline_ablation_evidence"],
         feature_probe_evidence=p1_evidence["feature_probe_evidence"],
         feature_diagnostics=feature_diagnostics,
+        target_diagnostics=target_diagnostics,
+        interaction_diagnostics=interaction_diagnostics,
+        source_claim_validation=source_claim_validation,
+        eda_risk_register=eda_risk_register,
+        risk_summary=risk_summary(eda_risk_register),
         eda_strategy_hints=eda_strategy_hints,
         notebook_static_analysis=p1_evidence["notebook_static_analysis"],
         hypothesis_results=hypothesis_results,
@@ -507,6 +618,9 @@ def _write_partial_evidence_pack(
     validation_evidence: Any,
     leakage_evidence: list[Any],
     feature_diagnostics: dict[str, Any],
+    target_diagnostics: dict[str, Any],
+    interaction_diagnostics: dict[str, Any],
+    source_claim_validation: dict[str, Any],
     eda_strategy_hints: dict[str, list[dict[str, Any]]],
     p1_evidence: dict[str, Any],
     module_statuses: dict[str, str],
@@ -532,8 +646,12 @@ def _write_partial_evidence_pack(
         relationship_evidence=_jsonable_dict(p1_evidence.get("relationship_evidence")),
         drift_evidence=_jsonable_dict(p1_evidence.get("drift_evidence")),
         baseline_evidence=_jsonable_dict(p1_evidence.get("baseline_evidence")),
+        baseline_ablation_evidence=_jsonable_dict(p1_evidence.get("baseline_ablation_evidence")),
         feature_probe_evidence=_jsonable_list(p1_evidence.get("feature_probe_evidence")),
         feature_diagnostics=_jsonable_dict(feature_diagnostics),
+        target_diagnostics=_jsonable_dict(target_diagnostics),
+        interaction_diagnostics=_jsonable_dict(interaction_diagnostics),
+        source_claim_validation=_jsonable_dict(source_claim_validation),
         eda_strategy_hints=_jsonable_dict(eda_strategy_hints),
         notebook_static_analysis=_jsonable_dict(p1_evidence.get("notebook_static_analysis")),
         hypothesis_results=[],
@@ -612,7 +730,7 @@ def _run_p1_modules(
             )
             writer.write_json(f"{artifact_name}.json", p1_evidence[artifact_name])
             continue
-        if module_name == "baseline_runner" and not config.enable_baseline:
+        if module_name == "baseline_runner" and not (config.enable_baseline or config.enable_baseline_ablations):
             skipped = _skipped_p1_payload(
                 module_name,
                 "Baseline runner requires enable_baseline=true.",
@@ -701,6 +819,177 @@ def _run_p1_modules(
     return p1_evidence
 
 
+def _run_baseline_ablation_module(
+    *,
+    config: EdaRunConfig,
+    writer: ArtifactWriter,
+    inferred_schema: Any,
+    validation_evidence: Any,
+    metric_evidence: Any,
+    leakage_evidence: list[Any],
+    feature_diagnostics: dict[str, Any],
+    reader: DatasetReader,
+    baseline_evidence: dict[str, Any] | None,
+    module_statuses: dict[str, str],
+    module_status_details: dict[str, dict[str, Any]],
+    warnings: list[str],
+) -> dict[str, Any]:
+    module_name = "baseline_ablation_runner"
+    artifact_name = "baseline_ablation_evidence"
+    if not config.enable_baseline_ablations:
+        skipped = _skipped_p1_payload(
+            module_name,
+            "Baseline ablations require enable_baseline_ablations=true.",
+        )
+        _record_module_status(
+            module_name,
+            "skipped",
+            module_statuses=module_statuses,
+            module_status_details=module_status_details,
+            legacy_status="skipped",
+        )
+        writer.write_json(f"{artifact_name}.json", skipped)
+        return skipped
+
+    started_perf = time.perf_counter()
+    started_at = _now_iso()
+    try:
+        result = run_baseline_ablations(
+            inferred_schema,
+            validation_evidence,
+            metric_evidence,
+            leakage_evidence,
+            reader,
+            output_dir=writer.artifact_path("baseline_ablations"),
+            baseline_evidence=baseline_evidence or {},
+            feature_diagnostics=feature_diagnostics,
+            max_rows=config.max_ablation_rows,
+            max_ablations=config.max_ablations,
+            random_seed=config.random_seed,
+            n_folds=config.ablation_n_folds,
+            max_runtime_sec=config.max_ablation_runtime_sec,
+        )
+        legacy_status = _status_from_p1_result(result)
+        _record_module_status(
+            module_name,
+            _detail_status_from_legacy(legacy_status),
+            module_statuses=module_statuses,
+            module_status_details=module_status_details,
+            legacy_status=legacy_status,
+            started_at=started_at,
+            started_perf=started_perf,
+        )
+        writer.write_json(f"{artifact_name}.json", result)
+        return result
+    except Exception as exc:
+        failed = _failed_p1_payload(module_name, exc)
+        _record_module_status(
+            module_name,
+            "failed",
+            module_statuses=module_statuses,
+            module_status_details=module_status_details,
+            legacy_status="failed",
+            started_at=started_at,
+            started_perf=started_perf,
+            error_message=_sanitize_error(exc),
+        )
+        writer.write_json(f"{artifact_name}.json", failed)
+        warnings.append(f"{module_name} failed: {_sanitize_error(exc)}")
+        return failed
+
+
+def _run_interaction_diagnostics_module(
+    *,
+    config: EdaRunConfig,
+    task_plan: EdaTaskPlan,
+    writer: ArtifactWriter,
+    inferred_schema: Any,
+    table_profiles: list[Any],
+    metric_evidence: Any,
+    reader: DatasetReader,
+    feature_diagnostics: dict[str, Any],
+    target_diagnostics: dict[str, Any],
+    drift_evidence: dict[str, Any] | None,
+    baseline_ablation_evidence: dict[str, Any] | None,
+    leakage_evidence: list[Any],
+    module_statuses: dict[str, str],
+    module_status_details: dict[str, dict[str, Any]],
+    warnings: list[str],
+) -> dict[str, Any]:
+    module_name = "interaction_diagnostics"
+    if not _should_run_interaction_diagnostics(config, task_plan):
+        skipped = _skipped_p1_payload(module_name, "Interaction diagnostics require enable_interaction_diagnostics=true or P1 modules.")
+        _record_module_status(module_name, "skipped", module_statuses=module_statuses, module_status_details=module_status_details, legacy_status="skipped")
+        writer.write_json("interaction_diagnostics.json", skipped)
+        return skipped
+    started_perf, started_at = time.perf_counter(), _now_iso()
+    try:
+        result = diagnose_interactions(
+            inferred_schema, table_profiles, metric_evidence, reader,
+            feature_diagnostics=feature_diagnostics,
+            target_diagnostics=target_diagnostics,
+            drift_evidence=drift_evidence,
+            baseline_ablation_evidence=baseline_ablation_evidence,
+            leakage_evidence=[item.model_dump(mode="json") if hasattr(item, "model_dump") else item for item in leakage_evidence],
+            max_rows=config.max_interaction_rows,
+            max_numeric_columns=config.max_interaction_numeric_columns,
+            max_categorical_columns=config.max_interaction_categorical_columns,
+            max_pair_candidates=config.max_interaction_pair_candidates,
+            max_reported_interactions_per_type=config.max_reported_interactions_per_type,
+            min_group_rows=config.interaction_min_group_rows,
+            random_state=config.random_seed,
+        )
+        legacy_status = _status_from_p1_result(result)
+        _record_module_status(module_name, _detail_status_from_legacy(legacy_status), module_statuses=module_statuses, module_status_details=module_status_details, legacy_status=legacy_status, started_at=started_at, started_perf=started_perf)
+        writer.write_json("interaction_diagnostics.json", result)
+        return result
+    except Exception as exc:
+        failed = _failed_p1_payload(module_name, exc)
+        _record_module_status(module_name, "failed", module_statuses=module_statuses, module_status_details=module_status_details, legacy_status="failed", started_at=started_at, started_perf=started_perf, error_message=_sanitize_error(exc))
+        writer.write_json("interaction_diagnostics.json", failed)
+        warnings.append(f"{module_name} failed: {_sanitize_error(exc)}")
+        return failed
+
+
+def _should_run_interaction_diagnostics(config: EdaRunConfig, task_plan: EdaTaskPlan) -> bool:
+    module_name = "interaction_diagnostics"
+    if module_name in _normalised_modules(config.skip_modules):
+        return False
+    explicit = _normalised_modules(config.modules or [])
+    if module_name in explicit:
+        return True
+    if any(task.module == module_name for task in task_plan.eda_tasks):
+        return True
+    return bool(config.enable_interaction_diagnostics or config.enable_p1_modules)
+
+
+def _run_source_claim_validation_module(
+    *, config: EdaRunConfig, task_plan: EdaTaskPlan, writer: ArtifactWriter, hypotheses: ResearchHypotheses,
+    evidence_pack: dict[str, Any], module_statuses: dict[str, str], module_status_details: dict[str, dict[str, Any]], warnings: list[str],
+) -> dict[str, Any]:
+    module_name = "source_claim_validation"
+    requested = module_name in _normalised_modules(config.modules or []) or any(task.module == module_name for task in task_plan.eda_tasks) or config.enable_source_claim_validation or config.enable_p1_modules
+    if module_name in _normalised_modules(config.skip_modules) or not requested:
+        skipped = _skipped_p1_payload(module_name, "Source claim validation is optional.")
+        _record_module_status(module_name, "skipped", module_statuses=module_statuses, module_status_details=module_status_details, legacy_status="skipped")
+        writer.write_json("source_claim_validation.json", skipped)
+        return skipped
+    started_perf, started_at = time.perf_counter(), _now_iso()
+    try:
+        notebook = evidence_pack.get("notebook_static_analysis")
+        claims = collect_source_claims(hypotheses, notebook if isinstance(notebook, dict) else {})
+        result = validate_source_claims(claims, evidence_pack)
+        legacy_status = _status_from_p1_result(result)
+        _record_module_status(module_name, _detail_status_from_legacy(legacy_status), module_statuses=module_statuses, module_status_details=module_status_details, legacy_status=legacy_status, started_at=started_at, started_perf=started_perf)
+        writer.write_json("source_claim_validation.json", result)
+        return result
+    except Exception as exc:
+        failed = _failed_p1_payload(module_name, exc)
+        _record_module_status(module_name, "failed", module_statuses=module_statuses, module_status_details=module_status_details, legacy_status="failed", started_at=started_at, started_perf=started_perf, error_message=_sanitize_error(exc))
+        writer.write_json("source_claim_validation.json", failed); warnings.append(f"{module_name} failed: {_sanitize_error(exc)}")
+        return failed
+
+
 def _should_run_p1_module(
     module_name: str,
     config: EdaRunConfig,
@@ -714,6 +1003,8 @@ def _should_run_p1_module(
     if _artifact_name_for_module(module_name) in explicit_modules:
         return True
     if module_name == "notebook_static_analysis" and config.enable_notebook_static_analysis:
+        return True
+    if module_name == "baseline_runner" and (config.enable_baseline or config.enable_baseline_ablations):
         return True
     return bool(config.enable_p1_modules)
 

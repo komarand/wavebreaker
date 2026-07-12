@@ -52,22 +52,12 @@ def run_baseline(
             task_type=task_type,
             metric_name=metric_name,
             reason=f"{task_type} baseline is not supported in the MVP baseline runner.",
-            extra={
-                "preprocessing_policy": _preprocessing_policy(
-                    None, [], _role_exclusions(inferred_schema), validation_evidence
-                )
-            },
         )
     if task_type not in SUPPORTED_TASK_TYPES:
         return _skipped(
             task_type=task_type,
             metric_name=metric_name,
             reason="Unknown or unsupported task_type for baseline runner.",
-            extra={
-                "preprocessing_policy": _preprocessing_policy(
-                    None, [], _role_exclusions(inferred_schema), validation_evidence
-                )
-            },
         )
 
     train_table = inferred_schema.train_base_table
@@ -77,11 +67,6 @@ def run_baseline(
             task_type=task_type,
             metric_name=metric_name,
             reason="Train base table and target column are required.",
-            extra={
-                "preprocessing_policy": _preprocessing_policy(
-                    None, [], _role_exclusions(inferred_schema), validation_evidence
-                )
-            },
         )
 
     train_schema = _safe_schema(reader, train_table, warnings)
@@ -92,14 +77,9 @@ def run_baseline(
             metric_name=metric_name,
             reason=f"Target column '{target_column}' is not present in train base.",
             warnings=warnings,
-            extra={
-                "preprocessing_policy": _preprocessing_policy(
-                    None, [], _role_exclusions(inferred_schema), validation_evidence
-                )
-            },
         )
 
-    feature_columns, excluded_columns = _feature_columns(
+    feature_columns, excluded_columns, excluded_column_details = _feature_columns(
         train_schema,
         inferred_schema=inferred_schema,
         validation_evidence=validation_evidence,
@@ -115,13 +95,8 @@ def run_baseline(
             extra={
                 "feature_columns": [],
                 "excluded_columns": excluded_columns,
+                "excluded_column_details": excluded_column_details,
                 "validation_policy": _validation_policy(validation_evidence),
-                "preprocessing_policy": _preprocessing_policy(
-                    None,
-                    [],
-                    excluded_columns,
-                    validation_evidence,
-                ),
             },
         )
 
@@ -143,13 +118,8 @@ def run_baseline(
             extra={
                 "feature_columns": feature_columns,
                 "excluded_columns": excluded_columns,
+                "excluded_column_details": excluded_column_details,
                 "validation_policy": _validation_policy(validation_evidence),
-                "preprocessing_policy": _preprocessing_policy(
-                    frame,
-                    feature_columns,
-                    excluded_columns,
-                    validation_evidence,
-                ),
             },
         )
 
@@ -178,13 +148,8 @@ def run_baseline(
             extra={
                 "feature_columns": feature_columns,
                 "excluded_columns": excluded_columns,
+                "excluded_column_details": excluded_column_details,
                 "validation_policy": _validation_policy(validation_evidence),
-                "preprocessing_policy": _preprocessing_policy(
-                    frame,
-                    feature_columns,
-                    excluded_columns,
-                    validation_evidence,
-                ),
             },
         )
 
@@ -251,13 +216,8 @@ def run_baseline(
             extra={
                 "feature_columns": feature_columns,
                 "excluded_columns": excluded_columns,
+                "excluded_column_details": excluded_column_details,
                 "validation_policy": _validation_policy(validation_evidence),
-                "preprocessing_policy": _preprocessing_policy(
-                    frame,
-                    feature_columns,
-                    excluded_columns,
-                    validation_evidence,
-                ),
             },
         )
 
@@ -283,10 +243,12 @@ def run_baseline(
         "fold_results": fold_results,
         "feature_columns": feature_columns,
         "excluded_columns": excluded_columns,
+        "excluded_column_details": excluded_column_details,
         "preprocessing_policy": _preprocessing_policy(
             frame,
             feature_columns,
             excluded_columns,
+            excluded_column_details,
             validation_evidence,
         ),
         "train_table": train_table,
@@ -553,41 +515,50 @@ def _feature_columns(
     inferred_schema: InferredSchema,
     validation_evidence: ValidationEvidence,
     leakage_evidence: list[LeakageCheckResult],
-) -> tuple[list[str], list[str]]:
-    excluded = {
-        inferred_schema.target_column,
-        inferred_schema.primary_id_column,
-        inferred_schema.prediction_column,
-    }
+) -> tuple[list[str], list[str], list[dict[str, str]]]:
+    train_columns = {column["name"] for column in train_schema}
+    excluded_reasons: dict[str, str] = {}
+
+    def exclude(column: str | None, reason: str) -> None:
+        if column is None or column not in train_columns or column in excluded_reasons:
+            return
+        excluded_reasons[column] = reason
+
+    exclude(inferred_schema.target_column, "target_column")
+    exclude(inferred_schema.primary_id_column, "primary_id")
+    exclude(inferred_schema.prediction_column, "prediction_column")
+
     policy = ColumnRolePolicy(inferred_schema)
-    excluded.update(
-        item["column"]
-        for item in policy.excluded_columns(
-            [column["name"] for column in train_schema],
-            table=inferred_schema.train_base_table,
-            context="model_feature",
-        )
-    )
-    excluded.update(_critical_leakage_columns(leakage_evidence, train_schema))
+    for item in policy.excluded_columns(
+        [column["name"] for column in train_schema],
+        table=inferred_schema.train_base_table,
+        context="model_feature",
+    ):
+        exclude(item["column"], _normalise_exclusion_reason(item["reason"]))
+    for column in _critical_leakage_columns(leakage_evidence, train_schema):
+        exclude(column, "leakage_risk")
 
     method = str(validation_evidence.primary_validation.get("method") or "").lower()
     if "group" in method or method == "ranking_group_cv":
         group_column = validation_evidence.primary_validation.get("group_column")
         if group_column is not None:
-            excluded.add(str(group_column))
+            exclude(str(group_column), "group_column")
         for candidate in [*validation_evidence.group_columns, *validation_evidence.query_columns]:
             if isinstance(candidate, dict) and candidate.get("name") is not None:
-                excluded.add(str(candidate["name"]))
+                exclude(str(candidate["name"]), "group_column")
 
     feature_columns: list[str] = []
-    excluded_columns: list[str] = []
+    excluded_details: list[dict[str, str]] = []
     for column in train_schema:
         name = column["name"]
-        if name in excluded or _is_raw_date_string(column):
-            excluded_columns.append(name)
+        if _is_raw_date_string(column):
+            exclude(name, "time_column")
+        reason = excluded_reasons.get(name)
+        if reason is not None:
+            excluded_details.append({"column": name, "reason": reason})
         else:
             feature_columns.append(name)
-    return feature_columns, _unique(excluded_columns)
+    return feature_columns, [item["column"] for item in excluded_details], excluded_details
 
 
 def _critical_leakage_columns(
@@ -688,6 +659,7 @@ def _preprocessing_policy(
     frame: pl.DataFrame | None,
     feature_columns: list[str],
     excluded_columns: list[str],
+    excluded_column_details: list[dict[str, str]],
     validation_evidence: ValidationEvidence,
 ) -> dict[str, Any]:
     numeric_columns = [
@@ -698,47 +670,146 @@ def _preprocessing_policy(
     categorical_columns = [
         column for column in feature_columns if column not in numeric_columns
     ]
-    high_cardinality_columns = []
-    if frame is not None and frame.height:
-        high_cardinality_columns = [
-            column
-            for column in categorical_columns
-            if frame[column].n_unique() > 100
-            or frame[column].n_unique() / frame.height >= 0.5
-        ]
+    high_cardinality_columns = _high_cardinality_columns(frame, categorical_columns)
+    text_like_columns = _text_like_columns(frame, categorical_columns)
+    high_cardinality_warnings = []
+    if high_cardinality_columns:
+        high_cardinality_warnings.append(
+            "High-cardinality categorical columns are included with fold-fitted one-hot encoding for the baseline only; treat their value as a validation hypothesis."
+        )
+    text_warnings = []
+    if text_like_columns:
+        text_warnings.append(
+            "Text/code-like columns are not featurized with NLP; the baseline treats observed values as categorical tokens."
+        )
     return {
+        "policy_version": "1.0",
+        "fit_scope": "inside_cv_folds",
+        "leakage_safe": True,
+        "target_used_in_preprocessing": False,
+        "feature_columns": list(feature_columns),
+        "numeric": {
+            "columns": numeric_columns,
+            "imputation": {
+                "strategy": "median",
+                "fit_scope": "inside_cv_folds",
+            },
+            "scaling": {
+                "enabled": bool(numeric_columns),
+                "strategy": "standard_scaler" if numeric_columns else None,
+                "fit_scope": "inside_cv_folds" if numeric_columns else "not_applicable",
+            },
+            "low_cardinality_numeric_handling": "treated_as_numeric_for_baseline",
+        },
+        "categorical": {
+            "columns": categorical_columns,
+            "missing_value_handling": {
+                "strategy": "most_frequent",
+                "fit_scope": "inside_cv_folds",
+            },
+            "encoding": {
+                "strategy": "one_hot",
+                "handle_unknown": "ignore",
+                "fit_scope": "inside_cv_folds",
+            },
+            "target_encoding_used": False,
+        },
+        "high_cardinality": {
+            "columns": high_cardinality_columns,
+            "strategy": "included_with_caution" if high_cardinality_columns else "not_applicable",
+            "encoding_strategy": "one_hot",
+            "rare_handling": "disabled" if high_cardinality_columns else "not_applicable",
+            "target_encoding_used": False,
+            "fit_scope": "inside_cv_folds",
+            "warnings": high_cardinality_warnings,
+        },
+        "text_like": {
+            "columns": text_like_columns,
+            "strategy": "treated_as_categorical" if text_like_columns else "not_applicable",
+            "fit_scope": "inside_cv_folds" if text_like_columns else "not_applicable",
+            "warnings": text_warnings,
+        },
+        "excluded_roles": list(excluded_column_details),
+        "safety_checks": {
+            "uses_target_encoding": False,
+            "uses_test_labels": False,
+            "fits_preprocessing_on_full_train_before_cv": False,
+            "fits_preprocessing_inside_folds": True,
+            "uses_sample_submission_as_feature": False,
+        },
+        "limitations": [
+            "Baseline preprocessing is a reproducible sanity floor, not a final feature engineering recipe.",
+            "Categorical and text/code-like values are encoded as simple one-hot tokens.",
+            "High-cardinality categorical handling is included with caution and should be re-tested with robust encoders.",
+        ],
         "imputation": {
             "numeric": "median",
             "categorical": "most_frequent",
-            "fit_scope": "training_fold_only",
+            "fit_scope": "inside_cv_folds",
         },
         "categorical_encoding": {
             "method": "one_hot",
             "handle_unknown": "ignore",
-            "fit_scope": "training_fold_only",
+            "fit_scope": "inside_cv_folds",
         },
         "high_cardinality_handling": {
             "columns": high_cardinality_columns,
-            "policy": "one_hot_with_unknown_ignore",
+            "policy": "included_with_caution_one_hot",
             "target_encoding": "disabled",
         },
         "excluded_columns": list(excluded_columns),
+        "excluded_column_details": list(excluded_column_details),
         "validation_split_policy": _validation_policy(validation_evidence),
     }
 
 
-def _role_exclusions(inferred_schema: InferredSchema) -> list[str]:
-    return _unique(
-        [
-            column
-            for column in (
-                inferred_schema.target_column,
-                inferred_schema.primary_id_column,
-                inferred_schema.prediction_column,
-            )
-            if column
-        ]
-    )
+def _high_cardinality_columns(
+    frame: pl.DataFrame | None,
+    categorical_columns: list[str],
+) -> list[str]:
+    if frame is None or not frame.height:
+        return []
+    return [
+        column
+        for column in categorical_columns
+        if column in frame.columns
+        and (
+            frame[column].n_unique() > 100
+            or frame[column].n_unique() / frame.height >= 0.5
+        )
+    ]
+
+
+def _text_like_columns(
+    frame: pl.DataFrame | None,
+    categorical_columns: list[str],
+) -> list[str]:
+    if frame is None or not frame.height:
+        return []
+    return [
+        column
+        for column in categorical_columns
+        if column in frame.columns and _looks_text_like(column, frame[column])
+    ]
+
+
+def _looks_text_like(column: str, series: pl.Series) -> bool:
+    name = column.lower()
+    if any(token in name for token in ("text", "description", "comment", "review", "message", "title")):
+        return True
+    values = [str(value) for value in series.drop_nulls().head(100).to_list()]
+    if not values:
+        return False
+    average_length = sum(len(value) for value in values) / len(values)
+    average_tokens = sum(len(value.split()) for value in values) / len(values)
+    unique_ratio = series.n_unique() / max(series.len(), 1)
+    return average_length >= 30 or average_tokens >= 4 or (unique_ratio >= 0.8 and average_length >= 12)
+
+
+def _normalise_exclusion_reason(reason: str) -> str:
+    if reason == "metadata_column":
+        return "unsupported_dtype"
+    return reason
 
 
 def _task_type(metric_evidence: MetricEvidence) -> str:

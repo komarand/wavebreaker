@@ -33,6 +33,12 @@ def validate_evidence_refs(pack: EdaEvidencePack) -> list[str]:
 
     for index, action in enumerate(pack.recommended_next_actions):
         label = f"recommended_next_actions[{index}]"
+        if not str(action.priority or "").strip():
+            warnings.append(f"{label} has no priority.")
+        if not _meaningful_text(action.action):
+            warnings.append(f"{label} has empty or malformed action text.")
+        if not _meaningful_text(action.why):
+            warnings.append(f"{label} has empty or malformed why.")
         if not action.evidence_refs:
             warnings.append(f"{label} has no evidence_refs.")
         for ref in action.evidence_refs:
@@ -105,12 +111,32 @@ def _evidence_ref_exists(pack: EdaEvidencePack, ref: str) -> bool:
             current = current[part]
             continue
         if isinstance(current, list):
-            if not part.isdigit():
+            if part.isdigit():
+                index = int(part)
+                if index >= len(current):
+                    return False
+                current = current[index]
+                continue
+            match = next(
+                (
+                    item
+                    for item in current
+                    if isinstance(item, dict)
+                    and (
+                        item.get("risk_id") == part
+                        or item.get("id") == part
+                          or item.get("ablation_id") == part
+                          or item.get("feature_block") == part
+                          or item.get("configuration") == part
+                          or item.get("interaction_id") == part
+                          or item.get("claim_id") == part
+                    )
+                ),
+                None,
+            )
+            if match is None:
                 return False
-            index = int(part)
-            if index >= len(current):
-                return False
-            current = current[index]
+            current = match
             continue
         return False
     return True
@@ -137,6 +163,12 @@ def _primary_validation_is_temporal(pack: EdaEvidencePack) -> bool:
     primary = validation.get("primary_validation") or {}
     method = str(primary.get("method") or "").lower()
     return method in TEMPORAL_PRIMARY_METHODS
+
+
+def _meaningful_text(value: str) -> bool:
+    text = str(value or "").strip()
+    normalized = "".join(char for char in text if char.isalnum()).strip()
+    return len(normalized) >= 3
 
 
 __all__ = [

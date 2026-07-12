@@ -91,10 +91,10 @@ def test_feature_diagnostics_and_strategy_hints_are_generic_and_safe(tmp_path: P
         for item in diagnostics["numeric_feature_diagnostics"]["columns"]
         if item["column"] == "count_zero"
     )
-    assert count_zero["feature_numeric_kind"] == "count_zero_inflated"
+    assert count_zero["feature_value_type"] == "binary"
     assert count_zero not in diagnostics["numeric_feature_diagnostics"]["outlier_heavy"]
     assert all(
-        item["feature_numeric_kind"] == "continuous"
+        item["feature_value_type"] == "continuous"
         for item in diagnostics["numeric_feature_diagnostics"]["outlier_heavy"]
     )
     assert diagnostics["missingness_diagnostics"]["recommended_indicators"]

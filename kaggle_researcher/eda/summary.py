@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from kaggle_researcher.eda.modules.recommendations import dedupe_recommended_next_actions
 from kaggle_researcher.eda.schemas import EdaEvidencePack
 
 
@@ -15,12 +16,17 @@ def build_eda_summary(pack: EdaEvidencePack) -> str:
         _schema_section(pack),
         _metric_section(pack),
         _validation_section(pack),
+        _target_diagnostics_section(pack),
         _leakage_section(pack),
         _relationships_section(pack),
         _drift_section(pack),
         _baseline_section(pack),
+        _baseline_ablations_section(pack),
+        _interaction_diagnostics_section(pack),
+        _source_claim_validation_section(pack),
         _feature_probes_section(pack),
         _feature_diagnostics_section(pack),
+        _risk_register_section(pack),
         _strategy_hints_section(pack),
         _hypothesis_results_section(pack),
         _recommended_next_actions_section(pack),
@@ -138,6 +144,77 @@ def _validation_section(pack: EdaEvidencePack) -> str:
     return _join(lines)
 
 
+def _target_diagnostics_section(pack: EdaEvidencePack) -> str:
+    diagnostics = _as_dict(pack.target_diagnostics)
+    lines = ["## Target diagnostics"]
+    if not diagnostics:
+        lines.append("- Not testable: target diagnostics are not present.")
+        return _join(lines)
+
+    status = diagnostics.get("status", "unknown")
+    lines.append(f"- Status: `{status}`")
+    if status != "completed":
+        reason = diagnostics.get("reason")
+        if reason:
+            lines.append(f"- Reason: {reason}")
+        return _join(lines)
+
+    distribution = _as_dict(diagnostics.get("distribution"))
+    target_type = distribution.get("target_type", "unknown")
+    lines.append(f"- Target type: `{target_type}`")
+    if target_type in {"binary", "multiclass", "ranking"}:
+        classes = [
+            f"{item.get('class')}: {round(float(item.get('pct') or 0.0) * 100, 2)}%"
+            for item in list(distribution.get("classes") or [])[:8]
+        ]
+        if classes:
+            lines.append(f"- Class balance: `{_csv(classes)}`")
+        imbalance = _as_dict(diagnostics.get("imbalance"))
+        if imbalance:
+            lines.append(f"- Imbalance: `{imbalance.get('severity', 'unknown')}`")
+    elif target_type == "regression":
+        quantiles = _as_dict(distribution.get("quantiles"))
+        lines.append(
+            "- Regression target: "
+            f"`mean={distribution.get('mean')}, q50={quantiles.get('q50')}, "
+            f"max={distribution.get('max')}`"
+        )
+        lines.append(f"- Heavy tail: `{bool(distribution.get('heavy_tail'))}`")
+
+    metric_implications = [
+        _as_dict(item).get("implication")
+        for item in diagnostics.get("metric_implications", [])
+        if _as_dict(item).get("implication")
+    ]
+    validation_implications = [
+        _as_dict(item).get("implication")
+        for item in diagnostics.get("validation_implications", [])
+        if _as_dict(item).get("implication")
+    ]
+    if metric_implications:
+        lines.append(f"- Metric implications: `{_csv(metric_implications[:5])}`")
+    if validation_implications:
+        lines.append(f"- Validation implications: `{_csv(validation_implications[:5])}`")
+
+    by_feature = _as_dict(diagnostics.get("target_by_feature"))
+    numeric = [_as_dict(item).get("column") for item in by_feature.get("numeric_binned", [])[:5]]
+    categorical = [_as_dict(item).get("column") for item in by_feature.get("categorical", [])[:5]]
+    missingness = [_as_dict(item).get("column") for item in diagnostics.get("target_by_missingness", [])[:5]]
+    if any(numeric):
+        lines.append(f"- Top target-associated numeric features: `{_csv([item for item in numeric if item])}`")
+    if any(categorical):
+        lines.append(f"- Top target-associated categorical features: `{_csv([item for item in categorical if item])}`")
+    if any(missingness):
+        lines.append(f"- Missingness associated with target: `{_csv([item for item in missingness if item])}`")
+    suspicious = [_as_dict(item) for item in diagnostics.get("suspicious_patterns", [])]
+    if suspicious:
+        severities = Counter(str(item.get("severity", "unknown")) for item in suspicious)
+        lines.append(f"- Suspicious target patterns: `{_format_counts(severities)}`")
+    else:
+        lines.append("- Suspicious target patterns: `none`")
+    return _join(lines)
+
+
 def _leakage_section(pack: EdaEvidencePack) -> str:
     checks = [_as_dict(item) for item in pack.leakage_evidence]
     lines = ["## Leakage"]
@@ -221,12 +298,29 @@ def _feature_diagnostics_section(pack: EdaEvidencePack) -> str:
     missingness = _as_dict(diagnostics.get("missingness_diagnostics"))
     text = _as_dict(diagnostics.get("text_feature_diagnostics"))
     date_time = _as_dict(diagnostics.get("date_time_diagnostics"))
-    if numeric.get("top_predictive_candidates"):
+    reliable_numeric = [
+        item
+        for item in [_as_dict(row) for row in numeric.get("top_predictive_candidates", [])]
+        if item.get("target_association_reliability") == "reliable"
+    ]
+    cautious_numeric = [
+        item
+        for item in [_as_dict(row) for row in numeric.get("columns", [])]
+        if str(item.get("target_association_reliability", "")).startswith("caution")
+        or str(item.get("outlier_reliability", "")).startswith("caution")
+    ]
+    if reliable_numeric:
+        lines.append(f"- Top reliable numeric candidates: `{_csv(_column_names(reliable_numeric))}`")
+    elif numeric.get("top_predictive_candidates"):
         lines.append(f"- Top numeric candidates: `{_csv(_column_names(numeric['top_predictive_candidates']))}`")
+    if cautious_numeric:
+        lines.append(f"- Numeric features needing cautious interpretation: `{_csv(_column_names(cautious_numeric))}`")
     if categorical.get("low_cardinality_candidates"):
         lines.append(f"- Low-cardinality categoricals: `{_csv(_column_names(categorical['low_cardinality_candidates']))}`")
     if categorical.get("high_cardinality_candidates"):
         lines.append(f"- High-cardinality risks: `{_csv(_column_names(categorical['high_cardinality_candidates']))}`")
+    if categorical.get("target_association_cautions"):
+        lines.append(f"- Target-association caution: `{_csv(_column_names(categorical['target_association_cautions']))}`")
     if missingness.get("recommended_indicators"):
         lines.append(f"- Missingness indicators: `{_csv(_column_names(missingness['recommended_indicators']))}`")
     shifted = list(numeric.get("shifted_features") or [])
@@ -262,6 +356,37 @@ def _strategy_hints_section(pack: EdaEvidencePack) -> str:
     return _join(lines)
 
 
+def _risk_register_section(pack: EdaEvidencePack) -> str:
+    risks = [
+        item.model_dump(mode="json") if hasattr(item, "model_dump") else _as_dict(item)
+        for item in pack.eda_risk_register
+    ]
+    lines = ["## Risk register"]
+    if not risks:
+        lines.append("- Risks: `0`")
+        return _join(lines)
+
+    severity_counts = Counter(str(item.get("severity", "unknown")) for item in risks)
+    status_counts = Counter(str(item.get("status", "unknown")) for item in risks)
+    lines.append(f"- Risks: `{len(risks)}` ({_format_counts(severity_counts)})")
+    high = [item for item in risks if item.get("severity") in {"critical", "high"}]
+    medium = [item for item in risks if item.get("severity") == "medium"]
+    if high:
+        lines.append(f"- High risks: `{_risk_titles(high[:5])}`")
+    if medium:
+        lines.append(f"- Medium risks: `{_risk_titles(medium[:5])}`")
+    lines.append(f"- Mitigated by policy: `{status_counts.get('mitigated_by_policy', 0)}`")
+    lines.append(f"- Not testable: `{status_counts.get('not_testable', 0)}`")
+    return _join(lines)
+
+
+def _risk_titles(risks: list[dict[str, Any]]) -> str:
+    return _csv(
+        f"{item.get('risk_type')}: {item.get('title')} - {item.get('status')}"
+        for item in risks
+    )
+
+
 def _baseline_section(pack: EdaEvidencePack) -> str:
     evidence = _as_dict(pack.baseline_evidence)
     lines = ["## Baseline"]
@@ -276,11 +401,216 @@ def _baseline_section(pack: EdaEvidencePack) -> str:
         if reason:
             lines.append(f"- Reason: {reason}")
         return _join(lines)
+    if evidence.get("model_type"):
+        lines.append(f"- Model: `{evidence['model_type']}`")
+    if evidence.get("metric_name"):
+        metric_value = evidence.get("metric_value", evidence.get("mean_score"))
+        if metric_value is not None:
+            lines.append(f"- Metric: `{evidence['metric_name']} = {metric_value}`")
+        else:
+            lines.append(f"- Metric: `{evidence['metric_name']}`")
+    validation_policy = _as_dict(evidence.get("validation_policy"))
+    if validation_policy.get("method"):
+        fold_suffix = (
+            f", {validation_policy['n_folds']} folds"
+            if validation_policy.get("n_folds") is not None
+            else ""
+        )
+        lines.append(f"- Validation: `{validation_policy['method']}`{fold_suffix}")
+    preprocessing = _as_dict(evidence.get("preprocessing_policy"))
+    if preprocessing:
+        fit_scope = preprocessing.get("fit_scope")
+        safety = _as_dict(preprocessing.get("safety_checks"))
+        label = "fold-safe" if safety.get("fits_preprocessing_inside_folds") else fit_scope
+        if label:
+            lines.append(f"- Preprocessing: `{label}`")
+        numeric_summary = _numeric_policy_summary(preprocessing)
+        if numeric_summary:
+            lines.append(f"- Numeric preprocessing: `{numeric_summary}`")
+        categorical_summary = _categorical_policy_summary(preprocessing)
+        if categorical_summary:
+            lines.append(f"- Categorical preprocessing: `{categorical_summary}`")
+        high_cardinality_summary = _high_cardinality_policy_summary(preprocessing)
+        if high_cardinality_summary:
+            lines.append(f"- High-cardinality policy: `{high_cardinality_summary}`")
+        excluded_summary = _excluded_columns_summary(
+            preprocessing.get("excluded_roles") or evidence.get("excluded_column_details")
+        )
+        if excluded_summary:
+            lines.append(f"- Excluded columns: `{excluded_summary}`")
+        limitations = list(preprocessing.get("limitations") or evidence.get("limitations") or [])
+        if limitations:
+            lines.append(f"- Limitations: `{_csv(limitations[:3])}`")
+    return _join(lines)
+
+
+def _source_claim_validation_section(pack: EdaEvidencePack) -> str:
+    evidence = _as_dict(pack.source_claim_validation)
+    lines = ["## Source claim validation"]
+    if not evidence:
+        lines.append(f"- {_module_absence(pack, 'source_claim_validation')}")
+        return _join(lines)
+    lines.append(f"- Status: `{evidence.get('status', 'unknown')}`")
+    if evidence.get("status") != "completed":
+        if evidence.get("reason"):
+            lines.append(f"- Reason: `{evidence['reason']}`")
+        return _join(lines)
+    claims = [_as_dict(item) for item in evidence.get("validated_claims", [])]
+    counts = Counter(str(item.get("validation_status")) for item in claims)
+    lines.append(f"- Claims analyzed: `{len(claims)}`; confirmed `{counts['confirmed']}`, partially supported `{counts['partially_supported']}`, contradicted `{counts['contradicted']}`, unsafe `{counts['unsafe']}`, analogous only `{counts['analogous_only']}`, not testable `{counts['not_testable']}`")
+    accepted = [item for item in claims if item.get("validation_status") in {"confirmed", "partially_supported"}][:5]
+    rejected = [item for item in claims if item.get("validation_status") in {"contradicted", "unsafe"}][:5]
+    if accepted:
+        lines.append(f"- Key validated claims: `{_csv([item.get('claim_text') for item in accepted])}`")
+    if rejected:
+        lines.append(f"- Key rejected or unsafe claims: `{_csv([item.get('claim_text') for item in rejected])}`")
+    if evidence.get("claim_conflicts"):
+        lines.append(f"- Claim conflicts: `{len(evidence['claim_conflicts'])}`")
+    lines.append("- Main recommendation: Use analogous claims as experiments, not as confirmed facts.")
+    return _join(lines)
+
+
+def _interaction_diagnostics_section(pack: EdaEvidencePack) -> str:
+    evidence = _as_dict(pack.interaction_diagnostics)
+    lines = ["## Interaction diagnostics"]
+    if not evidence:
+        lines.append(f"- {_module_absence(pack, 'interaction_diagnostics')}")
+        return _join(lines)
+    status = evidence.get("status", "unknown")
+    lines.append(f"- Status: `{status}`")
+    if status in {"skipped", "not_testable", "failed"}:
+        if evidence.get("reason") or evidence.get("error_message"):
+            lines.append(f"- Reason: {evidence.get('reason') or evidence.get('error_message')}")
+        return _join(lines)
+    selection = _as_dict(evidence.get("candidate_selection"))
+    lines.append(f"- Candidate columns: `{len(selection.get('numeric_columns', []))} numeric, {len(selection.get('categorical_columns', []))} categorical`")
+    lines.append(f"- Reported pairs: `{len(evidence.get('numeric_numeric', []))} numeric-numeric, {len(evidence.get('numeric_categorical', []))} numeric-categorical, {len(evidence.get('categorical_categorical', []))} categorical-categorical, {len(evidence.get('missingness_interactions', []))} missingness`")
+    lines.append(f"- Redundancy groups: `{len(evidence.get('redundancy_groups', []))}`")
+    hypotheses = [_as_dict(item) for item in evidence.get("interaction_hypotheses", [])]
+    if hypotheses:
+        rendered = [f"{' x '.join(item.get('columns', []))}: {item.get('materiality')}, {item.get('reliability')}" for item in hypotheses[:3]]
+        lines.append(f"- Top interaction hypotheses: `{_csv(rendered)}`")
+    cautions = [item.get("reliability") for group in (evidence.get("numeric_categorical", []), evidence.get("categorical_categorical", [])) for item in group if _as_dict(item).get("reliability", "reliable") != "reliable"]
+    if cautions:
+        lines.append(f"- Main caution: `{cautions[0]}`")
+    return _join(lines)
+
+
+def _baseline_ablations_section(pack: EdaEvidencePack) -> str:
+    evidence = _as_dict(pack.baseline_ablation_evidence)
+    lines = ["## Baseline ablations"]
+    if not evidence:
+        lines.append(f"- {_module_absence(pack, 'baseline_ablation_runner')}")
+        return _join(lines)
+    status = evidence.get("status", "unknown")
+    lines.append(f"- Status: `{status}`")
+    if status in {"skipped", "not_testable", "failed"}:
+        reason = evidence.get("reason") or evidence.get("error_message")
+        if reason:
+            lines.append(f"- Reason: {reason}")
+        return _join(lines)
     if evidence.get("metric_name"):
         lines.append(f"- Metric: `{evidence['metric_name']}`")
-    if evidence.get("mean_score") is not None:
-        lines.append(f"- Mean validation score: `{evidence['mean_score']}`")
+    reference = _as_dict(evidence.get("baseline_reference"))
+    if reference:
+        lines.append(
+            f"- Reference ablation: `{reference.get('ablation_id')} = {reference.get('metric_value')}`"
+        )
+    best = _as_dict(evidence.get("best_ablation"))
+    if best:
+        lines.append(f"- Best ablation: `{best.get('ablation_id')} = {best.get('metric_value')}`")
+        simpler_id = best.get("simpler_competitive_ablation_id")
+        if simpler_id:
+            lines.append(f"- Simpler competitive ablation: `{simpler_id} = {best.get('simpler_competitive_metric_value')}`")
+            delta = best.get("delta_vs_simpler_competitive")
+            materiality = best.get("materiality_vs_simpler_competitive")
+            if isinstance(delta, (int, float)):
+                lines.append(f"- Best-vs-simpler delta: `{delta:+.6f}` ({materiality or 'unknown'})")
+        stability = best.get("stability_vs_best_prior")
+        if stability:
+            lines.append(f"- Best-vs-prior fold stability: `{stability}`")
+    findings = [_as_dict(item) for item in evidence.get("feature_block_findings", [])]
+    if findings:
+        rendered = []
+        for finding in findings[:6]:
+            label = finding.get("feature_block") or finding.get("configuration") or "configuration"
+            delta = finding.get("delta_vs_best_prior", finding.get("delta_metric"))
+            materiality = finding.get("materiality", finding.get("materiality_vs_best_prior"))
+            stability = finding.get("stability", finding.get("stability_vs_best_prior"))
+            suffix = f" ({delta:+.6f})" if isinstance(delta, (int, float)) else ""
+            qualifiers = " + ".join(str(value) for value in (materiality, stability) if value)
+            wins = finding.get("fold_wins")
+            losses = finding.get("fold_losses")
+            win_suffix = f", wins {wins}, losses {losses}" if isinstance(wins, int) and isinstance(losses, int) else ""
+            rendered.append(f"{label}: {finding.get('status')}{suffix}{f' [{qualifiers}]' if qualifiers else ''}{win_suffix}")
+        lines.append(f"- Feature block findings: `{_csv(rendered)}`")
+    configurations = [item for item in findings if item.get("finding_type") == "configuration"]
+    if configurations:
+        recommendation = configurations[0].get("recommendation")
+        if recommendation:
+            lines.append(f"- Recommendation: {recommendation}")
+    limitations = list(evidence.get("limitations") or [])
+    if limitations:
+        lines.append(f"- Limitations: `{_csv(limitations[:2])}`")
     return _join(lines)
+
+
+def _numeric_policy_summary(preprocessing: dict[str, Any]) -> str:
+    numeric = _as_dict(preprocessing.get("numeric"))
+    if not numeric:
+        return ""
+    imputation = _as_dict(numeric.get("imputation")).get("strategy")
+    scaling = _as_dict(numeric.get("scaling"))
+    parts = []
+    if imputation:
+        parts.append(f"{imputation} imputation")
+    if scaling.get("enabled"):
+        parts.append(str(scaling.get("strategy") or "scaling"))
+    else:
+        parts.append("no scaling")
+    return ", ".join(parts)
+
+
+def _categorical_policy_summary(preprocessing: dict[str, Any]) -> str:
+    categorical = _as_dict(preprocessing.get("categorical"))
+    if not categorical:
+        return ""
+    missing = _as_dict(categorical.get("missing_value_handling")).get("strategy")
+    encoding = _as_dict(categorical.get("encoding"))
+    parts = []
+    if missing:
+        parts.append(f"{missing} missing handling")
+    if encoding.get("strategy"):
+        unknown = encoding.get("handle_unknown")
+        suffix = f", unknown={unknown}" if unknown else ""
+        parts.append(f"{encoding['strategy']} encoding{suffix}")
+    return ", ".join(parts)
+
+
+def _high_cardinality_policy_summary(preprocessing: dict[str, Any]) -> str:
+    high_cardinality = _as_dict(preprocessing.get("high_cardinality"))
+    if not high_cardinality:
+        return ""
+    strategy = high_cardinality.get("strategy")
+    if not strategy or strategy == "not_applicable":
+        return ""
+    encoding = high_cardinality.get("encoding_strategy")
+    suffix = f" using fold-fitted {encoding}" if encoding else ""
+    return f"{strategy}{suffix}"
+
+
+def _excluded_columns_summary(details: Any) -> str:
+    grouped: dict[str, list[str]] = {}
+    for item in details or []:
+        detail = _as_dict(item)
+        column = detail.get("column")
+        reason = detail.get("reason")
+        if not column or not reason:
+            continue
+        grouped.setdefault(str(reason), []).append(str(column))
+    return "; ".join(
+        f"{reason}: {_csv(columns)}" for reason, columns in grouped.items()
+    )
 
 
 def _feature_probes_section(pack: EdaEvidencePack) -> str:
@@ -319,7 +649,7 @@ def _hypothesis_results_section(pack: EdaEvidencePack) -> str:
 
 
 def _recommended_next_actions_section(pack: EdaEvidencePack) -> str:
-    actions = list(pack.recommended_next_actions)
+    actions = dedupe_recommended_next_actions(list(pack.recommended_next_actions))
     lines = ["## Recommended next actions"]
     if not actions:
         lines.append("- None recorded.")

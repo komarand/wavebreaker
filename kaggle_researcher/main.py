@@ -177,6 +177,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable the optional EDA baseline runner.",
     )
     parser.add_argument(
+        "--enable-baseline-ablations",
+        action="store_true",
+        help="Enable optional fold-safe EDA baseline feature-block ablations.",
+    )
+    parser.add_argument(
+        "--enable-interaction-diagnostics",
+        action="store_true",
+        help="Enable optional bounded EDA interaction diagnostics.",
+    )
+    parser.add_argument(
+        "--enable-source-claim-validation",
+        action="store_true",
+        help="Validate collected source claims against current EDA evidence.",
+    )
+    parser.add_argument(
         "--research-hypotheses-path",
         type=Path,
         help="Existing research_hypotheses.json to use for EDA or final synthesis.",
@@ -246,6 +261,9 @@ async def run_research(
     force_download: bool = False,
     enable_p1_modules: bool = False,
     enable_baseline: bool = False,
+    enable_baseline_ablations: bool = False,
+    enable_interaction_diagnostics: bool = False,
+    enable_source_claim_validation: bool = False,
     research_hypotheses_path: str | Path | None = None,
     eda_task_plan_path: str | Path | None = None,
     eda_evidence_pack_path: str | Path | None = None,
@@ -510,6 +528,9 @@ async def run_research(
                 force_download=force_download,
                 enable_p1_modules=enable_p1_modules,
                 enable_baseline=enable_baseline,
+                enable_baseline_ablations=enable_baseline_ablations,
+                enable_interaction_diagnostics=enable_interaction_diagnostics,
+                enable_source_claim_validation=enable_source_claim_validation,
             )
             eda_evidence_pack_path = eda_result.evidence_pack_path
             eda_summary_path = eda_result.summary_path
@@ -1306,6 +1327,9 @@ async def _run_optional_eda(
     force_download: bool,
     enable_p1_modules: bool,
     enable_baseline: bool,
+    enable_baseline_ablations: bool,
+    enable_interaction_diagnostics: bool,
+    enable_source_claim_validation: bool,
 ):
     return await getattr(eda_orchestrator, "run" "_eda")(
         EdaRunConfig(
@@ -1321,6 +1345,9 @@ async def _run_optional_eda(
             force_download=force_download,
             enable_p1_modules=enable_p1_modules,
             enable_baseline=enable_baseline,
+            enable_baseline_ablations=enable_baseline_ablations,
+            enable_interaction_diagnostics=enable_interaction_diagnostics,
+            enable_source_claim_validation=enable_source_claim_validation,
         )
     )
 
@@ -1535,6 +1562,9 @@ async def run() -> int:
         force_download=args.force_download,
         enable_p1_modules=args.enable_p1_modules,
         enable_baseline=args.enable_baseline,
+        enable_baseline_ablations=args.enable_baseline_ablations,
+        enable_interaction_diagnostics=args.enable_interaction_diagnostics,
+        enable_source_claim_validation=args.enable_source_claim_validation,
         research_hypotheses_path=args.research_hypotheses_path,
         eda_task_plan_path=args.eda_task_plan_path,
         eda_evidence_pack_path=args.eda_evidence_pack_path,

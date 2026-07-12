@@ -28,7 +28,9 @@ def test_build_eda_summary_contains_required_sections() -> None:
         "## Relationships",
         "## Drift",
         "## Baseline",
+        "## Baseline ablations",
         "## Feature probes",
+        "## Risk register",
         "## Hypothesis results",
         "## Recommended next actions",
         "## Warnings",
@@ -85,6 +87,56 @@ def test_build_eda_summary_renders_feature_family_and_role_candidates() -> None:
 
     assert "`base_numeric_features`: `medium_potential`" in summary
     assert "unknown_family" not in summary
+
+
+def test_build_eda_summary_renders_baseline_preprocessing_policy() -> None:
+    summary = build_eda_summary(
+        _pack(
+            baseline_evidence={
+                "status": "completed",
+                "model_type": "sklearn_logistic_regression",
+                "metric_name": "accuracy",
+                "metric_value": 0.75,
+                "validation_policy": {"method": "stratified_kfold", "n_folds": 4},
+                "excluded_column_details": [
+                    {"column": "target", "reason": "target_column"},
+                    {"column": "row_id", "reason": "primary_id"},
+                ],
+                "preprocessing_policy": {
+                    "fit_scope": "inside_cv_folds",
+                    "numeric": {
+                        "imputation": {"strategy": "median"},
+                        "scaling": {"enabled": True, "strategy": "standard_scaler"},
+                    },
+                    "categorical": {
+                        "missing_value_handling": {"strategy": "most_frequent"},
+                        "encoding": {"strategy": "one_hot", "handle_unknown": "ignore"},
+                    },
+                    "high_cardinality": {
+                        "strategy": "included_with_caution",
+                        "encoding_strategy": "one_hot",
+                    },
+                    "excluded_roles": [
+                        {"column": "target", "reason": "target_column"},
+                        {"column": "row_id", "reason": "primary_id"},
+                    ],
+                    "safety_checks": {"fits_preprocessing_inside_folds": True},
+                    "limitations": ["baseline is a sanity floor, not a final solution"],
+                },
+            }
+        )
+    )
+
+    assert "- Model: `sklearn_logistic_regression`" in summary
+    assert "- Metric: `accuracy = 0.75`" in summary
+    assert "- Validation: `stratified_kfold`, 4 folds" in summary
+    assert "- Preprocessing: `fold-safe`" in summary
+    assert "- Numeric preprocessing: `median imputation, standard_scaler`" in summary
+    assert "- Categorical preprocessing: `most_frequent missing handling, one_hot encoding, unknown=ignore`" in summary
+    assert "- High-cardinality policy: `included_with_caution using fold-fitted one_hot`" in summary
+    assert "- Excluded columns: `target_column: target; primary_id: row_id`" in summary
+    assert "baseline is a sanity floor" in summary
+    assert '"preprocessing_policy"' not in summary
 
 
 def test_orchestrator_writes_generic_summary(tmp_path: Path) -> None:

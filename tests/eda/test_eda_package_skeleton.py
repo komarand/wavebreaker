@@ -24,3 +24,4 @@ def test_eda_cli_help_works() -> None:
     assert "--competition-id" in result.stdout
     assert "--no-download-dataset" in result.stdout
     assert "--enable-baseline" in result.stdout
+    assert "--enable-baseline-ablations" in result.stdout

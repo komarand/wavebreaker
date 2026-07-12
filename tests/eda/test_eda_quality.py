@@ -64,6 +64,24 @@ def test_empty_recommended_action_evidence_refs_creates_warning() -> None:
     assert any("recommended_next_actions[0] has no evidence_refs" in warning for warning in warnings)
 
 
+def test_malformed_recommended_action_text_creates_warning() -> None:
+    warnings = validate_evidence_pack(
+        _pack(
+            recommended_next_actions=[
+                RecommendedNextAction(
+                    priority="P1",
+                    action=".",
+                    why=".",
+                    evidence_refs=["metric_evidence.metric_name"],
+                )
+            ]
+        )
+    )
+
+    assert any("recommended_next_actions[0] has empty or malformed action text" in warning for warning in warnings)
+    assert any("recommended_next_actions[0] has empty or malformed why" in warning for warning in warnings)
+
+
 def test_temporal_overclaim_creates_warning() -> None:
     warnings = validate_no_unsupported_summary_claims(
         "Temporal validation is required for this competition.",

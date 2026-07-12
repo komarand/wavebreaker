@@ -8,17 +8,26 @@ def build_eda_strategy_hints(evidence_pack_partial: dict[str, Any]) -> dict[str,
     metric = _as_dict(evidence_pack_partial.get("metric_evidence"))
     drift = _as_dict(evidence_pack_partial.get("drift_evidence"))
     baseline = _as_dict(evidence_pack_partial.get("baseline_evidence"))
+    baseline_ablations = _as_dict(evidence_pack_partial.get("baseline_ablation_evidence"))
+    interactions = _as_dict(evidence_pack_partial.get("interaction_diagnostics"))
+    source_claims = _as_dict(evidence_pack_partial.get("source_claim_validation"))
     feature_diagnostics = _as_dict(evidence_pack_partial.get("feature_diagnostics"))
+    target_diagnostics = _as_dict(evidence_pack_partial.get("target_diagnostics"))
+    risk_register = [_as_dict(item) for item in evidence_pack_partial.get("eda_risk_register", [])]
     leakage = [_as_dict(item) for item in evidence_pack_partial.get("leakage_evidence", [])]
 
     hints = {
-        "validation": _validation_hints(validation, metric),
+        "validation": _validation_hints(validation, metric) + _target_validation_hints(target_diagnostics),
         "leakage": _leakage_hints(leakage),
-        "feature_engineering": _feature_hints(feature_diagnostics),
+        "feature_engineering": _feature_hints(feature_diagnostics) + _target_feature_hints(target_diagnostics),
         "drift_and_leaderboard": _drift_hints(drift),
         "baseline": _baseline_hints(baseline, metric),
+        "baseline_ablations": _baseline_ablation_hints(baseline_ablations),
+        "interaction_diagnostics": _interaction_hints(interactions),
+        "source_claim_validation": _source_claim_hints(source_claims),
+        "risk_register": _risk_register_hints(risk_register),
         "do_not_do": _do_not_do_hints(validation, feature_diagnostics),
-        "first_experiments": _first_experiments(validation, metric, feature_diagnostics, drift),
+        "first_experiments": _first_experiments(validation, metric, feature_diagnostics, drift) + _target_experiment_hints(target_diagnostics),
     }
     return {key: _dedupe(items) for key, items in hints.items()}
 
@@ -69,8 +78,14 @@ def _feature_hints(feature_diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
         hints.append(_hint("P1", "Start with safe numeric base features.", "Numeric diagnostics found usable non-role numeric columns.", ["feature_diagnostics.numeric_feature_diagnostics"], "low", ["feature_engineering"]))
     if categorical.get("low_cardinality_candidates"):
         hints.append(_hint("P1", "Add fold-fitted categorical encoders.", "Categorical diagnostics found low-cardinality candidates.", ["feature_diagnostics.categorical_feature_diagnostics"], "medium", ["feature_engineering"]))
-    if categorical.get("high_cardinality_candidates"):
-        hints.append(_hint("P1", "Treat high-cardinality categoricals carefully with rare handling or fold-fitted encoders.", "Categorical diagnostics found high-cardinality columns.", ["feature_diagnostics.categorical_feature_diagnostics.high_cardinality_candidates"], "medium", ["feature_engineering"]))
+    if categorical.get("high_cardinality_candidates") or categorical.get("unseen_category_risks"):
+        hints.append(_hint("P1", "Treat high-cardinality categoricals as hypotheses requiring robust encoding and validation.", "High-cardinality or sparse categories can produce unreliable target associations and train/test category mismatch.", ["feature_diagnostics.categorical_feature_diagnostics.high_cardinality_candidates"], "medium", ["feature_engineering"]))
+    if any(
+        _as_dict(item).get("feature_value_type")
+        in {"binary", "ordinal_low_cardinality", "count_zero_inflated", "count"}
+        for item in numeric.get("columns", [])
+    ):
+        hints.append(_hint("P2", "Handle low-cardinality/count numeric features according to their value type, not as continuous outlier-heavy variables.", "Feature diagnostics classify some numeric columns as ordinal/count-like.", ["feature_diagnostics.numeric_feature_diagnostics"], "low", ["feature_engineering"]))
     if missingness.get("recommended_indicators"):
         hints.append(_hint("P1", "Evaluate missingness indicators.", "Missingness diagnostics found meaningful missing values.", ["feature_diagnostics.missingness_diagnostics.recommended_indicators"], "low", ["feature_engineering"]))
     if text.get("columns"):
@@ -78,6 +93,61 @@ def _feature_hints(feature_diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
     if date_time.get("columns"):
         hints.append(_hint("P2", "Add date/time extraction as diagnostics-backed features.", "Date/time diagnostics found parseable or named date/time columns.", ["feature_diagnostics.date_time_diagnostics"], "low", ["feature_engineering"]))
     return hints
+
+
+def _target_validation_hints(target_diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
+    if target_diagnostics.get("status") != "completed":
+        return []
+    hints: list[dict[str, Any]] = []
+    distribution = _as_dict(target_diagnostics.get("distribution"))
+    imbalance = _as_dict(target_diagnostics.get("imbalance"))
+    if distribution.get("target_type") in {"binary", "multiclass"}:
+        hints.append(_hint("P0", "Preserve target distribution in validation folds.", "Classification target distribution must remain stable across folds.", ["target_diagnostics.distribution"], "medium", ["validation", "target"]))
+    if imbalance.get("severity") in {"moderate", "severe", "extreme"}:
+        hints.append(_hint("P1", "Track minority-class performance in validation diagnostics.", "Target imbalance can make aggregate metrics misleading.", ["target_diagnostics.imbalance"], "medium", ["metric", "validation", "target"]))
+    if any(_as_dict(item).get("implication") == "fold_class_count_checks_required" for item in target_diagnostics.get("validation_implications", [])):
+        hints.append(_hint("P0", "Check per-fold class counts before trusting validation scores.", "Severe imbalance requires every fold to contain enough minority examples.", ["target_diagnostics.imbalance"], "high", ["validation", "target"]))
+    return hints
+
+
+def _target_feature_hints(target_diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
+    if target_diagnostics.get("status") != "completed":
+        return []
+    missingness = [
+        _as_dict(item)
+        for item in target_diagnostics.get("target_by_missingness", [])
+        if float(_as_dict(item).get("absolute_difference") or 0.0) >= 0.2
+    ]
+    if not missingness:
+        return []
+    return [
+        _hint(
+            "P1",
+            "Evaluate missingness indicators for columns whose missingness changes target behavior.",
+            "Missingness is associated with target changes.",
+            ["target_diagnostics.target_by_missingness"],
+            "low",
+            ["feature_engineering", "target"],
+        )
+    ]
+
+
+def _target_experiment_hints(target_diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
+    if target_diagnostics.get("status") != "completed":
+        return []
+    distribution = _as_dict(target_diagnostics.get("distribution"))
+    if distribution.get("target_type") == "regression" and distribution.get("heavy_tail"):
+        return [
+            _hint(
+                "P1",
+                "Test target transforms or robust losses as validation hypotheses.",
+                "Regression target has heavy-tail or outlier evidence; transforms are hypotheses to validate.",
+                ["target_diagnostics.distribution"],
+                "medium",
+                ["metric", "validation", "target"],
+            )
+        ]
+    return []
 
 
 def _drift_hints(drift: dict[str, Any]) -> list[dict[str, Any]]:
@@ -91,8 +161,89 @@ def _drift_hints(drift: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _baseline_hints(baseline: dict[str, Any], metric: dict[str, Any]) -> list[dict[str, Any]]:
     if baseline.get("status") == "completed":
-        return [_hint("P1", "Use the EDA baseline as a reproducible sanity floor.", "Baseline runner completed under the selected validation policy.", ["baseline_evidence"], "low", ["baseline"])]
-    return [_hint("P2", "Start with a simple model family matching the task type.", "Baseline runner is optional or skipped; metric evidence identifies task semantics.", ["metric_evidence.task_type"], "low", ["baseline"])]
+        refs = ["baseline_evidence.metric_value", "baseline_evidence.preprocessing_policy"]
+        return [_hint("P1", "Compare future experiments against the completed EDA baseline.", "Baseline runner completed with documented fold-safe preprocessing.", refs, "low", ["baseline", "model_selection"])]
+    return [_hint("P0", "Run a simple fold-safe baseline before advanced modeling.", "No completed baseline evidence is available.", ["validation_evidence.primary_validation", "feature_diagnostics"], "medium", ["baseline"])]
+
+
+def _baseline_ablation_hints(ablations: dict[str, Any]) -> list[dict[str, Any]]:
+    if ablations.get("status") != "completed":
+        return []
+    hints: list[dict[str, Any]] = []
+    for finding in [_as_dict(item) for item in ablations.get("feature_block_findings", [])]:
+        finding_type = finding.get("finding_type", "feature_block")
+        block = finding.get("feature_block")
+        status = finding.get("status")
+        ref = f"baseline_ablation_evidence.feature_block_findings.{block or finding.get('configuration')}"
+        if finding_type == "configuration":
+            if finding.get("materiality_vs_best_prior") == "negligible":
+                hints.append(_hint("P1", "Prefer the simpler feature configuration until the added complexity shows a material gain.", "The more complex configuration was only negligibly better than a simpler prior configuration.", ["baseline_ablation_evidence.complexity_tradeoffs", ref], "low", ["feature_engineering", "baseline"]))
+            elif finding.get("status") in {"unstable", "competitive"}:
+                hints.append(_hint("P2", "Retest the composite feature configuration before adopting it by default.", "Its marginal paired-fold improvement was small or inconsistent.", [ref], "medium", ["feature_engineering", "baseline"]))
+            continue
+        if status == "helped" and finding.get("materiality") == "material" and finding.get("stability") == "stable":
+            hints.append(_hint("P1", "Prioritize the feature block that produced a stable material validation improvement.", "Paired fold comparison showed a material and stable gain.", [ref], "low", ["feature_engineering", "baseline"]))
+        elif status == "unstable" or finding.get("materiality") == "small":
+            hints.append(_hint("P2", "Retest the feature block in a controlled experiment before adopting it by default.", "The aggregate improvement was small or inconsistent across folds.", [ref], "medium", ["feature_engineering", "baseline"]))
+        elif block == "high_cardinality_categorical" and status in {"hurt", "neutral"}:
+            hints.append(_hint("P1", "Treat high-cardinality categorical features as controlled experiments, not default features.", "Baseline ablation did not show stable benefit from this block.", [ref], "medium", ["feature_engineering", "risk"]))
+    return hints
+
+
+def _source_claim_hints(claims: dict[str, Any]) -> list[dict[str, Any]]:
+    if claims.get("status") != "completed":
+        return []
+    hints = []
+    if claims.get("final_strategy_claims", {}).get("adopt"):
+        hints.append(_hint("P1", "Use source claims only where current EDA directly confirms them.", "Source claim validation found claims with direct current-dataset evidence.", ["source_claim_validation.validated_claims"], "low", ["strategy", "validation"]))
+    if claims.get("final_strategy_claims", {}).get("test_as_hypothesis"):
+        hints.append(_hint("P2", "Treat unconfirmed or analogous source advice as controlled experiments.", "Source evidence without direct EDA confirmation remains hypothesis-generating evidence.", ["source_claim_validation.recommended_experiments"], "medium", ["experiments", "source_claims"]))
+    if claims.get("final_strategy_claims", {}).get("reject"):
+        hints.append(_hint("P0", "Reject source advice that violates leakage, role, validation, or metric safety.", "Source claim validation identified unsafe or contradicted advice.", ["source_claim_validation.validated_claims"], "high", ["leakage", "do_not_do"]))
+    return hints
+
+
+def _interaction_hints(interactions: dict[str, Any]) -> list[dict[str, Any]]:
+    if interactions.get("status") != "completed":
+        return []
+    hints: list[dict[str, Any]] = []
+    reliable = [item for item in interactions.get("interaction_hypotheses", []) if _as_dict(item).get("materiality") == "material" and _as_dict(item).get("reliability") == "reliable"]
+    if reliable:
+        hints.append(_hint("P1", "Test the highest-confidence feature interactions in isolated fold-safe experiments.", "Interaction diagnostics found reliable pairwise effects beyond individual feature evidence.", ["interaction_diagnostics.interaction_hypotheses"], "medium", ["feature_engineering", "experiments"]))
+    if interactions.get("redundancy_groups"):
+        hints.append(_hint("P2", "Ablate redundant feature groups before increasing model complexity.", "Strongly related features may add complexity without independent signal.", ["interaction_diagnostics.redundancy_groups"], "low", ["feature_engineering", "modeling"]))
+    sparse = [_as_dict(item) for item in interactions.get("categorical_categorical", []) if _as_dict(item).get("reliability") in {"caution_sparse_combinations", "caution_test_mismatch"}]
+    if sparse:
+        hints.append(_hint("P1", "Avoid uncontrolled categorical crosses with sparse or unseen combinations.", "Sparse combinations can overfit and fail to generalize to test data.", ["interaction_diagnostics.categorical_categorical"], "high", ["feature_engineering", "do_not_do"]))
+    return hints
+
+
+def _risk_register_hints(risks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    hints: list[dict[str, Any]] = []
+    for risk in risks:
+        severity = str(risk.get("severity") or "")
+        risk_type = str(risk.get("risk_type") or "")
+        status = str(risk.get("status") or "")
+        if severity in {"info", "low"} or status in {"informational", "resolved"}:
+            continue
+        ref = f"eda_risk_register.{risk.get('risk_id')}"
+        if risk_type == "leakage" and severity in {"critical", "high"}:
+            hints.append(_hint("P0", "Exclude leakage-prone role columns from model features.", "Risk register identifies a high-severity leakage risk.", [ref], "high", ["leakage", "features"]))
+        elif risk_type in {"drift", "leaderboard"} and severity in {"critical", "high", "medium"}:
+            hints.append(_hint("P1", "Treat train/test feature drift as leaderboard risk and monitor CV/LB gap.", "Risk register identifies safe-feature drift or leaderboard transfer risk.", [ref], "medium", ["drift", "leaderboard"]))
+        elif risk_type == "validation" and severity in {"critical", "high"}:
+            hints.append(_hint("P0", "Resolve high-severity validation risks before comparing models.", "Risk register identifies a high-severity validation risk.", [ref], "high", ["validation", "model_selection"]))
+        elif risk_type == "metric" and severity in {"critical", "high", "medium"}:
+            hints.append(_hint("P0" if severity == "high" else "P1", "Lock metric-compatible predictions and postprocessing inside validation.", "Risk register identifies a metric-sensitive modeling risk.", [ref], "medium", ["metric", "validation"]))
+        elif risk_type == "target" and severity in {"critical", "high"}:
+            hints.append(_hint("P0", "Audit target-driven validation checks before modeling.", "Risk register identifies a high-severity target risk.", [ref], "high", ["target", "validation"]))
+        elif risk_type == "high_cardinality" and severity == "medium":
+            hints.append(_hint("P1", "Use robust high-cardinality encoding and validate its lift.", "Risk register identifies high-cardinality feature risk.", [ref], "medium", ["feature_engineering"]))
+        elif risk_type == "missingness" and severity == "medium":
+            hints.append(_hint("P1", "Evaluate missingness indicators with fold-safe imputation.", "Risk register identifies missingness risk.", [ref], "medium", ["feature_engineering", "missingness"]))
+        elif risk_type == "baseline" and status == "skipped":
+            hints.append(_hint("P0", "Run a simple fold-safe baseline before advanced modeling.", "Risk register identifies missing baseline evidence.", [ref], "medium", ["baseline"]))
+    return hints[:8]
 
 
 def _do_not_do_hints(validation: dict[str, Any], feature_diagnostics: dict[str, Any]) -> list[dict[str, Any]]:

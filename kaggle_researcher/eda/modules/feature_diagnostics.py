@@ -14,6 +14,10 @@ CATEGORICAL_DTYPE_TOKENS = ("str", "utf8", "categorical", "bool")
 TEXT_LENGTH_THRESHOLD = 20
 HIGH_CARDINALITY_RATIO = 0.5
 LOW_CARDINALITY_MAX = 20
+RARE_CATEGORY_RATE_THRESHOLD = 0.2
+HIGH_UNSEEN_RATE_THRESHOLD = 0.05
+HIGH_MISSINGNESS_CAUTION = 0.2
+SMALL_SAMPLE_ROWS = 30
 MAX_DIAGNOSTIC_ROWS = 200_000
 
 
@@ -150,23 +154,37 @@ def _numeric_diagnostics(
         numeric_kind = _feature_numeric_kind(profile, train_frame, column)
         skew_proxy = _skew_proxy(profile)
         outlier_applicable = numeric_kind == "continuous"
-        outlier_rate = _outlier_rate(profile) if outlier_applicable else 0.0
+        outlier_rate = _outlier_rate(profile)
+        rare_large_value_score = _rare_large_value_score(profile, train_frame, column)
         association = _numeric_target_association(train_frame, column, target_column)
         row = {
             "column": column,
             "feature_numeric_kind": numeric_kind,
+            "feature_value_type": numeric_kind,
             "missing_pct": profile.missing_pct,
             "n_unique": profile.n_unique,
             "unique_ratio": profile.unique_ratio,
             "skew_proxy": skew_proxy,
             "outlier_rate": outlier_rate,
+            "rare_large_value_score": rare_large_value_score,
             "outlier_diagnostic_method": (
                 "quantile_tail_proxy"
                 if outlier_applicable
-                else "distribution_shape_not_iqr_outliers"
+                else "discrete_rare_large_value_proxy"
             ),
             "train_test_shift_score": _as_dict(shifted.get(column)).get("psi", 0.0),
             "target_association": association,
+            "target_association_reliability": _numeric_target_association_reliability(
+                numeric_kind,
+                profile,
+                train_frame.height if train_frame is not None else 0,
+            ),
+            "outlier_reliability": _numeric_outlier_reliability(numeric_kind),
+            "shift_reliability": _numeric_shift_reliability(
+                numeric_kind,
+                train_frame.height if train_frame is not None else 0,
+            ),
+            "interpretation_warnings": _numeric_interpretation_warnings(numeric_kind),
         }
         rows.append(row)
     return {
@@ -175,22 +193,41 @@ def _numeric_diagnostics(
             {
                 "column": column,
                 "feature_numeric_kind": "id_like_excluded",
+                "feature_value_type": "id_like_excluded",
                 "outlier_rate": 0.0,
                 "outlier_diagnostic_method": "not_applicable",
+                "target_association_reliability": "not_applicable",
+                "outlier_reliability": "not_applicable",
+                "shift_reliability": "not_applicable",
+                "interpretation_warnings": ["Column is excluded by role policy and is not an ordinary feature."],
             }
             for column in excluded_numeric_columns or []
         ],
-        "top_predictive_candidates": _top(rows, "target_association"),
+        "top_predictive_candidates": _top_predictive(rows),
         "high_missingness": [row for row in rows if row["missing_pct"] >= 0.2],
         "outlier_heavy": [
             row
             for row in rows
-            if row["feature_numeric_kind"] == "continuous"
+            if row["feature_value_type"] == "continuous"
             and row["outlier_rate"] >= 0.05
+            and row["outlier_reliability"] == "reliable"
+        ],
+        "rare_large_value_features": [
+            row
+            for row in rows
+            if row["feature_value_type"] in {"binary", "ordinal_low_cardinality", "count_zero_inflated", "count"}
+            and (row["outlier_rate"] >= 0.05 or row["rare_large_value_score"] >= 10.0)
         ],
         "shifted_features": [row for row in rows if row["train_test_shift_score"] >= 0.1],
         "low_information": [
-            row for row in rows if row["n_unique"] <= 1 or row["unique_ratio"] <= 0.01
+            row
+            for row in rows
+            if row["n_unique"] <= 1
+            or (
+                row["unique_ratio"] <= 0.01
+                and row["target_association"] < 0.05
+                and row["feature_value_type"] == "continuous"
+            )
         ],
     }
 
@@ -209,14 +246,32 @@ def _categorical_diagnostics(
         rare_rate = _rare_category_rate(train_frame, column)
         top_concentration = _top_category_concentration(profile)
         association = _categorical_target_association(train_frame, column, target_column)
+        avg_len, avg_tokens, punctuation_ratio = _string_shape(train_frame, column)
+        feature_value_type = _categorical_feature_value_type(
+            profile,
+            avg_len=avg_len,
+            avg_tokens=avg_tokens,
+            punctuation_ratio=punctuation_ratio,
+        )
         cardinality = profile.n_unique or 0
         reliability = _target_association_reliability(
             cardinality=cardinality,
             unique_ratio=float(profile.unique_ratio or 0.0),
             n_rows=train_frame.height if train_frame is not None else 0,
+            rare_category_rate=rare_rate,
+            unseen_category_rate=unseen_rate,
+            feature_value_type=feature_value_type,
+        )
+        encoding_reliability = _encoding_reliability(
+            feature_value_type=feature_value_type,
+            reliability=reliability,
+            rare_category_rate=rare_rate,
+            unseen_category_rate=unseen_rate,
+            association=association,
         )
         row = {
             "column": column,
+            "feature_value_type": feature_value_type,
             "cardinality": cardinality,
             "unique_ratio": profile.unique_ratio,
             "rare_category_rate": rare_rate,
@@ -225,26 +280,38 @@ def _categorical_diagnostics(
             "missing_pct": profile.missing_pct,
             "target_association": association,
             "target_association_reliability": reliability,
+            "encoding_reliability": encoding_reliability,
+            "shift_reliability": _categorical_shift_reliability(unseen_rate, rare_rate, cardinality),
+            "interpretation_warnings": _categorical_interpretation_warnings(
+                feature_value_type=feature_value_type,
+                reliability=reliability,
+                unseen_category_rate=unseen_rate,
+                rare_category_rate=rare_rate,
+            ),
             "requires_fold_fitted_encoding": cardinality > LOW_CARDINALITY_MAX or association >= 0.2,
         }
         rows.append(row)
     return {
         "columns": rows,
-        "low_cardinality_candidates": [row for row in rows if row["cardinality"] <= LOW_CARDINALITY_MAX],
-        "high_cardinality_candidates": [row for row in rows if row["unique_ratio"] >= HIGH_CARDINALITY_RATIO],
-        "unseen_category_risks": [row for row in rows if row["unseen_category_rate"] >= 0.05],
-        "rare_category_heavy": [row for row in rows if row["rare_category_rate"] >= 0.2],
+        "low_cardinality_candidates": [row for row in rows if row["feature_value_type"] == "low_cardinality_categorical"],
+        "high_cardinality_candidates": [
+            row
+            for row in rows
+            if row["feature_value_type"] in {"high_cardinality_categorical", "code_like", "mixed_text_code"}
+        ],
+        "unseen_category_risks": [row for row in rows if row["unseen_category_rate"] >= HIGH_UNSEEN_RATE_THRESHOLD],
+        "rare_category_heavy": [row for row in rows if row["rare_category_rate"] >= RARE_CATEGORY_RATE_THRESHOLD],
         "high_target_association_candidates": [
             row
             for row in rows
             if row["target_association"] >= 0.2
-            and row["target_association_reliability"] != "not_reliable"
+            and row["target_association_reliability"] == "reliable"
         ],
         "target_association_cautions": [
             row
             for row in rows
             if row["target_association_reliability"]
-            in {"caution_high_cardinality", "not_reliable"}
+            in {"caution_high_cardinality", "caution_sparse_categories", "caution_high_unseen_rate", "caution_small_sample", "not_reliable"}
         ],
     }
 
@@ -294,18 +361,24 @@ def _text_diagnostics(
     for column in columns:
         profile = profiles[column]
         avg_len, avg_tokens, punctuation_ratio = _string_shape(train_frame, column)
-        classification = _text_classification(profile, avg_len, avg_tokens)
-        if classification == "low-cardinality categorical":
+        feature_value_type = _categorical_feature_value_type(
+            profile,
+            avg_len=avg_len,
+            avg_tokens=avg_tokens,
+            punctuation_ratio=punctuation_ratio,
+        )
+        if feature_value_type == "low_cardinality_categorical":
             continue
         rows.append(
             {
                 "column": column,
-                "classification": classification,
+                "classification": feature_value_type,
+                "feature_value_type": feature_value_type,
                 "avg_string_length": avg_len,
                 "avg_token_count": avg_tokens,
                 "punctuation_ratio": punctuation_ratio,
                 "unique_ratio": profile.unique_ratio,
-                "recommendations": _text_recommendations(classification),
+                "recommendations": _text_recommendations(feature_value_type),
             }
         )
     return {"columns": rows, "recommendations": _unique_flat(row["recommendations"] for row in rows)}
@@ -390,6 +463,24 @@ def _outlier_rate(profile: Any) -> float:
         return 0.0
 
 
+def _rare_large_value_score(profile: Any, frame: pl.DataFrame | None, column: str) -> float:
+    if frame is not None and column in frame.columns:
+        values = sorted(_float_values(frame[column]))
+        if values:
+            median = values[len(values) // 2]
+            denominator = median if median != 0 else 1.0
+            return round(abs(max(values)) / max(abs(denominator), 1e-9), 6)
+    if profile.max is None:
+        return 0.0
+    denominator = profile.q50 if profile.q50 not in (None, 0) else profile.q95
+    if denominator is None:
+        denominator = 1.0
+    try:
+        return round(abs(float(profile.max)) / max(abs(float(denominator)), 1e-9), 6)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _feature_numeric_kind(
     profile: Any,
     frame: pl.DataFrame | None,
@@ -402,10 +493,14 @@ def _feature_numeric_kind(
     nonnegative = isinstance(minimum, (int, float)) and minimum >= 0
     zero_rate = _zero_rate(frame, column)
     unique_ratio = float(profile.unique_ratio or 0.0)
-    if integer_like and nonnegative and zero_rate >= 0.2:
+    if n_unique == 2:
+        return "binary"
+    if integer_like and nonnegative and zero_rate >= 0.2 and n_unique > 3:
         return "count_zero_inflated"
     if n_unique and n_unique <= LOW_CARDINALITY_MAX and unique_ratio <= 0.2:
         return "ordinal_low_cardinality"
+    if integer_like and nonnegative:
+        return "count"
     return "continuous"
 
 
@@ -426,13 +521,146 @@ def _target_association_reliability(
     cardinality: int,
     unique_ratio: float,
     n_rows: int,
+    rare_category_rate: float = 0.0,
+    unseen_category_rate: float = 0.0,
+    feature_value_type: str = "low_cardinality_categorical",
 ) -> str:
     average_rows_per_category = n_rows / cardinality if cardinality and n_rows else 0.0
-    if unique_ratio >= HIGH_CARDINALITY_RATIO or average_rows_per_category < 2:
+    if unique_ratio >= 0.9 or average_rows_per_category < 2:
         return "not_reliable"
+    if n_rows and n_rows < SMALL_SAMPLE_ROWS:
+        return "caution_small_sample"
+    if unseen_category_rate >= HIGH_UNSEEN_RATE_THRESHOLD:
+        return "caution_high_unseen_rate"
+    if rare_category_rate >= RARE_CATEGORY_RATE_THRESHOLD:
+        return "caution_sparse_categories"
+    if feature_value_type in {"text_like", "code_like", "mixed_text_code"}:
+        return "caution_high_cardinality"
+    if unique_ratio >= HIGH_CARDINALITY_RATIO:
+        return "caution_high_cardinality"
     if cardinality <= LOW_CARDINALITY_MAX:
         return "reliable"
     return "caution_high_cardinality"
+
+
+def _numeric_target_association_reliability(
+    feature_value_type: str,
+    profile: Any,
+    n_rows: int,
+) -> str:
+    if n_rows == 0:
+        return "not_applicable"
+    if n_rows < SMALL_SAMPLE_ROWS:
+        return "caution_small_sample"
+    if float(profile.missing_pct or 0.0) >= HIGH_MISSINGNESS_CAUTION:
+        return "caution_high_missingness"
+    if feature_value_type in {"binary", "ordinal_low_cardinality"}:
+        return "caution_low_cardinality"
+    return "reliable"
+
+
+def _numeric_outlier_reliability(feature_value_type: str) -> str:
+    if feature_value_type == "continuous":
+        return "reliable"
+    if feature_value_type == "binary":
+        return "not_applicable"
+    if feature_value_type == "ordinal_low_cardinality":
+        return "caution_low_cardinality"
+    if feature_value_type == "count_zero_inflated":
+        return "caution_zero_inflated"
+    if feature_value_type == "count":
+        return "caution_count_feature"
+    return "not_applicable"
+
+
+def _numeric_shift_reliability(feature_value_type: str, n_rows: int) -> str:
+    if n_rows == 0:
+        return "not_applicable"
+    if n_rows < SMALL_SAMPLE_ROWS:
+        return "caution_small_sample"
+    if feature_value_type in {"binary", "ordinal_low_cardinality"}:
+        return "caution_low_cardinality"
+    return "reliable"
+
+
+def _numeric_interpretation_warnings(feature_value_type: str) -> list[str]:
+    if feature_value_type == "binary":
+        return ["Binary numeric features are discrete; continuous outlier diagnostics are not applicable."]
+    if feature_value_type == "ordinal_low_cardinality":
+        return ["Low-cardinality numeric features should be interpreted as ordinal/discrete, not continuous."]
+    if feature_value_type == "count_zero_inflated":
+        return ["Zero-inflated count features can have rare large values; IQR-style outlier flags need caution."]
+    if feature_value_type == "count":
+        return ["Count features are discrete; rare large values are not the same as continuous outliers."]
+    return []
+
+
+def _categorical_feature_value_type(
+    profile: Any,
+    *,
+    avg_len: float,
+    avg_tokens: float,
+    punctuation_ratio: float,
+) -> str:
+    unique_ratio = float(profile.unique_ratio or 0.0)
+    cardinality = int(profile.n_unique or 0)
+    if avg_tokens >= 3 or avg_len >= 35:
+        if unique_ratio >= HIGH_CARDINALITY_RATIO and punctuation_ratio >= 0.05:
+            return "mixed_text_code"
+        return "text_like"
+    if unique_ratio >= 0.8 and avg_len <= 24:
+        return "code_like"
+    if unique_ratio >= HIGH_CARDINALITY_RATIO or cardinality > LOW_CARDINALITY_MAX:
+        return "high_cardinality_categorical"
+    return "low_cardinality_categorical"
+
+
+def _encoding_reliability(
+    *,
+    feature_value_type: str,
+    reliability: str,
+    rare_category_rate: float,
+    unseen_category_rate: float,
+    association: float,
+) -> str:
+    if association >= 0.2:
+        return "high_leakage_risk_if_target_encoded"
+    if feature_value_type in {"high_cardinality_categorical", "text_like", "code_like", "mixed_text_code"}:
+        return "requires_fold_fitted_encoding"
+    if rare_category_rate >= RARE_CATEGORY_RATE_THRESHOLD or unseen_category_rate >= HIGH_UNSEEN_RATE_THRESHOLD:
+        return "requires_rare_handling"
+    if reliability == "reliable":
+        return "safe_basic_encoding"
+    return "requires_rare_handling"
+
+
+def _categorical_shift_reliability(unseen_category_rate: float, rare_category_rate: float, cardinality: int) -> str:
+    if unseen_category_rate >= HIGH_UNSEEN_RATE_THRESHOLD:
+        return "caution_high_unseen_rate"
+    if rare_category_rate >= RARE_CATEGORY_RATE_THRESHOLD or cardinality > LOW_CARDINALITY_MAX:
+        return "caution_sparse_categories"
+    return "reliable"
+
+
+def _categorical_interpretation_warnings(
+    *,
+    feature_value_type: str,
+    reliability: str,
+    unseen_category_rate: float,
+    rare_category_rate: float,
+) -> list[str]:
+    warnings: list[str] = []
+    if feature_value_type in {"high_cardinality_categorical", "code_like", "mixed_text_code"}:
+        warnings.append("High-cardinality or code-like categories can produce unstable target rates.")
+    if feature_value_type == "text_like":
+        warnings.append("Text-like columns should be featurized as text/count signals before raw categorical encoding.")
+    if reliability == "not_reliable":
+        warnings.append("Target association is not reliable because categories are too sparse or near-unique.")
+    if unseen_category_rate >= HIGH_UNSEEN_RATE_THRESHOLD:
+        warnings.append("Many test categories are unseen in train; simple category lookup may not generalize.")
+    if rare_category_rate >= RARE_CATEGORY_RATE_THRESHOLD:
+        warnings.append("Rare categories require grouping or robust encoding.")
+    return warnings
 
 
 def _numeric_target_association(frame: pl.DataFrame | None, column: str, target: str | None) -> float:
@@ -483,7 +711,7 @@ def _rare_category_rate(frame: pl.DataFrame | None, column: str) -> float:
     total = sum(int(row.get("count", 0)) for row in counts)
     if total == 0:
         return 0.0
-    rare = sum(int(row.get("count", 0)) for row in counts if int(row.get("count", 0)) <= 1)
+    rare = sum(int(row.get("count", 0)) for row in counts if int(row.get("count", 0)) <= 2)
     return round(rare / total, 6)
 
 
@@ -507,21 +735,15 @@ def _string_shape(frame: pl.DataFrame | None, column: str) -> tuple[float, float
     return round(avg_len, 6), round(avg_tokens, 6), round(punctuation / total_chars, 6)
 
 
-def _text_classification(profile: Any, avg_len: float, avg_tokens: float) -> str:
-    if profile.unique_ratio >= 0.9 and avg_len <= 20:
-        return "code-like identifier"
-    if avg_len >= TEXT_LENGTH_THRESHOLD or avg_tokens >= 3:
-        return "free-text"
-    if profile.unique_ratio >= HIGH_CARDINALITY_RATIO:
-        return "high-cardinality categorical"
-    return "low-cardinality categorical"
-
-
 def _text_recommendations(classification: str) -> list[str]:
-    if classification == "free-text":
+    if classification == "text_like":
         return ["Add length/count/token features before considering heavier NLP."]
-    if classification == "code-like identifier":
-        return ["Avoid using near-unique identifiers directly; consider prefix/suffix diagnostics only."]
+    if classification == "code_like":
+        return ["Use prefix/suffix/frequency diagnostics; avoid treating raw codes as stable ordinary categories."]
+    if classification == "mixed_text_code":
+        return ["Split text length/count signals from code-like prefix/suffix/frequency hypotheses."]
+    if classification == "high_cardinality_categorical":
+        return ["Use rare handling and fold-fitted encoders; validate category shift."]
     return ["Use fold-fitted encoders and rare-category handling."]
 
 
@@ -573,6 +795,24 @@ def _top(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda item: item.get(key) or 0, reverse=True)[:10]
 
 
+def _top_predictive(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    reliability_rank = {
+        "reliable": 0,
+        "caution_low_cardinality": 1,
+        "caution_high_missingness": 2,
+        "caution_small_sample": 3,
+        "not_applicable": 4,
+    }
+    return sorted(
+        rows,
+        key=lambda item: (
+            reliability_rank.get(str(item.get("target_association_reliability")), 9),
+            -(float(item.get("target_association") or 0.0)),
+            str(item.get("column") or ""),
+        ),
+    )[:10]
+
+
 def _is_numeric_dtype(dtype: str) -> bool:
     return any(token in str(dtype).lower() for token in NUMERIC_DTYPE_TOKENS)
 
@@ -582,7 +822,7 @@ def _is_categorical_dtype(dtype: str) -> bool:
 
 
 def _empty_numeric() -> dict[str, Any]:
-    return {"columns": [], "excluded_id_like": [], "top_predictive_candidates": [], "high_missingness": [], "outlier_heavy": [], "shifted_features": [], "low_information": []}
+    return {"columns": [], "excluded_id_like": [], "top_predictive_candidates": [], "high_missingness": [], "outlier_heavy": [], "rare_large_value_features": [], "shifted_features": [], "low_information": []}
 
 
 def _empty_categorical() -> dict[str, Any]:
