@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import re
+import sys
 import time
 from collections import Counter
 from datetime import datetime
@@ -31,6 +32,17 @@ from kaggle_researcher.agents.kaggle_agent import (
 )
 from kaggle_researcher.agents.paper_search_agent import search_paper_sources
 from kaggle_researcher.clients.deepseek_client import DeepSeekClient
+from kaggle_researcher.contracts.research_hypotheses import (
+    ResearchHypotheses,
+    migrate_research_hypotheses_payload,
+    write_research_hypotheses_atomic,
+)
+from kaggle_researcher.contracts.eda_task_plan import (
+    EdaTaskPlan,
+    migrate_eda_task_plan_payload,
+    validate_research_artifact_bundle,
+    write_eda_task_plan_atomic,
+)
 from kaggle_researcher.config import load_config
 from kaggle_researcher.eda import orchestrator as eda_orchestrator
 from kaggle_researcher.eda.schemas import EdaEvidencePack, EdaRunConfig, ResearchHypotheses
@@ -82,7 +94,7 @@ logger = logging.getLogger(__name__)
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kaggle_researcher",
-        description="KaggleResearcher research pipeline.",
+        description="KaggleResearcher research pipeline. Use 'full-run --help' for the canonical end-to-end command.",
     )
     parser.add_argument("competition_url", nargs="?", help="Kaggle competition URL")
     parser.add_argument("competition_desc", nargs="?", help="Competition description")
@@ -192,6 +204,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Validate collected source claims against current EDA evidence.",
     )
     parser.add_argument(
+        "--enable-visual-diagnostics",
+        action="store_true",
+        help="Generate optional bounded EDA visual diagnostic artifacts.",
+    )
+    parser.add_argument(
+        "--enable-slice-diagnostics",
+        action="store_true",
+        help="Enable fold-safe EDA slice performance diagnostics.",
+    )
+    parser.add_argument(
         "--research-hypotheses-path",
         type=Path,
         help="Existing research_hypotheses.json to use for EDA or final synthesis.",
@@ -239,6 +261,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_full_run_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="kaggle_researcher full-run",
+        description="Run Research Scout, EDA, reasoning, and final strategy synthesis as one reproducible run.",
+    )
+    parser.add_argument("--competition-id", required=True, help="Kaggle competition slug or identifier")
+    parser.add_argument("--competition-url", help="Kaggle competition URL")
+    parser.add_argument("--competition-description", default="", help="Competition description and metric context")
+    parser.add_argument("--local-dataset-path", type=Path, help="Path to local competition data")
+    parser.add_argument("--output-root", type=Path, default=Path("runs"), help="Parent directory for full runs")
+    parser.add_argument("--resume-run-dir", type=Path, help="Reuse a completed full-run directory when its config and artifacts match")
+    parser.add_argument("--force-rerun-stage", action="append", default=[], help="Stage ID to rerun; may be repeated")
+    parser.add_argument("--profile", choices=("minimal", "standard", "full"), default="standard", help="Execution profile")
+    parser.add_argument("--fail-fast", action="store_true", help="Stop after an optional-stage failure")
+    parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress output")
+    parser.add_argument("--download-dataset", dest="download_dataset", action="store_true", default=True, help="Allow dataset download when local data is absent")
+    parser.add_argument("--no-download-dataset", dest="download_dataset", action="store_false", help="Disable dataset download")
+    for flag, help_text in (
+        ("--enable-p1-modules", "Enable optional P1 EDA modules."),
+        ("--enable-baseline", "Enable the EDA baseline runner."),
+        ("--enable-baseline-ablations", "Enable fold-safe baseline ablations."),
+        ("--enable-interaction-diagnostics", "Enable bounded interaction diagnostics."),
+        ("--enable-slice-diagnostics", "Enable fold-safe slice diagnostics."),
+        ("--enable-source-claim-validation", "Validate source claims against EDA evidence."),
+        ("--enable-visual-diagnostics", "Generate EDA visual diagnostics."),
+    ):
+        parser.add_argument(flag, action="store_true", help=help_text)
+    return parser
+
+
 async def run_research(
     competition_url: str,
     competition_desc: str,
@@ -264,6 +316,8 @@ async def run_research(
     enable_baseline_ablations: bool = False,
     enable_interaction_diagnostics: bool = False,
     enable_source_claim_validation: bool = False,
+    enable_visual_diagnostics: bool = False,
+    enable_slice_diagnostics: bool = False,
     research_hypotheses_path: str | Path | None = None,
     eda_task_plan_path: str | Path | None = None,
     eda_evidence_pack_path: str | Path | None = None,
@@ -437,14 +491,42 @@ async def run_research(
             else:
                 _write_json_artifact(run_dir, "research_scout_validation.json", validation_payload)
 
+            migration = migrate_research_hypotheses_payload(scout_payload)
+            canonical_hypotheses = ResearchHypotheses.model_validate(migration.canonical_payload)
+            if migration.migrated:
+                warnings.extend(migration.warnings)
+                _write_json_artifact(
+                    run_dir,
+                    "research_hypotheses_migration.json",
+                    {
+                        "source_schema_version": migration.source_schema_version,
+                        "target_schema_version": migration.target_schema_version,
+                        "applied_migrations": migration.applied_migrations,
+                        "warnings": migration.warnings,
+                    },
+                )
             eda_task_plan = split_eda_task_plan(scout_payload)
+            task_plan_migration = migrate_eda_task_plan_payload(eda_task_plan)
+            canonical_task_plan = EdaTaskPlan.model_validate(task_plan_migration.canonical_payload)
+            validate_research_artifact_bundle(canonical_hypotheses, canonical_task_plan)
             scout_summary = build_research_scout_summary(scout_payload)
             _write_json_artifact(run_dir, "research_scout_raw.json", scout_raw_payload)
             hypotheses_path = run_dir / "research_hypotheses.json"
             eda_task_plan_path = run_dir / "eda_task_plan.json"
             summary_path = run_dir / "research_scout_summary.md"
-            _write_json_file(hypotheses_path, scout_payload)
-            _write_json_file(eda_task_plan_path, eda_task_plan)
+            write_research_hypotheses_atomic(hypotheses_path, canonical_hypotheses)
+            write_eda_task_plan_atomic(eda_task_plan_path, canonical_task_plan)
+            if task_plan_migration.migrated:
+                _write_json_artifact(
+                    run_dir,
+                    "eda_task_plan_migration.json",
+                    {
+                        "source_schema_version": task_plan_migration.source_schema_version,
+                        "target_schema_version": task_plan_migration.target_schema_version,
+                        "applied_migrations": task_plan_migration.applied_migrations,
+                        "warnings": task_plan_migration.warnings,
+                    },
+                )
             _write_json_artifact(
                 run_dir,
                 "research_scout_category_corrections.json",
@@ -531,6 +613,8 @@ async def run_research(
                 enable_baseline_ablations=enable_baseline_ablations,
                 enable_interaction_diagnostics=enable_interaction_diagnostics,
                 enable_source_claim_validation=enable_source_claim_validation,
+                enable_visual_diagnostics=enable_visual_diagnostics,
+                enable_slice_diagnostics=enable_slice_diagnostics,
             )
             eda_evidence_pack_path = eda_result.evidence_pack_path
             eda_summary_path = eda_result.summary_path
@@ -1330,6 +1414,8 @@ async def _run_optional_eda(
     enable_baseline_ablations: bool,
     enable_interaction_diagnostics: bool,
     enable_source_claim_validation: bool,
+    enable_visual_diagnostics: bool,
+    enable_slice_diagnostics: bool,
 ):
     return await getattr(eda_orchestrator, "run" "_eda")(
         EdaRunConfig(
@@ -1348,6 +1434,8 @@ async def _run_optional_eda(
             enable_baseline_ablations=enable_baseline_ablations,
             enable_interaction_diagnostics=enable_interaction_diagnostics,
             enable_source_claim_validation=enable_source_claim_validation,
+            enable_visual_diagnostics=enable_visual_diagnostics,
+            enable_slice_diagnostics=enable_slice_diagnostics,
         )
     )
 
@@ -1530,9 +1618,41 @@ def _slugify(value: str) -> str:
     return slug or "unknown-competition"
 
 
-async def run() -> int:
+async def run(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in {"full-run", "run-all"}:
+        from kaggle_researcher.orchestration.full_run import FullRunConfig, run_full_research
+
+        args = build_full_run_parser().parse_args(argv[1:])
+        config = FullRunConfig(
+            competition_id=args.competition_id,
+            competition_url=args.competition_url,
+            competition_description=args.competition_description,
+            local_dataset_path=args.local_dataset_path,
+            download_dataset=args.download_dataset,
+            output_root=args.output_root,
+            profile=args.profile,
+            enable_p1_modules=args.enable_p1_modules,
+            enable_baseline=args.enable_baseline,
+            enable_baseline_ablations=args.enable_baseline_ablations,
+            enable_interaction_diagnostics=args.enable_interaction_diagnostics,
+            enable_slice_diagnostics=args.enable_slice_diagnostics,
+            enable_source_claim_validation=args.enable_source_claim_validation,
+            enable_visual_diagnostics=args.enable_visual_diagnostics,
+            fail_fast=args.fail_fast,
+            resume_run_dir=args.resume_run_dir,
+            force_rerun_stages=set(args.force_rerun_stage),
+            disable_progress=args.no_progress,
+        )
+        result = await run_full_research(config)
+        print(f"Full run status: {result.status}")
+        print(f"Run directory: {result.run_dir}")
+        print(f"Final strategy: {result.final_strategy_path}")
+        print(f"Final report: {result.final_report_path}")
+        return 0
+
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if not args.competition_url or not args.competition_desc:
         print("Provide competition_url and competition_desc to run the minimal pipeline.")
         return 0
@@ -1565,6 +1685,8 @@ async def run() -> int:
         enable_baseline_ablations=args.enable_baseline_ablations,
         enable_interaction_diagnostics=args.enable_interaction_diagnostics,
         enable_source_claim_validation=args.enable_source_claim_validation,
+        enable_visual_diagnostics=args.enable_visual_diagnostics,
+        enable_slice_diagnostics=args.enable_slice_diagnostics,
         research_hypotheses_path=args.research_hypotheses_path,
         eda_task_plan_path=args.eda_task_plan_path,
         eda_evidence_pack_path=args.eda_evidence_pack_path,

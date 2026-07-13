@@ -100,6 +100,7 @@ def test_reasoning_list_defaults_are_independent() -> None:
         likely_split="group",
         failure_modes=[],
         reasoning="Use group-aware validation.",
+        primary_validation={"method": "group_kfold"},
     )
     second = ValidationResult(
         confidence="medium",
@@ -109,6 +110,7 @@ def test_reasoning_list_defaults_are_independent() -> None:
         likely_split="time",
         failure_modes=[],
         reasoning="Respect temporal ordering.",
+        primary_validation={"method": "temporal_cv"},
     )
 
     first.failure_modes.append("leakage")

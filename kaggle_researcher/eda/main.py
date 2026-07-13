@@ -73,7 +73,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable-source-claim-validation",
         action="store_true",
-        help="Validate collected source claims against current EDA evidence",
+        help="Run post-EDA validation of collected research claims",
+    )
+    parser.add_argument(
+        "--enable-visual-diagnostics",
+        action="store_true",
+        help="Render selected evidence-driven EDA plots",
+    )
+    parser.add_argument(
+        "--enable-slice-diagnostics",
+        action="store_true",
+        help="Enable fold-safe slice performance diagnostics.",
     )
     parser.add_argument(
         "--enable-notebook-static-analysis",
@@ -109,6 +119,8 @@ def run(argv: list[str] | None = None) -> int:
         enable_baseline_ablations=args.enable_baseline_ablations,
         enable_interaction_diagnostics=args.enable_interaction_diagnostics,
         enable_source_claim_validation=args.enable_source_claim_validation,
+        enable_visual_diagnostics=args.enable_visual_diagnostics,
+        enable_slice_diagnostics=args.enable_slice_diagnostics,
         enable_notebook_static_analysis=args.enable_notebook_static_analysis,
         fail_fast=args.fail_fast,
         profile_sample_rows=settings.eda_profile_sample_rows,

@@ -5,6 +5,12 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, StringConstraints
 
+from kaggle_researcher.contracts.research_hypotheses import (
+    ResearchHypothesis,
+    ResearchHypotheses,
+)
+from kaggle_researcher.contracts.eda_task_plan import EdaTask, EdaTaskPlan
+
 
 Confidence = Literal["low", "medium", "high"]
 Priority = Literal["P0", "P1", "P2", "P3"]
@@ -138,6 +144,8 @@ class EdaRunConfig(BaseModel):
     enable_baseline_ablations: bool = False
     enable_interaction_diagnostics: bool = False
     enable_source_claim_validation: bool = False
+    enable_visual_diagnostics: bool = False
+    enable_slice_diagnostics: bool = False
     enable_notebook_static_analysis: bool = False
 
     random_seed: int = 42
@@ -159,52 +167,6 @@ class EdaRunResult(BaseModel):
     limitations: list[str] = Field(default_factory=list)
 
     duration_sec: float
-
-
-class ResearchHypothesis(BaseModel):
-    hypothesis_id: str
-    category: HypothesisCategory
-    claim: str
-    rationale: str | None = None
-    expected_eda_checks: list[str] = Field(default_factory=list)
-    priority: Priority
-    confidence_before_eda: Confidence
-    source_refs: list[str] = Field(default_factory=list)
-
-
-class ResearchHypotheses(BaseModel):
-    schema_version: str = "1.0"
-    competition_id: str
-    created_at: str | None = None
-
-    hypotheses: list[ResearchHypothesis] = Field(default_factory=list)
-    eda_tasks: list[dict[str, Any]] = Field(default_factory=list)
-    structured_findings: list[dict[str, Any]] = Field(default_factory=list)
-    scout_limitations: list[str] = Field(default_factory=list)
-    models_used: dict[str, Any] = Field(default_factory=dict)
-
-
-class EdaTask(BaseModel):
-    task_id: str
-    module: str
-    priority: Priority
-    blocking: bool = False
-    related_hypothesis_ids: list[str] = Field(default_factory=list)
-    params: dict[str, Any] = Field(default_factory=dict)
-
-
-class EdaTaskPlan(BaseModel):
-    schema_version: str = "1.0"
-    competition_id: str
-    task_type: str | None = None
-    metric: dict[str, Any] = Field(default_factory=dict)
-    dataset: dict[str, Any] = Field(default_factory=dict)
-
-    eda_tasks: list[EdaTask] = Field(default_factory=list)
-    hypothesis_index: dict[str, list[str]] = Field(default_factory=dict)
-    recommended_module_sequence: list[str] = Field(default_factory=list)
-    recommended_human_checklist: list[str] = Field(default_factory=list)
-    blocking_tasks: list[str] = Field(default_factory=list)
 
 
 class DatasetInfo(BaseModel):
@@ -487,6 +449,25 @@ class EdaEvidencePack(BaseModel):
     target_diagnostics: dict[str, Any] = Field(default_factory=dict)
     interaction_diagnostics: dict[str, Any] = Field(default_factory=dict)
     source_claim_validation: dict[str, Any] = Field(default_factory=dict)
+    visual_diagnostics: dict[str, Any] = Field(default_factory=dict)
+    slice_diagnostics: dict[str, Any] = Field(default_factory=dict)
+    eda_risks: list[EdaRisk] = Field(default_factory=list)
+    eda_implications: list[dict[str, Any]] = Field(default_factory=list)
+    strategy_hints: list[dict[str, Any]] = Field(default_factory=list)
+    safety_constraints: list[dict[str, Any]] = Field(default_factory=list)
+    validation_requirements: list[dict[str, Any]] = Field(default_factory=list)
+    testable_hypotheses: list[dict[str, Any]] = Field(default_factory=list)
+    experiment_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    module_classification: dict[str, str] = Field(default_factory=dict)
+    stage_status: dict[str, str] = Field(default_factory=dict)
+    evidence_origins: dict[str, str] = Field(default_factory=dict)
+    deprecated_outputs: dict[str, dict[str, str]] = Field(default_factory=dict)
+    baseline_purpose: str = "diagnostic_sanity_floor"
+    ablation_purpose: str = "broad_feature_block_diagnostics"
+    visual_diagnostics_role: str = "evidence_rendering"
+    risk_scope: str = "eda_local"
+    owner: str = "eda_engine"
+    eligible_for_global_risk_synthesis: bool = True
     eda_risk_register: list[EdaRisk] = Field(default_factory=list)
     risk_summary: dict[str, Any] = Field(default_factory=dict)
     eda_strategy_hints: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)

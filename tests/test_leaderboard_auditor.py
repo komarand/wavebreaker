@@ -41,6 +41,7 @@ def _validation() -> ValidationResult:
         likely_split="time",
         failure_modes=["Public LB may reward period-specific overfit."],
         reasoning="Temporal validation is recommended from source-backed split risk.",
+        primary_validation={"method": "temporal_cv"},
     )
 
 

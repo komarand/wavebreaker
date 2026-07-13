@@ -59,6 +59,7 @@ def _validation() -> ValidationResult:
         validation_risk="high",
         likely_split="time",
         reasoning="Use temporal validation.",
+        primary_validation={"method": "temporal_cv"},
     )
 
 

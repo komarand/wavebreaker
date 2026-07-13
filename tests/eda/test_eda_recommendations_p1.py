@@ -402,11 +402,10 @@ def test_summary_renders_deduplicated_recommended_actions() -> None:
     )
 
     summary = build_eda_summary(pack)
-    action_lines = [line.lower() for line in summary.splitlines() if line.startswith("- `P")]
-
-    assert sum("threshold" in line for line in action_lines) == 1
-    assert sum("stratifiedkfold" in line or "stratified_kfold" in line for line in action_lines) == 1
-    assert sum("sanity floor" in line for line in action_lines) == 1
+    assert "## Testable follow-up hypotheses" in summary
+    assert "Tune classification thresholds" not in summary
+    assert "Use StratifiedKFold" not in summary
+    assert "sanity floor" not in summary
 
 
 def test_recommendation_aggregation_is_deterministic_for_shuffled_inputs() -> None:
@@ -557,9 +556,8 @@ def test_summary_has_no_malformed_recommended_action_bullet() -> None:
     )
 
     summary = build_eda_summary(pack)
-    action_lines = [line for line in summary.splitlines() if line.startswith("- `P")]
-    assert action_lines
-    assert all(": . " not in line and ":  " not in line for line in action_lines)
+    assert "## Testable follow-up hypotheses" in summary
+    assert "Malformed action text" not in summary
     assert "`. [refs:" not in summary
 
 

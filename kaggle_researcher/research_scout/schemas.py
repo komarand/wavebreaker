@@ -6,6 +6,17 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
 
+from kaggle_researcher.contracts.research_hypotheses import (
+    ResearchHypotheses,
+    migrate_research_hypotheses_payload,
+    write_research_hypotheses_atomic,
+)
+from kaggle_researcher.contracts.eda_task_plan import (
+    EdaTaskPlan,
+    validate_research_artifact_bundle,
+    write_eda_task_plan_atomic,
+)
+
 
 Confidence = Literal["low", "medium", "high"]
 Priority = Literal["P0", "P1", "P2", "P3"]
@@ -122,7 +133,7 @@ class EdaTaskPlanDraft(BaseModel):
         return _unique(values)
 
     def to_eda_task_plan_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "competition_id": self.competition_id,
             "task_type": self.task_type,
@@ -138,6 +149,7 @@ class EdaTaskPlanDraft(BaseModel):
             "recommended_human_checklist": list(self.recommended_human_checklist),
             "blocking_tasks": list(self.blocking_tasks),
         }
+        return EdaTaskPlan.model_validate(payload).model_dump(mode="json")
 
 
 class ResearchScoutOutput(BaseModel):
@@ -182,10 +194,14 @@ class ResearchScoutOutput(BaseModel):
                 "EDA tasks reference unknown hypothesis ids: "
                 + ", ".join(sorted(unknown_ids))
             )
+        validate_research_artifact_bundle(
+            ResearchHypotheses.model_validate(self.to_research_hypotheses_payload()),
+            EdaTaskPlan.model_validate(self.to_eda_task_plan_payload()),
+        )
         return self
 
     def to_research_hypotheses_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "competition_id": self.competition_id,
             "created_at": self.created_at or datetime.now().astimezone().isoformat(),
@@ -203,6 +219,8 @@ class ResearchScoutOutput(BaseModel):
             ],
             "models_used": self.models_used,
         }
+        migration = migrate_research_hypotheses_payload(payload)
+        return ResearchHypotheses.model_validate(migration.canonical_payload).model_dump(mode="json")
 
     def to_eda_task_plan_payload(self) -> dict[str, Any]:
         payload = self.eda_task_plan.to_eda_task_plan_payload()
@@ -238,13 +256,13 @@ class ResearchScoutOutput(BaseModel):
         research_path = root / "research_hypotheses.json"
         task_plan_path = root / "eda_task_plan.json"
         summary_path = root / "research_scout_summary.md"
-        research_path.write_text(
-            _json_dumps(self.to_research_hypotheses_payload()),
-            encoding="utf-8",
+        write_research_hypotheses_atomic(
+            research_path,
+            ResearchHypotheses.model_validate(self.to_research_hypotheses_payload()),
         )
-        task_plan_path.write_text(
-            _json_dumps(self.to_eda_task_plan_payload()),
-            encoding="utf-8",
+        write_eda_task_plan_atomic(
+            task_plan_path,
+            EdaTaskPlan.model_validate(self.to_eda_task_plan_payload()),
         )
         summary_path.write_text(self.to_summary_markdown(), encoding="utf-8")
         return {

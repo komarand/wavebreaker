@@ -32,7 +32,9 @@ def test_build_eda_summary_contains_required_sections() -> None:
         "## Feature probes",
         "## Risk register",
         "## Hypothesis results",
-        "## Recommended next actions",
+        "## Safety constraints",
+        "## Validation requirements",
+        "## Testable follow-up hypotheses",
         "## Warnings",
         "## Limitations",
     ):
@@ -41,7 +43,7 @@ def test_build_eda_summary_contains_required_sections() -> None:
     assert "[refs: validation_evidence.primary_validation]" in summary
     assert "Temporal validation is diagnostic, not the selected primary validation." in summary
     assert "Temporal validation is required" not in summary
-    assert "Use selected validation." in summary
+    assert "Recommended next actions" not in summary
 
 
 def test_build_eda_summary_marks_absent_p1_modules_as_skipped() -> None:
@@ -147,7 +149,7 @@ def test_orchestrator_writes_generic_summary(tmp_path: Path) -> None:
     assert "## Validation" in summary
     assert "Primary validation: `stratified_kfold`" in summary
     assert "Temporal validation is required" not in summary
-    assert "## Recommended next actions" in summary
+    assert "## Testable follow-up hypotheses" in summary
 
 
 async def _run_fixture(competition_id: str, output_dir: Path):

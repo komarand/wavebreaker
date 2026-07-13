@@ -19,6 +19,11 @@ def test_offline_home_credit_fixture_creates_evidence_pack(tmp_path: Path) -> No
     assert payload["competition_id"] == "home_credit_tiny"
     assert payload["validation_evidence"]["primary_validation"]["method"] == "temporal_holdout"
     assert payload["recommended_next_actions"]
+    assert payload["experiment_candidates"] == payload["testable_hypotheses"]
+    assert len(payload["testable_hypotheses"]) <= 10
+    assert payload["safety_constraints"]
+    assert payload["validation_requirements"]
+    assert payload["deprecated_outputs"]["experiment_candidates"]["replacement"] == "testable_hypotheses"
 
 
 def test_iid_binary_tiny_fixture_selects_stratified_kfold(tmp_path: Path) -> None:

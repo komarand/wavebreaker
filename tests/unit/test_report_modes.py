@@ -246,6 +246,7 @@ def test_full_report_passes_artifact_dir_only_to_reviewer(
             validation_risk="high",
             likely_split="time",
             reasoning="reason",
+            primary_validation={"method": "temporal_cv"},
         )
 
     async def fake_analyze_leakage_risk(**kwargs: Any) -> LeakageRiskResult:

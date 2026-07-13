@@ -117,6 +117,7 @@ def reasoning_outputs() -> OfflineReasoningOutputs:
             likely_split="stratified holdout",
             failure_modes=["target leakage through post-application aggregates"],
             reasoning="Use stable folds and reserve a final untouched holdout.",
+            primary_validation={"method": "stratified_group_kfold"},
         ),
         leakage=LeakageRiskResult(
             confidence="medium",

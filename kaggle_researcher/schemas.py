@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, StrictBool, model_validator
+
+from kaggle_researcher.contracts.normalization import normalize_contract_payload
 
 
 SourceType = Literal[
@@ -77,6 +79,19 @@ class ReasoningBaseResult(BaseModel):
     confidence: ConfidenceLevel
     evidence_ids: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_registered_collections(cls, value: Any) -> Any:
+        return normalize_contract_payload(value, cls.__name__)
+
+
+class ValidationPolicy(BaseModel):
+    """A concrete validation policy; secondary policies may be absent when unjustified."""
+
+    model_config = ConfigDict(extra="allow")
+
+    method: str = Field(min_length=1)
+
 
 class ValidationResult(ReasoningBaseResult):
     recommended_cv: str
@@ -84,12 +99,11 @@ class ValidationResult(ReasoningBaseResult):
     likely_split: str
     failure_modes: list[str] = Field(default_factory=list)
     reasoning: str
-    primary_validation: dict[str, Any] = Field(default_factory=dict)
-    secondary_validation: dict[str, Any] = Field(default_factory=dict)
+    primary_validation: ValidationPolicy
+    secondary_validation: ValidationPolicy | None = None
     do_not_use: list[str] = Field(default_factory=list)
-    policy_enforced: bool = False
+    policy_enforced: StrictBool = False
     policy_notes: list[str] = Field(default_factory=list)
-
 
 class LeakageRiskResult(ReasoningBaseResult):
     risk_level: ConfidenceLevel
@@ -99,9 +113,9 @@ class LeakageRiskResult(ReasoningBaseResult):
 
 class MetricResult(ReasoningBaseResult):
     metric_explanation: str
-    needs_calibration: bool
-    rank_averaging_useful: bool
-    threshold_search_needed: bool
+    needs_calibration: StrictBool
+    rank_averaging_useful: StrictBool
+    threshold_search_needed: StrictBool
     surrogate_loss_suggestion: str
 
 
@@ -113,6 +127,7 @@ class LeaderboardAuditResult(ReasoningBaseResult):
 
 
 class ExperimentItem(BaseModel):
+    experiment_id: str | None = None
     priority: PriorityLevel
     experiment: str
     why: str
@@ -121,10 +136,17 @@ class ExperimentItem(BaseModel):
     risk: str
     evidence_ids: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_registered_collections(cls, value: Any) -> Any:
+        return normalize_contract_payload(value, cls.__name__)
+
 
 class ReviewResult(ReasoningBaseResult):
     confidence: ConfidenceLevel = "medium"
     unsupported_claims: list[str] = Field(default_factory=list)
     too_generic: list[str] = Field(default_factory=list)
     unnecessary_experiments: list[str] = Field(default_factory=list)
+    approved_experiment_ids: list[str] = Field(default_factory=list)
+    rejected_experiment_ids: list[str] = Field(default_factory=list)
     revised_sections: dict[str, Any] = Field(default_factory=dict)

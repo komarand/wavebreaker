@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
 from pydantic import BaseModel
 
 from kaggle_researcher.reasoning.common import (
+    ReasoningResponseValidationError,
     SYSTEM_RULES,
     call_reasoning_json,
     format_retrieved_documents,
@@ -99,3 +101,32 @@ def test_call_reasoning_json_sends_rules_and_payload_and_validates_model() -> No
     assert "Module-specific rules." in client.kwargs["system_prompt"]
     assert json.loads(client.kwargs["user_prompt"]) == {"retrieved_documents": "ID: doc-1"}
     assert client.kwargs["timeout"] == 120
+
+
+def test_call_reasoning_json_repairs_once_then_reports_structured_error() -> None:
+    class ResultModel(BaseModel):
+        answer: str
+
+    class SequentialClient:
+        def __init__(self, responses: list[dict[str, str]]) -> None:
+            self.responses = responses
+            self.calls = 0
+
+        async def chat_json(self, **kwargs):
+            response = self.responses[self.calls]
+            self.calls += 1
+            return response
+
+    repaired = asyncio.run(call_reasoning_json(
+        client=SequentialClient([{}, {"answer": "fixed"}]),
+        model="reasoning-model", system_prompt="rules", user_payload={}, result_model=ResultModel, stage="example",
+    ))
+    assert repaired.answer == "fixed"
+
+    with pytest.raises(ReasoningResponseValidationError) as exc_info:
+        asyncio.run(call_reasoning_json(
+            client=SequentialClient([{}, {}]),
+            model="reasoning-model", system_prompt="rules", user_payload={}, result_model=ResultModel, stage="example",
+        ))
+    assert exc_info.value.stage == "example"
+    assert exc_info.value.validation_errors[0]["loc"] == ("answer",)

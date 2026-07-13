@@ -9,6 +9,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field, StringConstraints, ValidationError, model_validator
 
 from kaggle_researcher.clients.deepseek_client import DeepSeekClient
+from kaggle_researcher.contracts.normalization import normalize_contract_payload
 from kaggle_researcher.eda.schemas import EdaEvidencePack, ResearchHypotheses
 from kaggle_researcher.schemas import PlanData, RetrievedDocument
 
@@ -69,6 +70,7 @@ class FinalStrategyAction(BaseModel):
 
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
     related_hypothesis_ids: list[NonEmptyString] = Field(default_factory=list)
+    experiment_ids: list[NonEmptyString] = Field(default_factory=list)
 
     source_claim: NonEmptyString | None = None
     source_refs: list[NonEmptyString] = Field(default_factory=list)
@@ -78,6 +80,11 @@ class FinalStrategyAction(BaseModel):
     confidence: Confidence = "medium"
     evidence_origin: EvidenceOrigin = "Hypothesis-to-test"
     limitations: list[NonEmptyString] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_registered_collections(cls, value: Any) -> Any:
+        return normalize_contract_payload(value, cls.__name__)
 
     @model_validator(mode="after")
     def _require_strategy_links(self) -> "FinalStrategyAction":
@@ -97,6 +104,11 @@ class FinalStrategySection(BaseModel):
     actions: list[FinalStrategyAction] = Field(default_factory=list)
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
     related_hypothesis_ids: list[NonEmptyString] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_registered_collections(cls, value: Any) -> Any:
+        return normalize_contract_payload(value, cls.__name__)
 
     @model_validator(mode="after")
     def _require_action_or_evidence(self) -> "FinalStrategySection":
@@ -121,6 +133,11 @@ class FinalStrategyResult(BaseModel):
     hypothesis_to_eda_links: list[dict[str, Any]] = Field(default_factory=list)
     limitations: list[NonEmptyString] = Field(default_factory=list)
     models_used: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_registered_collections(cls, value: Any) -> Any:
+        return normalize_contract_payload(value, cls.__name__)
 
     @model_validator(mode="after")
     def _require_actions(self) -> "FinalStrategyResult":
@@ -172,7 +189,33 @@ async def synthesize_final_strategy(
         ],
     )
     _enforce_primary_validation(result, eda_evidence_pack)
+    _validate_final_experiment_references(result, reasoning_outputs)
     return result
+
+
+def _validate_final_experiment_references(
+    result: FinalStrategyResult,
+    reasoning_outputs: dict[str, Any],
+) -> None:
+    experiments = reasoning_outputs.get("experiments") or []
+    known_ids = {
+        item.get("experiment_id")
+        for item in experiments
+        if isinstance(item, dict) and item.get("experiment_id")
+    }
+    review = reasoning_outputs.get("review") or {}
+    rejected_ids = set(review.get("rejected_experiment_ids") or []) if isinstance(review, dict) else set()
+    referenced = {
+        experiment_id
+        for action in _all_actions(result)
+        for experiment_id in action.experiment_ids
+    }
+    unknown = sorted(referenced - known_ids)
+    rejected = sorted(referenced & rejected_ids)
+    if unknown:
+        raise ValueError(f"FinalStrategyResult references unknown experiment_ids: {unknown}")
+    if rejected:
+        raise ValueError(f"FinalStrategyResult restores reviewer-rejected experiment_ids: {rejected}")
 
 
 FINAL_SYNTHESIZER_SYSTEM_PROMPT = (
@@ -275,7 +318,10 @@ def _eda_must_follow_payload(eda_evidence_pack: EdaEvidencePack) -> dict[str, An
             "sample_submission_table": schema.get("sample_submission_table"),
             "global_roles": schema.get("global_roles") or {},
         },
-        "primary_validation": validation.get("primary_validation") or {},
+        "recommended_validation_candidate": validation.get("recommended_validation_candidate") or validation.get("primary_validation") or {},
+        # Temporary input-adapter alias for older prompts; downstream code must
+        # treat it as evidence, not as the final recommendation.
+        "primary_validation": validation.get("recommended_validation_candidate") or validation.get("primary_validation") or {},
         "metric_evidence": eda_evidence_pack.metric_evidence,
         "leakage_warnings": [
             item
@@ -288,11 +334,13 @@ def _eda_must_follow_payload(eda_evidence_pack: EdaEvidencePack) -> dict[str, An
             if item.get("status") == "unsafe" or item.get("leakage_risk") == "high"
         ],
         "drift_severity": drift.get("feature_drift_severity") or drift.get("severity"),
-        "eda_strategy_hints": eda_evidence_pack.eda_strategy_hints,
-        "recommended_next_actions": [
-            item.model_dump(mode="json")
-            for item in eda_evidence_pack.recommended_next_actions
-        ],
+        "eda_implications": eda_evidence_pack.eda_implications,
+        "eda_local_risks": [item.model_dump(mode="json") for item in eda_evidence_pack.eda_risks],
+        "safety_constraints": eda_evidence_pack.safety_constraints,
+        "validation_requirements": eda_evidence_pack.validation_requirements,
+        "testable_hypotheses": eda_evidence_pack.testable_hypotheses,
+        "source_claim_validation": eda_evidence_pack.source_claim_validation,
+        "evidence_origins": eda_evidence_pack.evidence_origins,
     }
 
 

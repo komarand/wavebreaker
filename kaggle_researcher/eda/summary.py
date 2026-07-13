@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from kaggle_researcher.eda.modules.recommendations import dedupe_recommended_next_actions
 from kaggle_researcher.eda.schemas import EdaEvidencePack
 
 
@@ -23,15 +22,19 @@ def build_eda_summary(pack: EdaEvidencePack) -> str:
         _baseline_section(pack),
         _baseline_ablations_section(pack),
         _interaction_diagnostics_section(pack),
-        _source_claim_validation_section(pack),
+        _visual_diagnostics_section(pack),
+        _slice_diagnostics_section(pack),
         _feature_probes_section(pack),
         _feature_diagnostics_section(pack),
         _risk_register_section(pack),
         _strategy_hints_section(pack),
         _hypothesis_results_section(pack),
-        _recommended_next_actions_section(pack),
+        _safety_constraints_section(pack),
+        _validation_requirements_section(pack),
+        _testable_hypotheses_section(pack),
         _warnings_section(pack),
         _limitations_section(pack),
+        "These findings are diagnostic evidence for the downstream reasoning and strategy layer; they are not the final competition strategy.",
     ]
     return "\n\n".join(section for section in sections if section).rstrip() + "\n"
 
@@ -337,31 +340,29 @@ def _feature_diagnostics_section(pack: EdaEvidencePack) -> str:
 
 
 def _strategy_hints_section(pack: EdaEvidencePack) -> str:
-    hints = _as_dict(pack.eda_strategy_hints)
-    lines = ["## Strategy hints"]
-    if not hints:
+    implications = [_as_dict(item) for item in pack.eda_implications]
+    lines = ["## EDA implications (Strategy hints compatibility)"]
+    if not implications and pack.eda_strategy_hints:
+        for category, items in pack.eda_strategy_hints.items():
+            for item in items:
+                payload = _as_dict(item)
+                lines.append(f"- {category}: `{payload.get('priority', 'P?')}: {payload.get('action')}`{_refs(payload.get('evidence_refs', []))}")
+        return _join(lines)
+    if not implications:
         lines.append("- None recorded.")
         return _join(lines)
-    for category, items in hints.items():
-        category_items = [_as_dict(item) for item in items]
-        if not category_items:
-            continue
-        actions = [
-            f"{item.get('priority', 'P?')}: {item.get('action')}"
-            for item in category_items[:3]
-        ]
-        lines.append(f"- {category}: `{_csv(actions)}`")
-    if len(lines) == 1:
-        lines.append("- None recorded.")
+    for item in implications:
+        lines.append(f"- `{item.get('priority_signal', 'informational')}`: {item.get('implication')} Finding: {item.get('finding')}{_refs(item.get('evidence_refs', []))}")
     return _join(lines)
 
 
 def _risk_register_section(pack: EdaEvidencePack) -> str:
+    risk_source = pack.eda_risks or pack.eda_risk_register
     risks = [
         item.model_dump(mode="json") if hasattr(item, "model_dump") else _as_dict(item)
-        for item in pack.eda_risk_register
+        for item in risk_source
     ]
-    lines = ["## Risk register"]
+    lines = ["## Risk register (EDA-local risks)"]
     if not risks:
         lines.append("- Risks: `0`")
         return _join(lines)
@@ -441,6 +442,43 @@ def _baseline_section(pack: EdaEvidencePack) -> str:
         limitations = list(preprocessing.get("limitations") or evidence.get("limitations") or [])
         if limitations:
             lines.append(f"- Limitations: `{_csv(limitations[:3])}`")
+    return _join(lines)
+
+
+def _slice_diagnostics_section(pack: EdaEvidencePack) -> str:
+    evidence = _as_dict(pack.slice_diagnostics)
+    lines = ["## Slice diagnostics"]
+    if not evidence:
+        lines.append(f"- {_module_absence(pack, 'slice_diagnostics')}")
+        return _join(lines)
+    lines.append(f"- Status: `{evidence.get('status', 'unknown')}`")
+    if evidence.get("status") != "completed":
+        lines.append(f"- Reason: `{evidence.get('reason', 'not available')}`")
+        return _join(lines)
+    summary = _as_dict(evidence.get("summary"))
+    lines.append(f"- Fold-safe OOF slices: `{summary.get('slice_count', 0)}` across `{summary.get('total_rows', 0)}` rows")
+    return _join(lines)
+
+
+def _visual_diagnostics_section(pack: EdaEvidencePack) -> str:
+    evidence = _as_dict(pack.visual_diagnostics)
+    lines = ["## Visual diagnostics"]
+    if not evidence:
+        lines.append(f"- {_module_absence(pack, 'visual_diagnostics')}")
+        return _join(lines)
+    lines.append(f"- Status: `{evidence.get('status', 'unknown')}`")
+    if evidence.get("status") != "completed":
+        if evidence.get("reason") or evidence.get("error_message"):
+            lines.append(f"- Reason: `{evidence.get('reason') or evidence.get('error_message')}`")
+        return _join(lines)
+    lines.append(f"- Generated plots: `{len(evidence.get('generated_plots', []))}`")
+    if _as_dict(evidence.get("summary_dashboard")).get("status") == "generated":
+        lines.append(f"- Dashboard: `{_as_dict(evidence['summary_dashboard']).get('artifact_path')}`")
+    main = [_as_dict(item) for item in evidence.get("generated_plots", []) if _as_dict(item).get("plot_type") != "summary_dashboard"][:4]
+    if main:
+        lines.append(f"- Main artifacts: `{_csv([item.get('artifact_path') for item in main])}`")
+    if evidence.get("manifest_path"):
+        lines.append(f"- Plot manifest: `{evidence['manifest_path']}`")
     return _join(lines)
 
 
@@ -648,18 +686,39 @@ def _hypothesis_results_section(pack: EdaEvidencePack) -> str:
     return _join(lines)
 
 
-def _recommended_next_actions_section(pack: EdaEvidencePack) -> str:
-    actions = dedupe_recommended_next_actions(list(pack.recommended_next_actions))
-    lines = ["## Recommended next actions"]
-    if not actions:
+def _safety_constraints_section(pack: EdaEvidencePack) -> str:
+    rows = [_as_dict(item) for item in pack.safety_constraints][:8]
+    lines = ["## Safety constraints"]
+    if not rows:
         lines.append("- None recorded.")
         return _join(lines)
+    for item in rows:
+        lines.append(f"- [{item.get('severity', 'mandatory')}] {item.get('rule')}{_refs(item.get('evidence_refs', []))}")
+    return _join(lines)
 
-    for action in actions:
-        lines.append(
-            f"- `{action.priority}`: {action.action} "
-            f"Why: {action.why}{_refs(action.evidence_refs)}"
-        )
+
+def _validation_requirements_section(pack: EdaEvidencePack) -> str:
+    rows = [_as_dict(item) for item in pack.validation_requirements][:6]
+    lines = ["## Validation requirements"]
+    if not rows:
+        lines.append("- None recorded.")
+        return _join(lines)
+    for item in rows:
+        condition = f" Condition: {item.get('condition')}" if item.get("condition") else ""
+        lines.append(f"- [{item.get('status', 'conditional')}] {item.get('rule')}{condition}{_refs(item.get('evidence_refs', []))}")
+    return _join(lines)
+
+
+def _testable_hypotheses_section(pack: EdaEvidencePack) -> str:
+    rows = [_as_dict(item) for item in pack.testable_hypotheses][:10]
+    lines = ["## Testable follow-up hypotheses"]
+    if not rows:
+        lines.append("- None recorded.")
+        return _join(lines)
+    for item in rows:
+        lines.append(f"- [{item.get('priority_signal', 'optional')}] {item.get('statement')}")
+        lines.append(f"  Evidence: {_csv(item.get('evidence_refs', []))}")
+        lines.append(f"  Controls: {_csv(item.get('required_controls', []))}")
     return _join(lines)
 
 

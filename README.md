@@ -20,6 +20,50 @@ pip install -r requirements.txt
 python -m kaggle_researcher.main --help
 ```
 
+## Full Run
+
+The canonical end-to-end command is `full-run`. It creates one manifest-backed
+parent run, passes Scout artifacts into EDA and reasoning automatically, and
+writes stable outputs under `research/`, `eda/`, `reasoning/`, and `final/`.
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_researcher.main full-run `
+  --competition-id titanic `
+  --competition-url "https://www.kaggle.com/competitions/titanic" `
+  --competition-description "Binary classification of passenger survival. Metric: accuracy." `
+  --local-dataset-path "E:\wavebreaker\data\kaggle_datasets\titanic" `
+  --no-download-dataset
+```
+
+Use `--profile minimal|standard|full` to choose the EDA profile; `standard` is
+the default. Resume a verified run with `--resume-run-dir <run-directory>` or
+rerun a stage and its downstream work with repeated `--force-rerun-stage`.
+
+### Research Hypotheses Contract
+
+`research_hypotheses.json` uses schema version `1.0`. Each hypothesis has a
+canonical `hypothesis_id`, one of the documented EDA categories (`schema`,
+`relationship`, `feature`, `notebook`, and related categories), and
+`confidence_before_eda`. Scout validates and atomically writes this contract
+before EDA starts. Older unversioned artifacts are migrated deterministically
+for known field and category aliases, with a preserved `.legacy.json` backup
+inside a resumed full run. Unknown categories and future schema versions fail
+clearly instead of being guessed.
+
+`eda_task_plan.json` uses the same versioned boundary. Tasks use `task_id`
+(not `id`), and each `hypothesis_index` value is an array of task IDs so a
+hypothesis can safely map to multiple checks. The full-run gate validates both
+artifacts together before EDA starts, migrating supported legacy task plans and
+preserving an `eda_task_plan.legacy.json` backup when it does.
+
+### Reasoning Result Nulls
+
+Reasoning artifacts preserve meaningful optional absence. In particular,
+`ValidationResult.secondary_validation: null` means no distinct secondary
+validation policy is justified. `primary_validation` remains required and must
+contain a policy method; empty objects are not treated as a substitute for
+either policy. Plural fields such as failure modes and policy notes use `[]`.
+
 Embeddings are computed inside Python with SentenceTransformers. The default embedding model is `Qwen/Qwen3-Embedding-0.6B`, with `EMBED_DIM=1024` and `MAX_EMBED_BATCH_SIZE=8`.
 
 Current status: bootstrap only; external APIs, retrieval, embeddings, and report generation are not implemented yet.

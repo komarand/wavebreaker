@@ -8,6 +8,15 @@ from pathlib import Path
 from typing import Any
 
 from kaggle_researcher.eda.config import load_eda_config
+from kaggle_researcher.contracts.research_hypotheses import load_research_hypotheses
+from kaggle_researcher.contracts.eda_task_plan import load_eda_task_plan
+from kaggle_researcher.eda.boundary import (
+    DEPRECATED_OUTPUTS,
+    MODULE_CLASSIFICATION,
+    build_eda_implications,
+    qualify_validation_evidence,
+    stage_status,
+)
 from kaggle_researcher.eda.io.artifact_writer import ArtifactWriter
 from kaggle_researcher.eda.io.dataset_reader import DatasetReader
 from kaggle_researcher.eda.io.dataset_resolver import resolve_dataset
@@ -26,10 +35,18 @@ from kaggle_researcher.eda.modules.recommendations import build_recommended_next
 from kaggle_researcher.eda.modules.relationship_inferer import infer_relationships
 from kaggle_researcher.eda.modules.risk_register import build_eda_risk_register, risk_summary
 from kaggle_researcher.eda.modules.schema_inferer import infer_schema
+from kaggle_researcher.eda.modules.slice_diagnostics import run_slice_diagnostics
 from kaggle_researcher.eda.modules.source_claim_validation import collect_source_claims, validate_source_claims
 from kaggle_researcher.eda.modules.strategy_hints import build_eda_strategy_hints
 from kaggle_researcher.eda.modules.table_profiler import profile_tables
 from kaggle_researcher.eda.modules.target_diagnostics import diagnose_target
+from kaggle_researcher.eda.modules.testable_hypotheses import (
+    build_safety_constraints,
+    build_testable_hypotheses,
+    build_validation_requirements,
+    validate_testable_hypotheses_output,
+)
+from kaggle_researcher.eda.modules.visual_diagnostics import render_visual_diagnostics
 from kaggle_researcher.eda.modules.validation_analyzer import analyze_validation
 from kaggle_researcher.eda.presets import get_preset
 from kaggle_researcher.eda.schemas import (
@@ -50,6 +67,8 @@ P1_PLACEHOLDERS = {
     "baseline_ablation_evidence": {},
     "interaction_diagnostics": {},
     "source_claim_validation": {},
+    "visual_diagnostics": {},
+    "slice_diagnostics": {},
     "feature_probe_evidence": [],
     "notebook_static_analysis": {},
 }
@@ -72,8 +91,17 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
     warnings: list[str] = []
     limitations: list[str] = []
 
-    hypotheses = _load_model(config.hypotheses_path, ResearchHypotheses)
-    task_plan = _load_model(config.task_plan_path, EdaTaskPlan)
+    hypotheses, hypothesis_migration = load_research_hypotheses(config.hypotheses_path)
+    if hypothesis_migration.migrated:
+        warnings.append("Loaded legacy ResearchHypotheses payload and migrated it to schema 1.0.")
+        warnings.extend(hypothesis_migration.warnings)
+    task_plan, task_plan_migration = load_eda_task_plan(
+        config.task_plan_path,
+        hypotheses=hypotheses,
+    )
+    if task_plan_migration.migrated:
+        warnings.append("Loaded legacy EdaTaskPlan payload and migrated it to schema 1.0.")
+        warnings.extend(task_plan_migration.warnings)
     if not competition_ids_match(hypotheses, task_plan):
         raise ValueError(
             "research_hypotheses.json and eda_task_plan.json target different competitions."
@@ -99,6 +127,8 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
     target_diagnostics: dict[str, Any] = {}
     interaction_diagnostics: dict[str, Any] = {}
     source_claim_validation: dict[str, Any] = {}
+    visual_diagnostics: dict[str, Any] = {}
+    slice_diagnostics: dict[str, Any] = {}
     eda_strategy_hints: dict[str, list[dict[str, Any]]] = {}
     p1_evidence: dict[str, Any] = {
         key: _copy_placeholder(value) for key, value in P1_PLACEHOLDERS.items()
@@ -124,6 +154,8 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
             target_diagnostics=target_diagnostics,
             interaction_diagnostics=interaction_diagnostics,
             source_claim_validation=source_claim_validation,
+            visual_diagnostics=visual_diagnostics,
+            slice_diagnostics=slice_diagnostics,
             eda_strategy_hints=eda_strategy_hints,
             p1_evidence=p1_evidence,
             module_statuses=module_statuses,
@@ -288,6 +320,14 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
     p1_evidence["baseline_ablation_evidence"] = baseline_ablation_evidence
     writer.write_module_statuses(module_status_details)
 
+    slice_diagnostics = _run_slice_diagnostics_module(
+        config=config, task_plan=task_plan, writer=writer,
+        baseline_evidence=p1_evidence.get("baseline_evidence"),
+        module_statuses=module_statuses, module_status_details=module_status_details, warnings=warnings,
+    )
+    p1_evidence["slice_diagnostics"] = slice_diagnostics
+    writer.write_module_statuses(module_status_details)
+
     try:
         target_diagnostics = _run_blocking_module(
             "target_diagnostics",
@@ -351,6 +391,7 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
         "target_diagnostics": target_diagnostics,
         "interaction_diagnostics": interaction_diagnostics,
         "source_claim_validation": source_claim_validation,
+        "slice_diagnostics": slice_diagnostics,
         **p1_evidence,
     }
     eda_risk_register = build_eda_risk_register(
@@ -366,12 +407,19 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
         baseline_evidence=p1_evidence.get("baseline_evidence"),
         baseline_ablation_evidence=p1_evidence.get("baseline_ablation_evidence"),
         interaction_diagnostics=interaction_diagnostics,
-        source_claim_validation=source_claim_validation,
-        notebook_static_analysis=p1_evidence.get("notebook_static_analysis"),
+        source_claim_validation=None,
+        notebook_static_analysis=None,
     )
     evidence_pack_partial["eda_risk_register"] = eda_risk_register
     evidence_pack_partial["risk_summary"] = risk_summary(eda_risk_register)
     writer.write_json("eda_risk_register.json", eda_risk_register)
+    visual_diagnostics = _run_visual_diagnostics_module(
+        config=config, writer=writer, evidence_pack=evidence_pack_partial, reader=reader,
+        module_statuses=module_statuses, module_status_details=module_status_details, warnings=warnings,
+    )
+    p1_evidence["visual_diagnostics"] = visual_diagnostics
+    evidence_pack_partial["visual_diagnostics"] = visual_diagnostics
+    writer.write_module_statuses(module_status_details)
     eda_strategy_hints = build_eda_strategy_hints(evidence_pack_partial)
     evidence_pack_partial["eda_strategy_hints"] = eda_strategy_hints
     writer.write_json("eda_strategy_hints.json", eda_strategy_hints)
@@ -387,6 +435,26 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
         hypothesis_results,
     )
     writer.write_json("recommended_next_actions.json", recommended_next_actions)
+    eda_implications = build_eda_implications(eda_strategy_hints)
+    safety_constraints = build_safety_constraints(evidence_pack_partial)
+    validation_requirements = build_validation_requirements(evidence_pack_partial)
+    testable_hypotheses = build_testable_hypotheses(evidence_pack=evidence_pack_partial)
+    # Deprecated compatibility projection: no independent experiment generator.
+    experiment_candidates = testable_hypotheses
+    contract_errors = validate_testable_hypotheses_output({
+        "testable_hypotheses": testable_hypotheses,
+        "experiment_candidates": experiment_candidates,
+    })
+    if contract_errors:
+        raise ValueError("Invalid testable hypotheses output: " + "; ".join(contract_errors))
+    # Compatibility fields below are projections of these canonical values; they
+    # must never acquire an independent generation path.
+    writer.write_json("eda_implications.json", eda_implications)
+    writer.write_json("experiment_candidates.json", experiment_candidates)
+    writer.write_json("safety_constraints.json", safety_constraints)
+    writer.write_json("validation_requirements.json", validation_requirements)
+    writer.write_json("testable_hypotheses.json", testable_hypotheses)
+    writer.write_json("eda_risks.json", eda_risk_register)
 
     created_at = datetime.now().astimezone().isoformat()
     evidence_pack = EdaEvidencePack(
@@ -401,7 +469,7 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
         inferred_schema=inferred_schema.model_dump(mode="json"),
         table_profiles=[profile.model_dump(mode="json") for profile in table_profiles],
         metric_evidence=metric_evidence.model_dump(mode="json"),
-        validation_evidence=validation_evidence.model_dump(mode="json"),
+        validation_evidence=qualify_validation_evidence(validation_evidence.model_dump(mode="json")),
         leakage_evidence=[item.model_dump(mode="json") for item in leakage_evidence],
         relationship_evidence=p1_evidence["relationship_evidence"],
         drift_evidence=p1_evidence["drift_evidence"],
@@ -412,6 +480,36 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
         target_diagnostics=target_diagnostics,
         interaction_diagnostics=interaction_diagnostics,
         source_claim_validation=source_claim_validation,
+        visual_diagnostics=visual_diagnostics,
+        slice_diagnostics=slice_diagnostics,
+        eda_risks=eda_risk_register,
+        eda_implications=eda_implications,
+        strategy_hints=eda_implications,
+        safety_constraints=safety_constraints,
+        validation_requirements=validation_requirements,
+        testable_hypotheses=testable_hypotheses,
+        experiment_candidates=experiment_candidates,
+        module_classification=MODULE_CLASSIFICATION,
+        stage_status=stage_status(module_statuses),
+        evidence_origins={
+            "dataset": "dataset_measurement",
+            "schema_evidence": "dataset_measurement",
+            "metric_evidence": "dataset_measurement",
+            "validation_evidence": "statistical_diagnostic",
+            "baseline_evidence": "fold_safe_model_diagnostic",
+            "baseline_ablation_evidence": "fold_safe_model_diagnostic",
+            "interaction_diagnostics": "statistical_diagnostic",
+            "slice_diagnostics": "fold_safe_model_diagnostic",
+            "visual_diagnostics": "dataset_measurement",
+            "eda_risks": "reasoning_inference",
+            "eda_implications": "reasoning_inference",
+            "safety_constraints": "dataset_measurement",
+            "validation_requirements": "statistical_diagnostic",
+            "testable_hypotheses": "reasoning_inference",
+            "experiment_candidates": "reasoning_inference",
+            "source_claim_validation": "source_claim",
+        },
+        deprecated_outputs=DEPRECATED_OUTPUTS,
         eda_risk_register=eda_risk_register,
         risk_summary=risk_summary(eda_risk_register),
         eda_strategy_hints=eda_strategy_hints,
@@ -621,6 +719,8 @@ def _write_partial_evidence_pack(
     target_diagnostics: dict[str, Any],
     interaction_diagnostics: dict[str, Any],
     source_claim_validation: dict[str, Any],
+    visual_diagnostics: dict[str, Any],
+    slice_diagnostics: dict[str, Any],
     eda_strategy_hints: dict[str, list[dict[str, Any]]],
     p1_evidence: dict[str, Any],
     module_statuses: dict[str, str],
@@ -641,7 +741,7 @@ def _write_partial_evidence_pack(
         inferred_schema=_jsonable_dict(inferred_schema),
         table_profiles=_jsonable_list(table_profiles),
         metric_evidence=_jsonable_dict(metric_evidence),
-        validation_evidence=_jsonable_dict(validation_evidence),
+        validation_evidence=qualify_validation_evidence(_jsonable_dict(validation_evidence)),
         leakage_evidence=_jsonable_list(leakage_evidence),
         relationship_evidence=_jsonable_dict(p1_evidence.get("relationship_evidence")),
         drift_evidence=_jsonable_dict(p1_evidence.get("drift_evidence")),
@@ -652,6 +752,17 @@ def _write_partial_evidence_pack(
         target_diagnostics=_jsonable_dict(target_diagnostics),
         interaction_diagnostics=_jsonable_dict(interaction_diagnostics),
         source_claim_validation=_jsonable_dict(source_claim_validation),
+        visual_diagnostics=_jsonable_dict(visual_diagnostics),
+        slice_diagnostics=_jsonable_dict(slice_diagnostics),
+        module_classification=MODULE_CLASSIFICATION,
+        stage_status=stage_status(module_statuses),
+        deprecated_outputs=DEPRECATED_OUTPUTS,
+        evidence_origins={
+            "dataset": "dataset_measurement",
+            "validation_evidence": "statistical_diagnostic",
+            "baseline_evidence": "fold_safe_model_diagnostic",
+            "source_claim_validation": "source_claim",
+        },
         eda_strategy_hints=_jsonable_dict(eda_strategy_hints),
         notebook_static_analysis=_jsonable_dict(p1_evidence.get("notebook_static_analysis")),
         hypothesis_results=[],
@@ -987,6 +1098,56 @@ def _run_source_claim_validation_module(
         failed = _failed_p1_payload(module_name, exc)
         _record_module_status(module_name, "failed", module_statuses=module_statuses, module_status_details=module_status_details, legacy_status="failed", started_at=started_at, started_perf=started_perf, error_message=_sanitize_error(exc))
         writer.write_json("source_claim_validation.json", failed); warnings.append(f"{module_name} failed: {_sanitize_error(exc)}")
+        return failed
+
+
+def _run_visual_diagnostics_module(
+    *, config: EdaRunConfig, writer: ArtifactWriter, evidence_pack: dict[str, Any], reader: DatasetReader,
+    module_statuses: dict[str, str], module_status_details: dict[str, dict[str, Any]], warnings: list[str],
+) -> dict[str, Any]:
+    module_name = "visual_diagnostics"
+    if not config.enable_visual_diagnostics:
+        skipped = _skipped_p1_payload(module_name, "Visual diagnostics require enable_visual_diagnostics=true.")
+        _record_module_status(module_name, "skipped", module_statuses=module_statuses, module_status_details=module_status_details, legacy_status="skipped")
+        writer.write_json("visual_diagnostics.json", skipped)
+        return skipped
+    started_perf, started_at = time.perf_counter(), _now_iso()
+    try:
+        result = render_visual_diagnostics(evidence_pack, writer.run_dir or Path("."), reader, max_total_plots=30, random_state=config.random_seed)
+        legacy_status = _status_from_p1_result(result)
+        _record_module_status(module_name, _detail_status_from_legacy(legacy_status), module_statuses=module_statuses, module_status_details=module_status_details, legacy_status=legacy_status, started_at=started_at, started_perf=started_perf)
+        writer.write_json("visual_diagnostics.json", result)
+        return result
+    except Exception as exc:
+        failed = _failed_p1_payload(module_name, exc)
+        _record_module_status(module_name, "failed", module_statuses=module_statuses, module_status_details=module_status_details, legacy_status="failed", started_at=started_at, started_perf=started_perf, error_message=_sanitize_error(exc))
+        writer.write_json("visual_diagnostics.json", failed); warnings.append(f"{module_name} failed: {_sanitize_error(exc)}")
+        return failed
+
+
+def _run_slice_diagnostics_module(
+    *, config: EdaRunConfig, task_plan: EdaTaskPlan, writer: ArtifactWriter, baseline_evidence: dict[str, Any] | None,
+    module_statuses: dict[str, str], module_status_details: dict[str, dict[str, Any]], warnings: list[str],
+) -> dict[str, Any]:
+    module_name = "slice_diagnostics"
+    explicit = module_name in _normalised_modules(config.modules or []) or any(task.module == module_name for task in task_plan.eda_tasks)
+    enabled = bool(config.enable_slice_diagnostics or config.enable_p1_modules or explicit)
+    if module_name in _normalised_modules(config.skip_modules) or not enabled:
+        skipped = _skipped_p1_payload(module_name, "Slice diagnostics require enable_slice_diagnostics=true.")
+        _record_module_status(module_name, "skipped", module_statuses=module_statuses, module_status_details=module_status_details, legacy_status="skipped")
+        writer.write_json("slice_diagnostics.json", skipped)
+        return skipped
+    started_perf, started_at = time.perf_counter(), _now_iso()
+    try:
+        result = run_slice_diagnostics(baseline_evidence)
+        legacy_status = _status_from_p1_result(result)
+        _record_module_status(module_name, _detail_status_from_legacy(legacy_status), module_statuses=module_statuses, module_status_details=module_status_details, legacy_status=legacy_status, started_at=started_at, started_perf=started_perf)
+        writer.write_json("slice_diagnostics.json", result)
+        return result
+    except Exception as exc:
+        failed = _failed_p1_payload(module_name, exc)
+        _record_module_status(module_name, "failed", module_statuses=module_statuses, module_status_details=module_status_details, legacy_status="failed", started_at=started_at, started_perf=started_perf, error_message=_sanitize_error(exc))
+        writer.write_json("slice_diagnostics.json", failed); warnings.append(f"{module_name} failed: {_sanitize_error(exc)}")
         return failed
 
 

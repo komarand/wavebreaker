@@ -6,7 +6,11 @@ from typing import Any
 from pydantic import ValidationError
 
 from kaggle_researcher.clients.deepseek_client import DeepSeekClient
-from kaggle_researcher.eda.schemas import EdaTaskPlan, ResearchHypotheses
+from kaggle_researcher.contracts.research_hypotheses import (
+    ALLOWED_HYPOTHESIS_CATEGORIES,
+    ResearchHypotheses,
+)
+from kaggle_researcher.contracts.eda_task_plan import EdaTaskPlan
 from kaggle_researcher.research_scout.prompts import (
     RESEARCH_SCOUT_OUTPUT_INSTRUCTIONS,
     RESEARCH_SCOUT_SYSTEM_PROMPT,
@@ -45,6 +49,7 @@ async def run_research_scout(
 ) -> ResearchScoutOutput:
     """Generate generic EDA hypotheses from source evidence, with deterministic fallback."""
 
+    raw: Any = {}
     try:
         raw = await client.chat_json(
             model=model,
@@ -65,6 +70,34 @@ async def run_research_scout(
             plan_data=plan_data,
             model=model,
         )
+        _validate_against_eda_schemas(output)
+    except (ValidationError, ValueError) as exc:
+        try:
+            repaired = await _repair_scout_payload_once(
+                client=client,
+                model=model,
+                invalid_payload=raw,
+                validation_error=exc,
+            )
+            output = _output_from_payload(
+                repaired,
+                competition_id=competition_id,
+                competition_url=competition_url,
+                competition_desc=competition_desc,
+                plan_data=plan_data,
+                model=model,
+            )
+            _validate_against_eda_schemas(output)
+        except Exception as repair_exc:
+            output = _fallback_output(
+                competition_id=competition_id,
+                competition_url=competition_url,
+                competition_desc=competition_desc,
+                plan_data=plan_data,
+                retrieved_documents=retrieved_documents,
+                model=model,
+                reason=str(repair_exc),
+            )
     except Exception as exc:
         output = _fallback_output(
             competition_id=competition_id,
@@ -76,8 +109,34 @@ async def run_research_scout(
             reason=str(exc),
         )
 
-    _validate_against_eda_schemas(output)
     return output
+
+
+async def _repair_scout_payload_once(
+    *,
+    client: DeepSeekClient,
+    model: str,
+    invalid_payload: Any,
+    validation_error: Exception,
+) -> dict[str, Any]:
+    response = await client.chat_json(
+        model=model,
+        system_prompt=(
+            "Correct the existing Research Scout payload to the canonical research-to-EDA "
+            "artifact schema. Do not add hypotheses or invent hypothesis IDs. Preserve task "
+            "intent. Use hypothesis_id and task_id, never id. Every hypothesis_index value "
+            "must be an array of task IDs. Return JSON only."
+        ),
+        user_prompt=json.dumps({
+            "validation_errors": [str(validation_error)[:2000]],
+            "allowed_categories": ALLOWED_HYPOTHESIS_CATEGORIES,
+            "canonical_task_schema": EdaTaskPlan.model_json_schema(),
+            "invalid_payload": invalid_payload,
+        }, ensure_ascii=False),
+    )
+    if not isinstance(response, dict):
+        raise ValueError("Scout repair response must be a JSON object.")
+    return response
 
 
 def _build_user_prompt(
@@ -98,6 +157,16 @@ def _build_user_prompt(
         ],
         "instructions": RESEARCH_SCOUT_OUTPUT_INSTRUCTIONS,
         "required_core_hypotheses": ["schema_001", "metric_001", "val_001", "leak_001"],
+        "canonical_hypothesis_contract": {
+            "required_fields": [
+                "hypothesis_id", "category", "claim", "confidence_before_eda",
+            ],
+            "allowed_categories": ALLOWED_HYPOTHESIS_CATEGORIES,
+        },
+        "canonical_task_plan_contract": {
+            "task_fields": list(EdaTaskPlan.model_json_schema()["$defs"]["EdaTask"]["properties"]),
+            "hypothesis_index_value_type": "array of task_id strings",
+        },
         "generic_rules": [
             "Separate source facts from dataset-dependent hypotheses.",
             "Do not say EDA has already run.",
@@ -106,6 +175,9 @@ def _build_user_prompt(
             "Do not force temporal validation for ordinary tabular classification or regression.",
             "Only create temporal validation hypotheses when metric/source/description supports them.",
             "Only create group validation hypotheses when group/entity/query risk is plausible.",
+            "Use hypothesis_id, never id, and always provide confidence_before_eda.",
+            "Use relationship, feature, schema, and notebook; do not invent category aliases.",
+            "Use task_id, never id; every hypothesis_index value must be a JSON array of task IDs.",
         ],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)

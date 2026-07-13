@@ -22,6 +22,7 @@ def test_mvp_run_keeps_p1_placeholders_without_p1_flags(tmp_path: Path) -> None:
     assert payload["relationship_evidence"] == {}
     assert payload["drift_evidence"] == {}
     assert payload["interaction_diagnostics"]["status"] == "skipped"
+    assert payload["slice_diagnostics"]["status"] == "skipped"
 
 
 def test_p1_run_writes_relationship_and_drift_evidence(tmp_path: Path) -> None:
@@ -51,6 +52,8 @@ def test_baseline_does_not_run_without_enable_baseline(tmp_path: Path) -> None:
     assert result.module_statuses["baseline_ablation_runner"] == "skipped"
     assert payload["baseline_evidence"]["status"] == "skipped"
     assert payload["baseline_ablation_evidence"]["status"] == "skipped"
+    assert result.module_statuses["slice_diagnostics"] == "skipped"
+    assert payload["slice_diagnostics"]["reason"] == "missing_oof_predictions"
     assert "metric_value" not in payload["baseline_evidence"]
     assert "preprocessing_policy" not in payload["baseline_evidence"]
     assert not (result.output_dir / "artifacts" / "baseline" / "baseline_oof_predictions.csv").exists()
@@ -102,6 +105,33 @@ def test_enable_interaction_diagnostics_writes_optional_evidence(tmp_path: Path)
     assert "## Interaction diagnostics" in result.summary_path.read_text(encoding="utf-8")
 
 
+def test_enable_visual_diagnostics_writes_plot_manifest(tmp_path: Path) -> None:
+    result = asyncio.run(_run_fixture("iid_binary_tiny", tmp_path / "runs", enable_visual_diagnostics=True))
+    payload = json.loads(result.evidence_pack_path.read_text(encoding="utf-8"))
+
+    assert result.module_statuses["visual_diagnostics"] == "completed"
+    assert payload["visual_diagnostics"]["generated_plots"]
+    assert (result.output_dir / "plots_manifest.json").is_file()
+    assert "## Visual diagnostics" in result.summary_path.read_text(encoding="utf-8")
+
+
+def test_slice_diagnostics_skips_cleanly_without_baseline_oof(tmp_path: Path) -> None:
+    result = asyncio.run(_run_fixture("iid_binary_tiny", tmp_path / "runs", enable_slice_diagnostics=True))
+    payload = json.loads(result.evidence_pack_path.read_text(encoding="utf-8"))
+
+    assert result.module_statuses["slice_diagnostics"] == "skipped"
+    assert payload["slice_diagnostics"]["reason"] == "missing_oof_predictions"
+
+
+def test_slice_diagnostics_consumes_fold_safe_baseline_oof(tmp_path: Path) -> None:
+    result = asyncio.run(_run_fixture("iid_binary_tiny", tmp_path / "runs", enable_baseline=True, enable_slice_diagnostics=True))
+    payload = json.loads(result.evidence_pack_path.read_text(encoding="utf-8"))
+
+    assert result.module_statuses["slice_diagnostics"] == "completed"
+    assert payload["slice_diagnostics"]["slices"]
+    assert (result.output_dir / "slice_diagnostics.json").is_file()
+
+
 def test_p1_failure_is_recorded_and_run_continues(tmp_path: Path, monkeypatch) -> None:
     def broken_drift(*args, **kwargs):
         raise RuntimeError("synthetic drift failure")
@@ -132,6 +162,8 @@ async def _run_fixture(
     enable_baseline: bool = False,
     enable_baseline_ablations: bool = False,
     enable_interaction_diagnostics: bool = False,
+    enable_visual_diagnostics: bool = False,
+    enable_slice_diagnostics: bool = False,
     modules: list[str] | None = None,
 ):
     fixture_dir = FIXTURE_ROOT / competition_id
@@ -148,6 +180,8 @@ async def _run_fixture(
             enable_baseline=enable_baseline,
             enable_baseline_ablations=enable_baseline_ablations,
             enable_interaction_diagnostics=enable_interaction_diagnostics,
+            enable_visual_diagnostics=enable_visual_diagnostics,
+            enable_slice_diagnostics=enable_slice_diagnostics,
             modules=modules,
         )
     )

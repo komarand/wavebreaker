@@ -37,7 +37,11 @@ async def design_validation(
             "temporal: out-of-time holdout on latest periods plus rolling/expanding CV. "
             "StratifiedGroupKFold may be secondary/diagnostic only if it never trains on "
             "future periods to validate on past periods. Important claims must include "
-            "provenance labels such as kaggle, arxiv, heuristic, not_verified_on_data."
+            "provenance labels such as kaggle, arxiv, heuristic, not_verified_on_data. "
+            "secondary_validation may be null when no well-supported distinct secondary "
+            "validation design exists. Do not duplicate primary_validation merely to avoid "
+            "null. When non-null, secondary_validation must include the same required method "
+            "field as primary_validation. Example without a secondary: secondary_validation: null."
         ),
         user_payload={
             "competition_desc": competition_desc,
@@ -46,6 +50,7 @@ async def design_validation(
             "expected_schema": ValidationResult.model_json_schema(),
         },
         result_model=ValidationResult,
+        stage="validation_architect",
     )
     unknown_ids = validate_evidence_ids(result, docs)
     if unknown_ids:

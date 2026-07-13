@@ -39,6 +39,8 @@ async def review(
             "stringify structured sections. Preserve provenance fields when present. Preserve "
             "confidence fields when present. Preserve supporting_source_ids when present. "
             "Flag key claims that lack provenance."
+            " When experiment_id values are present, use only those exact IDs in "
+            "approved_experiment_ids and rejected_experiment_ids."
         ),
         user_payload={
             "draft_sections": draft_sections,
@@ -52,7 +54,34 @@ async def review(
     unknown_ids = validate_evidence_ids(result, docs)
     if unknown_ids:
         raise ValueError(f"ReviewResult contains unknown evidence_ids: {unknown_ids}")
+    _validate_experiment_decisions(result, draft_sections)
     return _normalize_review_result(result, draft_sections)
+
+
+def _validate_experiment_decisions(result: ReviewResult, draft_sections: dict[str, Any]) -> None:
+    known_ids = _collect_experiment_ids(draft_sections)
+    decisions = set(result.approved_experiment_ids) | set(result.rejected_experiment_ids)
+    unknown = sorted(decisions - known_ids)
+    if unknown:
+        raise ValueError(f"ReviewResult references unknown experiment_ids: {unknown}")
+    overlap = sorted(set(result.approved_experiment_ids) & set(result.rejected_experiment_ids))
+    if overlap:
+        raise ValueError(f"ReviewResult both approves and rejects experiment_ids: {overlap}")
+
+
+def _collect_experiment_ids(value: Any) -> set[str]:
+    if isinstance(value, dict):
+        own = value.get("experiment_id")
+        result = {own} if isinstance(own, str) and own else set()
+        for child in value.values():
+            result.update(_collect_experiment_ids(child))
+        return result
+    if isinstance(value, list):
+        result: set[str] = set()
+        for child in value:
+            result.update(_collect_experiment_ids(child))
+        return result
+    return set()
 
 
 def _normalize_review_result(result: ReviewResult, draft_sections: dict[str, Any]) -> ReviewResult:

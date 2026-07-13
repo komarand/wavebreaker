@@ -30,6 +30,7 @@ dependencies = [
     "transformers>=4.41.0",
     "sentence-transformers>=3.0.0",
     "accelerate>=0.30.0",
+    "tqdm>=4.66.0,<5.0.0",
 ]
 
 [project.optional-dependencies]
@@ -46,6 +47,10 @@ include = ["kaggle_researcher*", "kaggle_eda_engine*"]
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
+markers = [
+    "contract: deterministic producer-consumer contract and reference tests",
+    "pipeline_smoke: internal pipeline smoke tests with external boundaries mocked",
+]
 
 [tool.ruff]
 line-length = 100

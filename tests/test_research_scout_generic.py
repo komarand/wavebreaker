@@ -21,6 +21,16 @@ class FakeScoutClient:
         return self.response
 
 
+class SequentialScoutClient(FakeScoutClient):
+    def __init__(self, responses: list[dict]) -> None:
+        super().__init__(responses[0])
+        self.responses = responses
+
+    async def chat_json(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.responses[len(self.calls) - 1]
+
+
 @pytest.mark.asyncio
 async def test_mock_llm_response_validates_and_writes_expected_objects(tmp_path) -> None:
     client = FakeScoutClient(
@@ -110,6 +120,27 @@ async def test_prompt_requires_expected_checks_and_no_default_temporal_policy() 
     assert "every hypothesis must include expected_eda_checks" in prompt
     assert "do not force temporal validation" in prompt
     assert "do not assume temporal validation by default" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_invalid_task_plan_receives_one_bounded_repair_attempt() -> None:
+    client = SequentialScoutClient([
+        {"hypotheses": [], "eda_task_plan": {"hypothesis_index": {"schema_001": "invalid"}}},
+        {"hypotheses": [], "eda_task_plan": {}},
+    ])
+
+    output = await run_research_scout(
+        competition_id="generic-binary",
+        competition_url="https://www.kaggle.com/competitions/generic-binary",
+        competition_desc="Ordinary binary classification with tabular rows.",
+        plan_data=_plan(),
+        retrieved_documents=[_doc()],
+        client=client,
+    )
+
+    assert len(client.calls) == 2
+    assert "canonical_task_schema" in client.calls[1]["user_prompt"]
+    assert output.eda_task_plan.hypothesis_index["schema_001"]
 
 
 @pytest.mark.asyncio
