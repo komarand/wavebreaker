@@ -28,7 +28,7 @@ def build_safety_constraints(evidence_pack: dict[str, Any]) -> list[dict[str, An
     rows.append(_constraint("leakage", "Do not use test labels or fit target-aware transforms outside training folds.", ["leakage_evidence", "validation_evidence"], "Target access and globally fitted target-aware transforms invalidate out-of-fold evidence."))
     if any(item.get("status") in {"failed", "warning"} for item in leakage):
         rows.append(_constraint("leakage", "Resolve reported leakage warnings before interpreting diagnostic model gains.", ["leakage_evidence"], "Unresolved leakage can inflate validation measurements."))
-    return _stable_ids(_dedupe(rows, "rule"), "constraint_id", "safety", 8)
+    return _stable_ids(_dedupe(rows, "rule"), "safety_constraint_id", "safety", 8)
 
 
 def build_validation_requirements(evidence_pack: dict[str, Any]) -> list[dict[str, Any]]:
@@ -48,7 +48,7 @@ def build_validation_requirements(evidence_pack: dict[str, Any]) -> list[dict[st
         rows.append(_requirement("Select prediction thresholds only inside validation.", "required", None, ["metric_evidence.requires_threshold"], "Threshold selection on held-out or test outcomes would leak evaluation information."))
     if _dict(evidence_pack.get("baseline_ablation_evidence")):
         rows.append(_requirement("Use identical folds and metric calculations for paired ablation comparisons.", "required", None, ["baseline_ablation_evidence.fold_policy", "metric_evidence"], "Paired controls are required to attribute a delta to the tested change."))
-    return _stable_ids(_dedupe(rows, "rule"), "requirement_id", "validation_requirement", 6)
+    return _stable_ids(_dedupe(rows, "rule"), "validation_requirement_id", "validation_requirement", 6)
 
 
 def build_testable_hypotheses(*, evidence_pack: dict[str, Any], config: HypothesisGenerationConfig | None = None) -> list[dict[str, Any]]:
@@ -165,8 +165,8 @@ def _hyp(scope: str, statement: str, trigger: str, unresolved: str, refs: list[s
     return {"scope": scope, "statement": statement, "trigger_finding": trigger, "why_unresolved": unresolved, "evidence_refs": sorted(set(refs)), "baseline_ref": baseline, "required_controls": controls, "expected_evidence": expected, "priority_signal": priority, "reliability": reliability, "status": "untested", "evidence_origin": "reasoning_inference"}
 
 
-def _constraint(scope: str, rule: str, refs: list[str], reason: str) -> dict[str, Any]: return {"scope": scope, "rule": rule, "severity": "mandatory", "evidence_refs": refs, "reason": reason, "evidence_origin": "dataset_measurement"}
-def _requirement(rule: str, status: str, condition: str | None, refs: list[str], reason: str) -> dict[str, Any]: return {"rule": rule, "status": status, "condition": condition, "evidence_refs": refs, "reason": reason, "evidence_origin": "statistical_diagnostic"}
+def _constraint(scope: str, rule: str, refs: list[str], reason: str) -> dict[str, Any]: return {"scope": scope, "rule": rule, "severity": "mandatory", "blocking": True, "evidence_refs": refs, "reason": reason, "evidence_origin": "dataset_measurement"}
+def _requirement(rule: str, status: str, condition: str | None, refs: list[str], reason: str) -> dict[str, Any]: return {"rule": rule, "status": status, "mandatory": status == "required", "condition": condition, "evidence_refs": refs, "reason": reason, "evidence_origin": "statistical_diagnostic"}
 def _dict(value: Any) -> dict[str, Any]: return value.model_dump(mode="json") if hasattr(value, "model_dump") else value if isinstance(value, dict) else {}
 def _refs(item: dict[str, Any], fallback: str) -> list[str]: return sorted(set(str(value) for value in item.get("evidence_refs", []) if value) | {fallback})
 def _reliability(item: dict[str, Any]) -> str: return "high" if item.get("confidence") == "high" and item.get("stability") == "stable" else "medium" if item.get("confidence") in {"high", "medium"} else "low"

@@ -49,7 +49,9 @@ pythonpath = ["."]
 asyncio_mode = "auto"
 markers = [
     "contract: deterministic producer-consumer contract and reference tests",
+    "offline: tests guaranteed not to access network or external services",
     "pipeline_smoke: internal pipeline smoke tests with external boundaries mocked",
+    "manifest_migration: deterministic legacy run-manifest migration and resume tests",
 ]
 
 [tool.ruff]

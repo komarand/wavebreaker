@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from datetime import datetime
@@ -43,16 +44,16 @@ class ArtifactWriter:
     def write_json(self, name: str, data: Any) -> Path:
         path = self._run_path(name)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(_jsonable(data), ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
+        _atomic_write_text(
+            path,
+            json.dumps(_jsonable(data), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         )
         return path
 
     def write_markdown(self, name: str, text: str) -> Path:
         path = self._run_path(name)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        _atomic_write_text(path, text)
         return path
 
     def write_module_statuses(self, statuses: dict[str, Any]) -> Path:
@@ -105,3 +106,16 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
 def _slugify(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", value.strip().lower()).strip("-")
     return slug or "unknown-competition"
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except OSError as exc:
+        temporary.unlink(missing_ok=True)
+        raise ArtifactWriterError(f"Could not atomically write artifact: {path}") from exc

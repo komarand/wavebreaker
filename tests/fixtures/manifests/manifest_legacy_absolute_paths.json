@@ -1,0 +1,13 @@
+{
+  "run_id": "legacy-paths",
+  "competition_id": "demo",
+  "status": "success",
+  "config": {},
+  "stages": {
+    "eda": {
+      "status": "success",
+      "outputs": {"evidence_pack": "C:\\RUN_DIR\\eda\\eda_evidence_pack.json"}
+    }
+  },
+  "final_outputs": {"strategy": "C:\\RUN_DIR\\final\\final_strategy.json"}
+}

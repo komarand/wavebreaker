@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 
 from kaggle_researcher.clients.deepseek_client import DeepSeekClient
 from kaggle_researcher.contracts.normalization import EXPERIMENT_EVIDENCE_ID_ALIASES
+from kaggle_researcher.contracts.synthesis_context import ExperimentPlanningContext
 from kaggle_researcher.reasoning.common import (
     CANONICAL_REASONING_EVIDENCE_IDS,
     format_retrieved_documents,
@@ -34,11 +35,21 @@ async def plan_experiments(
     model: str = "deepseek-v4-pro",
     *,
     chunks: list[RetrievedDocument] | None = None,
+    eda_hypotheses: Sequence[Mapping[str, object]] | None = None,
 ) -> list[ExperimentItem]:
     if client is None:
         raise ValueError("client is required")
     docs = retrieved_documents if retrieved_documents is not None else chunks or []
     allowed_evidence_ids = known_experiment_evidence_ids(docs)
+    allowed_hypothesis_ids = _known_hypothesis_ids(eda_hypotheses or ())
+    planning_context = ExperimentPlanningContext(
+        validation=validation_result,
+        leakage=leakage_result,
+        metric=metric_result,
+        hypotheses=[_hypothesis_payload(item) for item in (eda_hypotheses or ())],
+        allowed_hypothesis_ids=allowed_hypothesis_ids,
+        allowed_evidence_ids=allowed_evidence_ids,
+    )
     response = await client.chat_json(
         model=model,
         system_prompt=f"{SYSTEM_RULES}\n\n"
@@ -54,7 +65,9 @@ async def plan_experiments(
             " Every evidence_ids entry must exactly match one value from allowed_evidence_ids. "
             "Do not invent aliases, section names, abbreviations, or semantic shorthand. "
             "Do not use validation_policy unless it is explicitly present in allowed_evidence_ids. "
-            "When no valid supporting evidence exists, return an empty evidence_ids list."
+            "When no valid supporting evidence exists, return an empty evidence_ids list. "
+            "Every experiment_id identifies a planned execution unit and must not equal a "
+            "hypothesis ID. Put only exact allowed_hypothesis_ids in source_hypothesis_ids."
         ),
         user_prompt=json.dumps(
             {
@@ -62,7 +75,10 @@ async def plan_experiments(
                 "leakage_result": leakage_result.model_dump(mode="json"),
                 "metric_result": metric_result.model_dump(mode="json"),
                 "retrieved_documents": format_retrieved_documents(docs),
-                "allowed_evidence_ids": allowed_evidence_ids,
+                "planning_context": planning_context.model_dump(mode="json"),
+                "allowed_evidence_ids": planning_context.model_dump(mode="json")["allowed_evidence_ids"],
+                "allowed_hypothesis_ids": planning_context.model_dump(mode="json")["allowed_hypothesis_ids"],
+                "eda_testable_hypotheses": planning_context.model_dump(mode="json")["hypotheses"],
                 "expected_schema": {
                     "experiments": [ExperimentItem.model_json_schema()],
                 },
@@ -89,8 +105,22 @@ async def plan_experiments(
     if unknown_ids:
         raise ValueError(_unknown_evidence_message(unknown_ids, allowed_evidence_ids, replacements, stage="final"))
 
+    unknown_hypothesis_ids = sorted({
+        hypothesis_id
+        for experiment in experiments
+        for hypothesis_id in experiment.source_hypothesis_ids
+        if hypothesis_id not in set(allowed_hypothesis_ids)
+    })
+    if unknown_hypothesis_ids:
+        raise ValueError(
+            "ExperimentItem contains unknown source_hypothesis_ids: "
+            f"{unknown_hypothesis_ids}."
+        )
+
     experiments = _ensure_required_p0_experiments(experiments)
-    experiments = _assign_and_validate_experiment_ids(experiments)
+    experiments = _assign_and_validate_experiment_ids(
+        experiments, hypothesis_ids=set(allowed_hypothesis_ids)
+    )
     return sorted(experiments, key=lambda item: PRIORITY_ORDER[item.priority])
 
 
@@ -128,11 +158,19 @@ def _parse_and_normalize_experiments(raw_items: object) -> tuple[list[Experiment
     return experiments, replacements
 
 
-def _assign_and_validate_experiment_ids(experiments: Sequence[ExperimentItem]) -> list[ExperimentItem]:
+def _assign_and_validate_experiment_ids(
+    experiments: Sequence[ExperimentItem],
+    *,
+    hypothesis_ids: set[str] | None = None,
+) -> list[ExperimentItem]:
     assigned: list[ExperimentItem] = []
     seen: set[str] = set()
     for experiment in experiments:
         experiment_id = experiment.experiment_id or _stable_experiment_id(experiment.experiment)
+        if experiment_id in (hypothesis_ids or set()):
+            raise ValueError(
+                f"Experiment identity {experiment_id!r} reuses a hypothesis_id."
+            )
         if experiment_id in seen:
             raise ValueError(f"Experiment plan contains duplicate experiment_id: {experiment_id!r}.")
         seen.add(experiment_id)
@@ -143,6 +181,21 @@ def _assign_and_validate_experiment_ids(experiments: Sequence[ExperimentItem]) -
 def _stable_experiment_id(text: str) -> str:
     normalized = " ".join(text.lower().split()).encode("utf-8")
     return f"exp_{hashlib.sha256(normalized).hexdigest()[:12]}"
+
+
+def _known_hypothesis_ids(hypotheses: Sequence[Mapping[str, object]]) -> list[str]:
+    return sorted({
+        str(_hypothesis_payload(item).get("hypothesis_id")).strip()
+        for item in hypotheses
+        if _hypothesis_payload(item).get("hypothesis_id")
+        and str(_hypothesis_payload(item).get("hypothesis_id")).strip()
+    })
+
+
+def _hypothesis_payload(item: Any) -> dict[str, object]:
+    if hasattr(item, "model_dump"):
+        return item.model_dump(mode="json")
+    return dict(item)
 
 
 def _unknown_evidence_ids(experiments: Sequence[ExperimentItem], allowed_evidence_ids: Sequence[str]) -> list[str]:

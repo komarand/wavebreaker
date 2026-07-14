@@ -10,6 +10,9 @@ from typing import Any
 from kaggle_researcher.eda.config import load_eda_config
 from kaggle_researcher.contracts.research_hypotheses import load_research_hypotheses
 from kaggle_researcher.contracts.eda_task_plan import load_eda_task_plan
+from kaggle_researcher.contracts.research_to_eda import (
+    require_valid_research_to_eda_contract,
+)
 from kaggle_researcher.eda.boundary import (
     DEPRECATED_OUTPUTS,
     MODULE_CLASSIFICATION,
@@ -98,14 +101,16 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
     task_plan, task_plan_migration = load_eda_task_plan(
         config.task_plan_path,
         hypotheses=hypotheses,
+        validate_bundle=False,
     )
     if task_plan_migration.migrated:
         warnings.append("Loaded legacy EdaTaskPlan payload and migrated it to schema 1.0.")
         warnings.extend(task_plan_migration.warnings)
-    if not competition_ids_match(hypotheses, task_plan):
-        raise ValueError(
-            "research_hypotheses.json and eda_task_plan.json target different competitions."
-        )
+    contract_validation = require_valid_research_to_eda_contract(hypotheses, task_plan)
+    warnings.extend(
+        f"Research-to-EDA contract warning [{issue.code}]: {issue.message}"
+        for issue in contract_validation.warnings
+    )
     if hypotheses.competition_id != config.competition_id:
         warnings.append(
             "Config competition_id differs from input JSON; using config "

@@ -12,7 +12,8 @@ from kaggle_researcher.contracts.research_hypotheses import load_research_hypoth
 from kaggle_researcher.eda.orchestrator import run_eda
 from kaggle_researcher.eda.schemas import EdaEvidencePack, EdaRunConfig
 from kaggle_researcher.reasoning.experiment_planner import plan_experiments
-from kaggle_researcher.reasoning.final_synthesizer import render_final_strategy, synthesize_final_strategy
+from kaggle_researcher.reasoning.final_synthesizer import render_final_strategy
+from tests.fixtures.final_synthesis import synthesize_for_test as synthesize_final_strategy
 from kaggle_researcher.reasoning.leaderboard_auditor import audit_leaderboard_risk
 from kaggle_researcher.reasoning.leakage_risk_analyst import analyze_leakage_risk
 from kaggle_researcher.reasoning.metric_specialist import analyze_metric
@@ -47,6 +48,7 @@ async def test_real_internal_pipeline_boundaries_without_network_or_llm(tmp_path
     evidence_pack = EdaEvidencePack.model_validate_json(
         eda_result.evidence_pack_path.read_text(encoding="utf-8")
     )
+    eda_hypothesis_id = evidence_pack.testable_hypotheses[0].hypothesis_id
     hypotheses, _ = load_research_hypotheses(fixture / "research_hypotheses.json")
     plan = PlanData(
         task_type="binary_classification",
@@ -126,6 +128,7 @@ async def test_real_internal_pipeline_boundaries_without_network_or_llm(tmp_path
         leakage_result=leakage,
         metric_result=metric,
         retrieved_documents=docs,
+        eda_hypotheses=evidence_pack.testable_hypotheses,
         client=JsonClient({
             "experiments": [{
                 "priority": "P0",
@@ -135,6 +138,7 @@ async def test_real_internal_pipeline_boundaries_without_network_or_llm(tmp_path
                 "expected_gain": "diagnostic",
                 "risk": "Changing folds would make comparisons unreliable.",
                 "evidence_ids": ["validation_policy", "source-001"],
+                "source_hypothesis_ids": [eda_hypothesis_id],
             }]
         }),
     )
@@ -150,6 +154,7 @@ async def test_real_internal_pipeline_boundaries_without_network_or_llm(tmp_path
             "unnecessary_experiments": [],
             "approved_experiment_ids": [experiments[0].experiment_id],
             "rejected_experiment_ids": [],
+            "reviewed_experiment_ids": [experiments[0].experiment_id],
             "revised_sections": {},
         }),
     )
@@ -158,7 +163,21 @@ async def test_real_internal_pipeline_boundaries_without_network_or_llm(tmp_path
         Path("tests/fixtures/reasoning/final_strategy_valid.json").read_text(encoding="utf-8")
     )
     strategy_payload["competition_id"] = "iid_binary_tiny"
-    strategy_payload["actions"][0]["experiment_ids"] = [experiments[0].experiment_id]
+    strategy_payload["acknowledged_risk_ids"] = [
+        item.risk_id for item in evidence_pack.eda_risks if item.severity == "critical"
+    ]
+    strategy_payload["selected_validation_requirement_ids"] = [
+        item.validation_requirement_id for item in evidence_pack.validation_requirements
+        if item.mandatory or item.status == "required"
+    ]
+    strategy_payload["enforced_safety_constraint_ids"] = [
+        item.safety_constraint_id for item in evidence_pack.safety_constraints
+        if item.blocking or item.severity == "blocking"
+    ]
+    # Exercise the bounded legacy repair at the real Final Synthesizer boundary.
+    strategy_payload["actions"][0]["experiment_ids"] = [eda_hypothesis_id]
+    strategy_payload["actions"][0]["related_hypothesis_ids"] = [eda_hypothesis_id]
+    strategy_payload["actions"][0]["hypothesis_ids"] = [eda_hypothesis_id]
     reasoning_outputs = {
         "metric": metric.model_dump(mode="json"),
         "validation": validation.model_dump(mode="json"),
@@ -182,6 +201,13 @@ async def test_real_internal_pipeline_boundaries_without_network_or_llm(tmp_path
     rendered = render_final_strategy(strategy)
     assert "secondary_validation" not in rendered
     assert "Metric" in rendered and "Validation" in rendered
+    linked_actions = [
+        action for action in strategy.actions
+        if experiments[0].experiment_id in action.experiment_ids
+    ]
+    assert linked_actions
+    assert eda_hypothesis_id in linked_actions[0].hypothesis_ids
+    assert strategy.reference_repairs[0]["original_id"] == eda_hypothesis_id
 
     run_dir = tmp_path / "full-run"
     for directory in (run_dir / "research", run_dir / "eda", run_dir / "reasoning", run_dir / "final"):

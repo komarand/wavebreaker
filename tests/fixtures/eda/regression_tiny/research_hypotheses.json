@@ -6,13 +6,31 @@
       "hypothesis_id": "schema_001",
       "category": "schema",
       "claim": "The dataset has generic train/test regression tables.",
+      "expected_eda_checks": ["schema_inferer.roles"],
       "priority": "P0",
       "confidence_before_eda": "medium"
     },
     {
-      "hypothesis_id": "validation_001",
+      "hypothesis_id": "metric_001",
+      "category": "metric",
+      "claim": "EDA should verify the declared RMSE metric contract.",
+      "expected_eda_checks": ["metric_analyzer.registry"],
+      "priority": "P0",
+      "confidence_before_eda": "medium"
+    },
+    {
+      "hypothesis_id": "val_001",
       "category": "validation",
       "claim": "IID regression should use KFold validation.",
+      "expected_eda_checks": ["validation_analyzer.policy"],
+      "priority": "P0",
+      "confidence_before_eda": "medium"
+    },
+    {
+      "hypothesis_id": "leak_001",
+      "category": "leakage",
+      "claim": "EDA should verify target and identifier leakage risks.",
+      "expected_eda_checks": ["leakage_checker.direct_checks"],
       "priority": "P0",
       "confidence_before_eda": "medium"
     }

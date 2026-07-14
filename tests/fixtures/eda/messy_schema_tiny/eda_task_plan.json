@@ -12,7 +12,7 @@
     {"task_id": "validation_001", "module": "validation_analyzer", "priority": "P0", "blocking": true, "related_hypothesis_ids": ["val_001"], "params": {}},
     {"task_id": "leakage_001", "module": "leakage_checker", "priority": "P0", "blocking": true, "related_hypothesis_ids": ["leak_001"], "params": {}}
   ],
-  "hypothesis_index": {"schema_001": ["schema_001"], "metric_001": ["metric_001"], "val_001": ["validation_001"], "leak_001": ["leakage_001"]},
+  "hypothesis_index": {"schema_001": ["file_inventory_001", "schema_001", "table_profile_001"], "metric_001": ["metric_001"], "val_001": ["validation_001"], "leak_001": ["leakage_001"]},
   "recommended_module_sequence": ["file_inventory", "schema_inferer", "table_profiler", "metric_analyzer", "validation_analyzer", "leakage_checker"],
   "recommended_human_checklist": ["Confirm score is the intended submission prediction column."],
   "blocking_tasks": ["file_inventory", "schema_inferer", "validation_analyzer", "leakage_checker"]

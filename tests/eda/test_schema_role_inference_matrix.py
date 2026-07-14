@@ -7,6 +7,8 @@ from typing import Any
 
 import pytest
 
+from tests.contracts.factories import valid_research_payload, valid_task_plan_payload
+
 from kaggle_researcher.eda.io.dataset_reader import DatasetReader
 from kaggle_researcher.eda.modules.file_inventory import build_file_inventory
 from kaggle_researcher.eda.modules.leakage_checker import check_leakage
@@ -110,10 +112,13 @@ def test_empty_dataset_run_fails_clearly(tmp_path: Path) -> None:
     data_dir.mkdir()
     inputs = tmp_path / "inputs"
     inputs.mkdir()
-    _write_json(inputs / "research_hypotheses.json", {"competition_id": "empty_dataset", "hypotheses": []})
+    _write_json(
+        inputs / "research_hypotheses.json",
+        valid_research_payload(competition_id="empty_dataset"),
+    )
     _write_json(
         inputs / "eda_task_plan.json",
-        {"competition_id": "empty_dataset", "task_type": "binary_classification", "metric": {"name": "roc_auc"}},
+        valid_task_plan_payload(competition_id="empty_dataset"),
     )
 
     with pytest.raises(ValueError, match="No supported tabular data files"):

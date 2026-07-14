@@ -13,12 +13,38 @@
     {
       "task_id": "schema_001",
       "module": "schema_inferer",
-      "priority": "P0"
+      "priority": "P0",
+      "related_hypothesis_ids": ["schema_001"]
+    },
+    {
+      "task_id": "metric_001",
+      "module": "metric_analyzer",
+      "priority": "P0",
+      "related_hypothesis_ids": ["metric_001"]
     },
     {
       "task_id": "validation_001",
       "module": "validation_analyzer",
-      "priority": "P0"
+      "priority": "P0",
+      "related_hypothesis_ids": ["val_001"]
+    },
+    {
+      "task_id": "leakage_001",
+      "module": "leakage_checker",
+      "priority": "P0",
+      "related_hypothesis_ids": ["leak_001"]
     }
+  ],
+  "hypothesis_index": {
+    "schema_001": ["schema_001"],
+    "metric_001": ["metric_001"],
+    "val_001": ["validation_001"],
+    "leak_001": ["leakage_001"]
+  },
+  "recommended_module_sequence": [
+    "schema_inferer",
+    "metric_analyzer",
+    "validation_analyzer",
+    "leakage_checker"
   ]
 }

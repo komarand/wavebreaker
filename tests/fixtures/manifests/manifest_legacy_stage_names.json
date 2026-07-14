@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "run_id": "legacy-stages",
+  "competition_id": "demo",
+  "status": "done",
+  "config": {},
+  "stages": {
+    "scout": {"status": "cached", "outputs": {}},
+    "eda": {"status": "success", "outputs": {}},
+    "reasoning": {"status": "done", "outputs": {}},
+    "strategy": {"status": "error", "error": "legacy synthesis failed", "outputs": {}},
+    "report": {"status": "pending", "outputs": {}}
+  },
+  "final_outputs": {}
+}

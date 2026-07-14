@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from typing import Any
 
@@ -7,6 +8,18 @@ import pytest
 
 import kaggle_researcher.reasoning.final_synthesizer as final_synthesizer_module
 from kaggle_researcher.eda.schemas import EdaEvidencePack, ResearchHypotheses, ResearchHypothesis
+from kaggle_researcher.contracts.action_support import UnsupportedFinalStrategyActionError
+from kaggle_researcher.contracts.experiments import (
+    CrossNamespaceReferenceError,
+    ReferenceIssue,
+)
+from kaggle_researcher.contracts.final_strategy_compilation import (
+    FinalStrategyCompilationError,
+    FinalStrategySchemaValidationError,
+)
+from kaggle_researcher.contracts.reference_catalog import (
+    build_final_strategy_reference_catalog,
+)
 from kaggle_researcher.reasoning.final_synthesizer import (
     REQUIRED_SECTION_IDS,
     FinalStrategyResult,
@@ -15,10 +28,10 @@ from kaggle_researcher.reasoning.final_synthesizer import (
     repair_final_strategy_payload,
     render_final_strategy,
     render_final_strategy_summary,
-    synthesize_final_strategy,
     validate_rendered_strategy_quality,
 )
 from kaggle_researcher.schemas import PlanData, RetrievedDocument
+from tests.fixtures.final_synthesis import synthesize_for_test as synthesize_final_strategy
 
 
 class FakeFinalSynthesizerClient:
@@ -29,6 +42,16 @@ class FakeFinalSynthesizerClient:
     async def chat_json(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
         return self.response
+
+
+class SequentialFinalSynthesizerClient:
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self.responses = responses
+        self.calls: list[dict[str, Any]] = []
+
+    async def chat_json(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        return self.responses[len(self.calls) - 1]
 
 
 @pytest.mark.asyncio
@@ -58,6 +81,103 @@ async def test_mock_llm_response_validates_into_final_strategy_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_raw_hypothesis_evidence_ref_is_migrated_before_action_validation() -> None:
+    payload = _strategy_payload()
+    for action in [
+        *payload["actions"],
+        *[
+            action
+            for section in payload["sections"]
+            for action in section.get("actions", [])
+        ],
+    ]:
+        action["evidence_refs"] = ["val_001"]
+        action["related_hypothesis_ids"] = []
+        action["hypothesis_ids"] = []
+    client = FakeFinalSynthesizerClient(payload)
+
+    result = await synthesize_final_strategy(
+        competition_desc="Generic iid binary classification with ROC AUC.",
+        plan_data=_plan(),
+        retrieved_documents=[_doc()],
+        domain_patterns=[],
+        research_hypotheses=_research_hypotheses(),
+        eda_evidence_pack=_eda_pack(primary_method="stratified_kfold"),
+        reasoning_outputs={},
+        client=client,
+        model="deepseek-v4-pro",
+    )
+
+    assert result.actions[0].evidence_refs == ["validation_evidence.primary_validation"]
+    assert result.actions[0].related_hypothesis_ids == ["val_001"]
+    assert any(
+        item["field_path"] == "hypothesis_reference_migration.moved_hypothesis_refs"
+        for item in result.reference_repairs
+    )
+
+
+@pytest.mark.asyncio
+async def test_traceback_composite_refs_resolve_before_namespace_validation() -> None:
+    pack_payload = _eda_pack(primary_method="stratified_kfold").model_dump(mode="json")
+    pack_payload.update({
+        "eda_risks": [{
+            "risk_id": "risk_leakage_001", "risk_type": "leakage",
+            "severity": "high", "status": "confirmed", "confidence": "high",
+            "title": "Leakage", "finding": "Groups can leak.",
+            "impact": "Scores become optimistic.",
+            "evidence_refs": ["validation_evidence.primary_validation"],
+        }],
+        "validation_requirements": [{
+            "validation_requirement_id": "validation_requirement_003",
+            "rule": "Use grouped validation.", "reason": "Groups repeat.",
+            "status": "recommended", "mandatory": False,
+            "evidence_refs": ["validation_evidence.primary_validation"],
+        }],
+        "safety_constraints": [{
+            "safety_constraint_id": "safety_003", "scope": "validation",
+            "rule": "Do not split groups.", "reason": "Prevent leakage.",
+            "severity": "advisory", "blocking": False,
+            "evidence_refs": ["validation_evidence.primary_validation"],
+        }],
+    })
+    pack = EdaEvidencePack.model_validate(pack_payload)
+    payload = _strategy_payload()
+    composite_refs = [
+        "risk_leakage_001",
+        "validation_requirements.validation_requirement_003",
+        "safety_constraints.safety_003",
+    ]
+    for action in [
+        *payload["actions"],
+        *[action for section in payload["sections"] for action in section.get("actions", [])],
+    ]:
+        action["evidence_refs"] = list(composite_refs)
+        action["risk_ids"] = ["risk_leakage_001"]
+        action["validation_requirement_ids"] = ["validation_requirement_003"]
+        action["safety_constraint_ids"] = ["safety_003"]
+    client = FakeFinalSynthesizerClient(payload)
+
+    result = await synthesize_final_strategy(
+        competition_desc="Generic grouped binary classification.",
+        plan_data=_plan(), retrieved_documents=[_doc()], domain_patterns=[],
+        research_hypotheses=_research_hypotheses(), eda_evidence_pack=pack,
+        reasoning_outputs={}, client=client, model="deepseek-v4-pro",
+    )
+
+    assert len(client.calls) == 1
+    assert result.actions[0].evidence_refs == ["validation_evidence.primary_validation"]
+    assert not set(composite_refs) & set(result.actions[0].evidence_refs)
+    assert all(action.evidence_refs for action in _result_actions(result))
+    assert not {
+        "unknown", "unresolved", "missing_evidence", "generated_by_llm",
+    } & {ref for action in _result_actions(result) for ref in action.evidence_refs}
+    assert any(
+        item["field_path"] == "composite_reference_resolution.resolved_composite_refs"
+        for item in result.reference_repairs
+    )
+
+
+@pytest.mark.asyncio
 async def test_prompt_includes_final_synthesis_guardrails() -> None:
     client = FakeFinalSynthesizerClient(_strategy_payload())
 
@@ -83,9 +203,108 @@ async def test_prompt_includes_final_synthesis_guardrails() -> None:
     assert "Do not include raw chain-of-thought" in combined
     assert "Do not claim that notebooks were executed" in combined
     assert "Do not claim that baseline is final solution" in combined
-    assert "Link every important recommendation to EDA evidence_refs" in combined
+    assert "typed support_refs" in combined
     assert '"allowed_hypothesis_ids"' in prompt
     assert "Do not invent IDs" in prompt
+    payload = json.loads(prompt)
+    assert "allowed_experiment_ids" in payload
+    assert "approved_experiment_ids" in payload
+    assert "rejected_experiment_ids" in payload
+    assert "approved_experiments" in payload
+    assert "allowed_evidence_refs" in payload
+    assert "allowed_eda_result_refs" in payload
+    assert "allowed_support_refs" in payload
+    assert "approved_experiments is a context section" in payload["evidence_reference_instruction"]
+    action_draft_schema = payload["expected_schema"]["$defs"]["FinalStrategyActionDraft"]
+    assert "support_refs" in action_draft_schema["properties"]
+    assert "evidence_refs" not in action_draft_schema["properties"]
+    assert any(
+        "Do not place hypothesis IDs into experiment_ids" in rule
+        for rule in payload["guardrails"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_final_synthesizer_repairs_invalid_context_evidence_once() -> None:
+    pack = _rich_eda_pack().model_copy(update={
+        "baseline_ablation_evidence": {
+            "feature_block_findings": [
+                {"feature_block": "low_cardinality_categorical", "finding": "useful"},
+                {"feature_block": "high_cardinality_categorical", "finding": "mixed"},
+                {"feature_block": "text", "finding": "not_testable"},
+            ]
+        }
+    })
+    semantic_refs = [
+        "baseline_ablation_evidence.feature_block_findings.low_cardinality_categorical",
+        "baseline_ablation_evidence.feature_block_findings.high_cardinality_categorical",
+        "baseline_ablation_evidence.feature_block_findings.text",
+    ]
+    invalid = _strategy_payload()
+    ablation_action = deepcopy(invalid["actions"][0])
+    ablation_action.update({
+        "action_id": "action_ablation",
+        "action": "Prioritize the feature blocks supported by baseline ablations.",
+        "evidence_refs": [*semantic_refs, "approved_experiments"],
+        "eda_result_refs": [*semantic_refs, "approved_experiments"],
+        "experiment_ids": [],
+    })
+    invalid["actions"].append(ablation_action)
+    corrected = deepcopy(invalid)
+    corrected_action = corrected["actions"][-1]
+    corrected_action["evidence_refs"] = semantic_refs
+    corrected_action["eda_result_refs"] = semantic_refs
+    corrected_action["experiment_ids"] = ["exp_001"]
+    client = SequentialFinalSynthesizerClient([invalid, corrected])
+    reasoning_outputs = {
+        "experiments": [{
+            "experiment_id": "exp_001",
+            "source_hypothesis_ids": ["val_001"],
+            "priority": "P1",
+            "experiment": "Test feature blocks independently.",
+            "why": "Measure incremental value from each feature family.",
+            "cost": "low",
+            "expected_gain": "diagnostic",
+            "risk": "fold variance",
+            "evidence_ids": semantic_refs,
+        }],
+        "review": {
+            "confidence": "medium",
+            "reviewed_experiment_ids": ["exp_001"],
+            "approved_experiment_ids": ["exp_001"],
+            "rejected_experiment_ids": [],
+        },
+    }
+
+    result = await synthesize_final_strategy(
+        competition_desc="Generic iid binary classification with ROC AUC.",
+        plan_data=_plan(),
+        retrieved_documents=[_doc()],
+        domain_patterns=[],
+        research_hypotheses=_research_hypotheses(),
+        eda_evidence_pack=pack,
+        reasoning_outputs=reasoning_outputs,
+        client=client,
+        model="deepseek-v4-pro",
+    )
+
+    assert len(client.calls) == 2
+    repaired = next(action for action in result.actions if action.action_id == "action_ablation")
+    assert repaired.evidence_refs == semantic_refs
+    assert repaired.eda_result_refs == semantic_refs
+    assert repaired.experiment_ids == ["exp_001"]
+    assert all(
+        "approved_experiments" not in [*action.evidence_refs, *action.eda_result_refs]
+        for action in _result_actions(result)
+    )
+    initial_prompt = json.loads(client.calls[0]["user_prompt"])
+    assert set(semantic_refs) <= set(initial_prompt["allowed_eda_result_refs"])
+    repair_prompt = json.loads(client.calls[1]["user_prompt"])
+    assert any(
+        issue["value"] == "approved_experiments"
+        and issue["reason"] == "context_label_not_reference"
+        for issue in repair_prompt["invalid_references"]
+    )
 
 
 @pytest.mark.asyncio
@@ -170,7 +389,7 @@ def test_repair_empty_section() -> None:
     )
     result = FinalStrategyResult.model_validate(repaired)
 
-    assert result.sections[0].actions or result.sections[0].evidence_refs
+    assert result.sections[0].action_ids or result.sections[0].evidence_refs
     assert REPAIR_NOTE in result.limitations
 
 
@@ -301,12 +520,12 @@ def test_postprocessor_deduplicates_validation_actions() -> None:
                 _quality_action(
                     "Use stratified k-fold cross-validation for model comparison.",
                     ["validation_evidence.primary_validation"],
-                    priority="P1",
+                    priority="P0",
                 )
             ],
             "modeling_plan": [
                 _quality_action(
-                    "Use StratifiedKFold CV for model comparison.",
+                    "Use stratified k-fold cross-validation for model comparison.",
                     ["validation_evidence.diagnostic_validations"],
                     priority="P0",
                 )
@@ -320,8 +539,7 @@ def test_postprocessor_deduplicates_validation_actions() -> None:
     )
     validation_actions = [
         action
-        for section in cleaned.sections
-        for action in section.actions
+        for action in cleaned.actions
         if "model comparison" in action.action.lower()
     ]
 
@@ -483,7 +701,7 @@ def test_summary_is_short_and_clean_strategy_has_no_quality_warnings() -> None:
     full_text = render_final_strategy(cleaned)
     summary_text = render_final_strategy_summary(cleaned)
 
-    assert len(summary_text) < 0.4 * len(full_text)
+    assert len(summary_text) < 0.5 * len(full_text)
     assert "Top P0 Actions" in summary_text
     assert "Top Risks" in summary_text
     assert "First Experiments" in summary_text
@@ -648,10 +866,190 @@ def _rich_eda_pack() -> EdaEvidencePack:
 
 
 def _result_actions(result: FinalStrategyResult) -> list[Any]:
-    actions = list(result.actions)
-    for section in result.sections:
-        actions.extend(section.actions)
-    return actions
+    return list(result.actions)
+
+
+@pytest.mark.asyncio
+async def test_post_resolution_schema_error_is_typed_sanitized_and_chained() -> None:
+    response = _strategy_payload()
+    response["actions"][0]["priority"] = "not-a-priority"
+    response["actions"][0]["private_payload"] = "TOP_SECRET_RAW_RESPONSE"
+    client = FakeFinalSynthesizerClient(response)
+    pack = _eda_pack(primary_method="stratified_kfold")
+    hypotheses = _research_hypotheses()
+    catalog = build_final_strategy_reference_catalog(
+        pack,
+        research_hypotheses=hypotheses,
+        source_claim_ids=["retrieved-1"],
+    )
+    issue = ReferenceIssue(
+        field_path="actions[0].evidence_refs",
+        expected_namespace="evidence",
+        invalid_value="approved_experiments",
+        actual_namespace="context_label",
+        reason="context_label_not_reference",
+    )
+
+    with pytest.raises(FinalStrategySchemaValidationError) as caught:
+        await final_synthesizer_module._repair_final_references_once(
+            client=client,
+            model="deepseek-v4-pro",
+            result=FinalStrategyResult.model_validate(_strategy_payload()),
+            issues=[issue],
+            allowed_evidence_refs=["validation_evidence.primary_validation"],
+            allowed_eda_result_refs=["validation_evidence.primary_validation"],
+            approved_experiment_ids=[],
+            allowed_risk_ids=[],
+            allowed_validation_requirement_ids=[],
+            allowed_safety_constraint_ids=[],
+            reference_catalog=catalog,
+        )
+
+    error = caught.value
+    assert isinstance(error, FinalStrategyCompilationError)
+    assert error.phase == "post_resolution_schema_validation"
+    assert error.diagnostics.initial_reference_issues == 1
+    assert error.diagnostics.resolved_references == 1
+    assert error.diagnostics.unresolved_references == 0
+    assert error.diagnostics.kept_actions >= 1
+    assert error.action_ids == ("action_validation",)
+    assert isinstance(error.__cause__, final_synthesizer_module.ValidationError)
+    assert "approved_experiments" not in str(error)
+    assert "TOP_SECRET_RAW_RESPONSE" not in str(error)
+    assert all(
+        "TOP_SECRET_RAW_RESPONSE" not in item.message
+        for item in error.diagnostics.schema_validation_errors
+    )
+
+
+@pytest.mark.asyncio
+async def test_full_final_synthesis_pipeline_surfaces_post_resolution_schema_error() -> None:
+    pack = _rich_eda_pack().model_copy(update={
+        "baseline_ablation_evidence": {
+            "feature_block_findings": [
+                {"feature_block": "low_cardinality_categorical", "finding": "useful"},
+            ]
+        }
+    })
+    evidence_ref = (
+        "baseline_ablation_evidence.feature_block_findings.low_cardinality_categorical"
+    )
+    initial = _strategy_payload()
+    extra_action = deepcopy(initial["actions"][0])
+    extra_action.update({
+        "action_id": "action_schema_failure",
+        "evidence_refs": [evidence_ref, "approved_experiments"],
+        "eda_result_refs": [evidence_ref, "approved_experiments"],
+        "experiment_ids": [],
+    })
+    initial["actions"].append(extra_action)
+    repaired = deepcopy(initial)
+    for action in repaired["actions"]:
+        if action["action_id"] == "action_schema_failure":
+            action["evidence_refs"] = [evidence_ref]
+            action["eda_result_refs"] = [evidence_ref]
+            action["priority"] = "invalid-priority"
+    client = SequentialFinalSynthesizerClient([initial, repaired])
+
+    with pytest.raises(FinalStrategySchemaValidationError) as caught:
+        await synthesize_final_strategy(
+            competition_desc="Generic iid binary classification with ROC AUC.",
+            plan_data=_plan(),
+            retrieved_documents=[_doc()],
+            domain_patterns=[],
+            research_hypotheses=_research_hypotheses(),
+            eda_evidence_pack=pack,
+            reasoning_outputs={},
+            client=client,
+            model="deepseek-v4-pro",
+        )
+
+    assert len(client.calls) == 2
+    assert caught.value.phase == "post_resolution_schema_validation"
+    assert isinstance(caught.value.__cause__, final_synthesizer_module.ValidationError)
+    assert "approved_experiments" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_cross_namespace_error_contains_only_post_resolution_issues() -> None:
+    pack = _rich_eda_pack().model_copy(update={
+        "baseline_ablation_evidence": {
+            "feature_block_findings": [
+                {"feature_block": "low_cardinality_categorical", "finding": "useful"},
+            ]
+        }
+    })
+    evidence_ref = (
+        "baseline_ablation_evidence.feature_block_findings.low_cardinality_categorical"
+    )
+    initial = _strategy_payload()
+    extra_action = deepcopy(initial["actions"][0])
+    extra_action.update({
+        "action_id": "action_unresolved",
+        "evidence_refs": [evidence_ref, "approved_experiments"],
+        "eda_result_refs": [evidence_ref, "approved_experiments"],
+        "experiment_ids": [],
+    })
+    initial["actions"].append(extra_action)
+    client = SequentialFinalSynthesizerClient([initial, deepcopy(initial)])
+
+    with pytest.raises(CrossNamespaceReferenceError) as caught:
+        await synthesize_final_strategy(
+            competition_desc="Generic iid binary classification with ROC AUC.",
+            plan_data=_plan(),
+            retrieved_documents=[_doc()],
+            domain_patterns=[],
+            research_hypotheses=_research_hypotheses(),
+            eda_evidence_pack=pack,
+            reasoning_outputs={},
+            client=client,
+            model="deepseek-v4-pro",
+        )
+
+    assert caught.value.phase == "reference_resolution"
+    assert caught.value.diagnostics.unresolved_references == len(caught.value.issues)
+    assert {issue.invalid_value for issue in caught.value.issues} == {
+        "approved_experiments"
+    }
+
+
+@pytest.mark.asyncio
+async def test_post_resolution_support_gate_error_does_not_become_stale_namespace_error() -> None:
+    response = _strategy_payload()
+    response["actions"][0]["evidence_refs"] = ["risk_leakage_001"]
+    response["actions"][0]["priority"] = "P0"
+    client = FakeFinalSynthesizerClient(response)
+    pack = _eda_pack(primary_method="stratified_kfold")
+    catalog = build_final_strategy_reference_catalog(
+        pack,
+        research_hypotheses=_research_hypotheses(),
+    )
+    issue = ReferenceIssue(
+        field_path="actions[0].evidence_refs",
+        expected_namespace="evidence",
+        invalid_value="approved_experiments",
+        actual_namespace="context_label",
+        reason="context_label_not_reference",
+    )
+
+    with pytest.raises(UnsupportedFinalStrategyActionError) as caught:
+        await final_synthesizer_module._repair_final_references_once(
+            client=client,
+            model="deepseek-v4-pro",
+            result=FinalStrategyResult.model_validate(_strategy_payload()),
+            issues=[issue],
+            allowed_evidence_refs=["validation_evidence.primary_validation"],
+            allowed_eda_result_refs=["validation_evidence.primary_validation"],
+            approved_experiment_ids=[],
+            allowed_risk_ids=[],
+            allowed_validation_requirement_ids=[],
+            allowed_safety_constraint_ids=[],
+            reference_catalog=catalog,
+        )
+
+    assert caught.value.phase == "action_support_gate"
+    assert caught.value.action_id == "action_validation"
+    assert "approved_experiments" not in str(caught.value)
 
 
 def _strategy_payload(

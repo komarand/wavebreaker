@@ -5,6 +5,16 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, StringConstraints
 
+from kaggle_researcher.contracts.eda import (
+    EdaEvidencePack,
+    EdaHypothesisStatus,
+    EdaRisk,
+    HypothesisResult,
+    RecommendedNextAction,
+    RiskSeverity,
+    RiskStatus,
+    RiskType,
+)
 from kaggle_researcher.contracts.research_hypotheses import (
     ResearchHypothesis,
     ResearchHypotheses,
@@ -14,13 +24,7 @@ from kaggle_researcher.contracts.eda_task_plan import EdaTask, EdaTaskPlan
 
 Confidence = Literal["low", "medium", "high"]
 Priority = Literal["P0", "P1", "P2", "P3"]
-HypothesisStatus = Literal[
-    "confirmed",
-    "partially_confirmed",
-    "rejected",
-    "not_testable",
-    "skipped",
-]
+HypothesisStatus = EdaHypothesisStatus
 LeakageCheckStatus = Literal[
     "passed",
     "failed",
@@ -29,34 +33,6 @@ LeakageCheckStatus = Literal[
     "skipped",
 ]
 Severity = Literal["low", "medium", "high", "critical"]
-RiskSeverity = Literal["info", "low", "medium", "high", "critical"]
-RiskStatus = Literal[
-    "confirmed",
-    "suspected",
-    "mitigated_by_policy",
-    "not_testable",
-    "skipped",
-    "resolved",
-    "informational",
-]
-RiskType = Literal[
-    "schema",
-    "metric",
-    "validation",
-    "leakage",
-    "drift",
-    "missingness",
-    "high_cardinality",
-    "target",
-    "baseline",
-    "relationship",
-    "data_quality",
-    "submission",
-    "feature_engineering",
-    "leaderboard",
-    "notebook_source",
-    "unsupported",
-]
 HypothesisCategory = Literal[
     "schema",
     "metric",
@@ -381,104 +357,6 @@ class LeakageCheckResult(BaseModel):
     related_hypothesis_ids: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
-
-
-class HypothesisResult(BaseModel):
-    hypothesis_id: str
-    category: str
-
-    status: HypothesisStatus
-    confidence_after_eda: Confidence
-
-    finding: str
-    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
-
-    impact_on_strategy: str
-    limitations: list[str] = Field(default_factory=list)
-
-
-class RecommendedNextAction(BaseModel):
-    priority: Priority
-    action: str
-    why: str
-    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
-    risk: Literal["low", "medium", "high"] | None = None
-    applies_to: list[str] = Field(default_factory=list)
-    source_categories: list[str] = Field(default_factory=list)
-
-
-class EdaRisk(BaseModel):
-    risk_id: str
-    risk_intent: str = ""
-    risk_type: RiskType
-    severity: RiskSeverity
-    status: RiskStatus
-    confidence: Confidence
-    title: str
-    finding: str
-    impact: str
-    mitigation: str | None = None
-    applies_to: list[str] = Field(default_factory=list)
-    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
-    related_actions: list[str] = Field(default_factory=list)
-    limitations: list[str] = Field(default_factory=list)
-
-
-class EdaEvidencePack(BaseModel):
-    schema_version: str = "1.0"
-    competition_id: str
-    created_at: str
-    run_id: str
-
-    dataset: dict[str, Any] = Field(default_factory=dict)
-
-    file_inventory: dict[str, Any] = Field(default_factory=dict)
-    inferred_schema: dict[str, Any] = Field(default_factory=dict)
-    table_profiles: list[dict[str, Any]] = Field(default_factory=list)
-
-    metric_evidence: dict[str, Any] = Field(default_factory=dict)
-    validation_evidence: dict[str, Any] = Field(default_factory=dict)
-    leakage_evidence: list[dict[str, Any]] = Field(default_factory=list)
-
-    relationship_evidence: dict[str, Any] = Field(default_factory=dict)
-    drift_evidence: dict[str, Any] = Field(default_factory=dict)
-    baseline_evidence: dict[str, Any] = Field(default_factory=dict)
-    baseline_ablation_evidence: dict[str, Any] = Field(default_factory=dict)
-    feature_probe_evidence: list[dict[str, Any]] = Field(default_factory=list)
-    feature_diagnostics: dict[str, Any] = Field(default_factory=dict)
-    target_diagnostics: dict[str, Any] = Field(default_factory=dict)
-    interaction_diagnostics: dict[str, Any] = Field(default_factory=dict)
-    source_claim_validation: dict[str, Any] = Field(default_factory=dict)
-    visual_diagnostics: dict[str, Any] = Field(default_factory=dict)
-    slice_diagnostics: dict[str, Any] = Field(default_factory=dict)
-    eda_risks: list[EdaRisk] = Field(default_factory=list)
-    eda_implications: list[dict[str, Any]] = Field(default_factory=list)
-    strategy_hints: list[dict[str, Any]] = Field(default_factory=list)
-    safety_constraints: list[dict[str, Any]] = Field(default_factory=list)
-    validation_requirements: list[dict[str, Any]] = Field(default_factory=list)
-    testable_hypotheses: list[dict[str, Any]] = Field(default_factory=list)
-    experiment_candidates: list[dict[str, Any]] = Field(default_factory=list)
-    module_classification: dict[str, str] = Field(default_factory=dict)
-    stage_status: dict[str, str] = Field(default_factory=dict)
-    evidence_origins: dict[str, str] = Field(default_factory=dict)
-    deprecated_outputs: dict[str, dict[str, str]] = Field(default_factory=dict)
-    baseline_purpose: str = "diagnostic_sanity_floor"
-    ablation_purpose: str = "broad_feature_block_diagnostics"
-    visual_diagnostics_role: str = "evidence_rendering"
-    risk_scope: str = "eda_local"
-    owner: str = "eda_engine"
-    eligible_for_global_risk_synthesis: bool = True
-    eda_risk_register: list[EdaRisk] = Field(default_factory=list)
-    risk_summary: dict[str, Any] = Field(default_factory=dict)
-    eda_strategy_hints: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
-    notebook_static_analysis: dict[str, Any] = Field(default_factory=dict)
-
-    hypothesis_results: list[HypothesisResult] = Field(default_factory=list)
-    recommended_next_actions: list[RecommendedNextAction] = Field(default_factory=list)
-
-    warnings: list[str] = Field(default_factory=list)
-    limitations: list[str] = Field(default_factory=list)
-    artifacts: dict[str, Any] = Field(default_factory=dict)
 
 
 def competition_ids_match(

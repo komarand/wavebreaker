@@ -24,6 +24,7 @@ async def review(
     if client is None:
         raise ValueError("client is required")
     docs = retrieved_documents if retrieved_documents is not None else chunks or []
+    planned_experiment_ids = sorted(_collect_experiment_ids(draft_sections))
     result = await call_reasoning_json(
         client=client,
         model=model,
@@ -41,11 +42,15 @@ async def review(
             "Flag key claims that lack provenance."
             " When experiment_id values are present, use only those exact IDs in "
             "approved_experiment_ids and rejected_experiment_ids."
+            " reviewed_experiment_ids, approved_experiment_ids, and "
+            "rejected_experiment_ids must contain only exact planned experiment IDs. "
+            "Never place hypothesis IDs in experiment decision fields."
         ),
         user_payload={
             "draft_sections": draft_sections,
             "retrieved_documents": format_retrieved_documents(docs),
             "expected_schema": ReviewResult.model_json_schema(),
+            "planned_experiment_ids": planned_experiment_ids,
         },
         result_model=ReviewResult,
         artifact_dir=artifact_dir,
@@ -60,13 +65,23 @@ async def review(
 
 def _validate_experiment_decisions(result: ReviewResult, draft_sections: dict[str, Any]) -> None:
     known_ids = _collect_experiment_ids(draft_sections)
-    decisions = set(result.approved_experiment_ids) | set(result.rejected_experiment_ids)
+    decisions = (
+        set(result.reviewed_experiment_ids)
+        | set(result.approved_experiment_ids)
+        | set(result.rejected_experiment_ids)
+    )
     unknown = sorted(decisions - known_ids)
     if unknown:
         raise ValueError(f"ReviewResult references unknown experiment_ids: {unknown}")
     overlap = sorted(set(result.approved_experiment_ids) & set(result.rejected_experiment_ids))
     if overlap:
         raise ValueError(f"ReviewResult both approves and rejects experiment_ids: {overlap}")
+    revised_ids = _collect_experiment_ids(result.revised_sections)
+    unknown_revised = sorted(revised_ids - known_ids)
+    if unknown_revised:
+        raise ValueError(
+            f"ReviewResult revised_sections adds unknown experiment_ids: {unknown_revised}"
+        )
 
 
 def _collect_experiment_ids(value: Any) -> set[str]:

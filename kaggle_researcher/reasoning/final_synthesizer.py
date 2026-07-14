@@ -4,173 +4,111 @@ import json
 import logging
 import re
 from copy import deepcopy
-from typing import Annotated, Any, Literal
+from typing import Any
 
-from pydantic import BaseModel, Field, StringConstraints, ValidationError, model_validator
+from pydantic import BaseModel, ValidationError
 
 from kaggle_researcher.clients.deepseek_client import DeepSeekClient
+from kaggle_researcher.contracts.action_support import (
+    FinalStrategyCompilationContext,
+    FinalStrategyCompilationReport,
+    UnsupportedFinalStrategyActionError,
+    compile_final_strategy_action_support,
+    enforce_action_evidence_support,
+)
+from kaggle_researcher.contracts.action_canonicalization import (
+    ActionCanonicalizationDiagnostics,
+    canonicalize_final_strategy_actions,
+)
 from kaggle_researcher.contracts.normalization import normalize_contract_payload
+from kaggle_researcher.contracts.evidence import (
+    build_evidence_registry,
+    generate_allowed_evidence_refs,
+)
+from kaggle_researcher.contracts.experiments import (
+    CrossNamespaceReferenceError,
+    FORBIDDEN_CONTEXT_LABELS,
+    ReferenceIssue,
+    repair_final_experiment_references,
+)
+from kaggle_researcher.contracts.final_strategy import (
+    Confidence,
+    EvidenceOrigin,
+    FALLBACK_LIMITATION,
+    FinalStrategyAction,
+    FinalStrategyResult,
+    FinalStrategySection,
+    FinalValidationMethod,
+    Priority,
+    REPAIR_LIMITATION,
+    REQUIRED_SECTION_IDS,
+    TEMPORAL_VALIDATION_METHODS,
+)
+from kaggle_researcher.contracts.final_strategy_draft import FinalStrategyDraft
+from kaggle_researcher.contracts.final_strategy_compilation import (
+    FinalStrategyCompilationDiagnostics,
+    FinalStrategyCompilationError,
+    FinalStrategyRepairError,
+    FinalStrategySchemaValidationError,
+)
+from kaggle_researcher.contracts.bundle_validation import validate_final_synthesis_bundle
+from kaggle_researcher.contracts.composite_reference_resolution import (
+    CompositeReferenceResolutionDiagnostics,
+    resolve_composite_action_references,
+    resolve_final_strategy_composite_references,
+)
+from kaggle_researcher.contracts.hypothesis_reference_migration import (
+    HypothesisReferenceMigrationDiagnostics,
+    migrate_final_strategy_hypothesis_references,
+    migrate_hypothesis_references,
+)
+from kaggle_researcher.contracts.reference_catalog import (
+    ReferenceCatalog,
+    build_final_strategy_reference_catalog,
+)
+from kaggle_researcher.contracts.registries import ContractRegistries
+from kaggle_researcher.contracts.synthesis_context import FinalSynthesisContext
 from kaggle_researcher.eda.schemas import EdaEvidencePack, ResearchHypotheses
 from kaggle_researcher.schemas import PlanData, RetrievedDocument
 
 
-Priority = Literal["P0", "P1", "P2", "P3"]
-Confidence = Literal["low", "medium", "high"]
-EvidenceOrigin = Literal[
-    "EDA-confirmed",
-    "EDA-inferred",
-    "Source-supported",
-    "Hypothesis-to-test",
-    "Safety-warning",
-    "Fallback-generated",
-]
-FinalValidationMethod = Literal[
-    "stratified_kfold",
-    "kfold",
-    "group_kfold",
-    "stratified_group_kfold",
-    "temporal_holdout",
-    "temporal_cv",
-    "ranking_group_cv",
-    "custom_required",
-]
-
-NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-EvidenceRef = NonEmptyString
-REQUIRED_SECTION_IDS = [
-    "executive_summary",
-    "metric_and_validation",
-    "dataset_facts_from_eda",
-    "leakage_and_data_quality",
-    "drift_and_leaderboard_risk",
-    "baseline_findings",
-    "feature_priorities",
-    "modeling_plan",
-    "experiments_queue",
-    "what_not_to_do",
-    "first_48_hours",
-]
-TEMPORAL_VALIDATION_METHODS = {"temporal_holdout", "temporal_cv"}
-REPAIR_LIMITATION = (
-    "Final strategy payload was repaired deterministically because the LLM "
-    "omitted required linkage fields."
-)
-FALLBACK_LIMITATION = (
-    "The LLM strategy remained invalid after deterministic repair, so this "
-    "strategy was built from available Scout hypotheses and EDA evidence."
-)
 logger = logging.getLogger(__name__)
-
-
-class FinalStrategyAction(BaseModel):
-    action_id: NonEmptyString | None = None
-    priority: Priority
-    action: NonEmptyString
-    reason: NonEmptyString
-
-    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
-    related_hypothesis_ids: list[NonEmptyString] = Field(default_factory=list)
-    experiment_ids: list[NonEmptyString] = Field(default_factory=list)
-
-    source_claim: NonEmptyString | None = None
-    source_refs: list[NonEmptyString] = Field(default_factory=list)
-    eda_result_refs: list[EvidenceRef] = Field(default_factory=list)
-
-    validation_strategy: FinalValidationMethod | None = None
-    confidence: Confidence = "medium"
-    evidence_origin: EvidenceOrigin = "Hypothesis-to-test"
-    limitations: list[NonEmptyString] = Field(default_factory=list)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_registered_collections(cls, value: Any) -> Any:
-        return normalize_contract_payload(value, cls.__name__)
-
-    @model_validator(mode="after")
-    def _require_strategy_links(self) -> "FinalStrategyAction":
-        if not self.evidence_refs:
-            raise ValueError("FinalStrategyAction.evidence_refs must not be empty")
-        if not self.related_hypothesis_ids:
-            raise ValueError("FinalStrategyAction.related_hypothesis_ids must not be empty")
-        if not self.eda_result_refs:
-            self.eda_result_refs = list(self.evidence_refs)
-        return self
-
-
-class FinalStrategySection(BaseModel):
-    section_id: NonEmptyString
-    title: NonEmptyString
-    summary: NonEmptyString
-    actions: list[FinalStrategyAction] = Field(default_factory=list)
-    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
-    related_hypothesis_ids: list[NonEmptyString] = Field(default_factory=list)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_registered_collections(cls, value: Any) -> Any:
-        return normalize_contract_payload(value, cls.__name__)
-
-    @model_validator(mode="after")
-    def _require_action_or_evidence(self) -> "FinalStrategySection":
-        if not self.actions and not self.evidence_refs:
-            raise ValueError(
-                "FinalStrategySection must include actions or evidence_refs"
-            )
-        return self
-
-
-class FinalStrategyResult(BaseModel):
-    schema_version: str = "1.0"
-    competition_id: NonEmptyString
-    task_type: NonEmptyString | None = None
-    metric: dict[str, Any] = Field(default_factory=dict)
-
-    recommended_validation: FinalValidationMethod | None = None
-    sections: list[FinalStrategySection] = Field(default_factory=list)
-    actions: list[FinalStrategyAction] = Field(default_factory=list)
-
-    source_to_hypothesis_links: list[dict[str, Any]] = Field(default_factory=list)
-    hypothesis_to_eda_links: list[dict[str, Any]] = Field(default_factory=list)
-    limitations: list[NonEmptyString] = Field(default_factory=list)
-    models_used: dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_registered_collections(cls, value: Any) -> Any:
-        return normalize_contract_payload(value, cls.__name__)
-
-    @model_validator(mode="after")
-    def _require_actions(self) -> "FinalStrategyResult":
-        if not self.actions and not any(section.actions for section in self.sections):
-            raise ValueError("FinalStrategyResult must include at least one action")
-        return self
 
 
 async def synthesize_final_strategy(
     *,
-    competition_desc: str,
-    plan_data: PlanData,
-    retrieved_documents: list[RetrievedDocument],
-    domain_patterns: list[dict[str, Any]],
-    research_hypotheses: ResearchHypotheses,
-    eda_evidence_pack: EdaEvidencePack,
-    reasoning_outputs: dict[str, Any],
-    eda_summary_text: str | None = None,
+    context: FinalSynthesisContext,
+    registries: ContractRegistries,
     client: DeepSeekClient,
     model: str,
 ) -> FinalStrategyResult:
+    experiment_registry = registries.experiments
+    competition_desc = context.competition_desc
+    plan_data = context.plan_data
+    retrieved_documents = context.retrieved_documents
+    research_hypotheses = context.research_hypotheses
+    eda_evidence_pack = context.eda_evidence_pack
+    eda_summary_text = context.eda_summary_text
+    try:
+        reference_catalog = build_final_strategy_reference_catalog(
+            eda_evidence_pack,
+            research_hypotheses=research_hypotheses,
+            source_claim_ids=[document.id for document in retrieved_documents],
+        )
+    except FinalStrategyCompilationError:
+        raise
+    except Exception as exc:
+        raise FinalStrategyRepairError(
+            "Final strategy failed during reference_catalog_build.",
+            phase="reference_catalog_build",
+        ) from exc
     raw = await client.chat_json(
         model=model,
         system_prompt=FINAL_SYNTHESIZER_SYSTEM_PROMPT,
         user_prompt=_build_final_synthesizer_prompt(
-            competition_desc=competition_desc,
-            plan_data=plan_data,
-            retrieved_documents=retrieved_documents,
-            domain_patterns=domain_patterns,
-            research_hypotheses=research_hypotheses,
-            eda_evidence_pack=eda_evidence_pack,
-            eda_summary_text=eda_summary_text,
-            reasoning_outputs=reasoning_outputs,
+            context=context,
+            registries=registries,
+            reference_catalog=reference_catalog,
         ),
     )
     result = _result_from_payload(
@@ -180,6 +118,7 @@ async def synthesize_final_strategy(
         research_hypotheses=research_hypotheses,
         eda_summary=eda_summary_text,
         model=model,
+        reference_catalog=reference_catalog,
     )
     result = postprocess_final_strategy_result(
         result,
@@ -189,41 +128,307 @@ async def synthesize_final_strategy(
         ],
     )
     _enforce_primary_validation(result, eda_evidence_pack)
-    _validate_final_experiment_references(result, reasoning_outputs)
+    known_hypothesis_ids, _ = _build_hypothesis_lookup(
+        research_hypotheses.model_dump(mode="json").get("hypotheses", []),
+        eda_evidence_pack.model_dump(mode="json"),
+    )
+    repaired_references = repair_final_experiment_references(result, experiment_registry)
+    result = repaired_references.result
+    if repaired_references.applied_repairs:
+        experiment_repairs = [
+            {
+                "field_path": repair.field_path,
+                "original_id": repair.original_id,
+                "replacement_id": repair.replacement_id,
+            }
+            for repair in repaired_references.applied_repairs
+        ]
+        result.reference_repairs = [*experiment_repairs, *result.reference_repairs]
+    allowed_eda_refs = set(generate_allowed_evidence_refs(eda_evidence_pack))
+    evidence_registry = registries.evidence
+    _derive_eda_result_refs(result, allowed_eda_refs)
+    issues = _final_reference_issues(result, registries)
+    if issues:
+        result = await _repair_final_references_once(
+            client=client,
+            model=model,
+            result=result,
+            issues=issues,
+            allowed_evidence_refs=context.allowed_evidence_refs,
+            allowed_eda_result_refs=context.allowed_eda_result_refs,
+            approved_experiment_ids=sorted(experiment_registry.approved_experiment_ids),
+            allowed_risk_ids=context.allowed_risk_ids,
+            allowed_validation_requirement_ids=context.allowed_validation_requirement_ids,
+            allowed_safety_constraint_ids=context.allowed_safety_constraint_ids,
+            reference_catalog=reference_catalog,
+        )
+        result = postprocess_final_strategy_result(
+            result,
+            eda_evidence_pack=eda_evidence_pack.model_dump(mode="json"),
+            source_evidence=[
+                _retrieved_document_payload(document) for document in retrieved_documents
+            ],
+        )
+        _enforce_primary_validation(result, eda_evidence_pack)
+        repaired_references = repair_final_experiment_references(result, experiment_registry)
+        result = repaired_references.result
+        _derive_eda_result_refs(result, allowed_eda_refs)
+        remaining_issues = _final_reference_issues(result, registries)
+        if remaining_issues:
+            raise CrossNamespaceReferenceError(remaining_issues)
+    validate_final_synthesis_bundle(
+        eda_evidence_pack,
+        context.experiment_plan,
+        context.review,
+        result,
+        hypotheses=research_hypotheses,
+        source_ids=[document.id for document in retrieved_documents],
+        optional_stage_failures=context.optional_stage_failure_messages,
+    )
     return result
 
 
-def _validate_final_experiment_references(
+async def _repair_final_references_once(
+    *,
+    client: DeepSeekClient,
+    model: str,
     result: FinalStrategyResult,
-    reasoning_outputs: dict[str, Any],
+    issues: list[Any],
+    allowed_evidence_refs: list[str],
+    allowed_eda_result_refs: list[str],
+    approved_experiment_ids: list[str],
+    allowed_risk_ids: list[str],
+    allowed_validation_requirement_ids: list[str],
+    allowed_safety_constraint_ids: list[str],
+    reference_catalog: ReferenceCatalog,
+) -> FinalStrategyResult:
+    response = await client.chat_json(
+        model=model,
+        system_prompt=(
+            "Correct only reference fields in the supplied FinalStrategyResult. "
+            "Do not change action, reason, priority, section summary, or strategic intent. "
+            "Use only allowed_evidence_refs in evidence_refs, only "
+            "allowed_eda_result_refs in eda_result_refs, and only concrete "
+            "approved_experiment_ids in experiment_ids. approved_experiments and other "
+            "Use allowed_risk_ids only in risk_ids, allowed_validation_requirement_ids only "
+            "in validation_requirement_ids, and allowed_safety_constraint_ids only in "
+            "safety_constraint_ids. "
+            "context collection labels are not evidence IDs. Return the complete corrected "
+            "FinalStrategyResult JSON and nothing else."
+        ),
+        user_prompt=json.dumps({
+            "invalid_references": [
+                {
+                    "path": issue.field_path,
+                    "value": issue.invalid_value,
+                    "reason": issue.reason,
+                    "expected_namespace": issue.expected_namespace,
+                    "actual_namespace": issue.actual_namespace,
+                }
+                for issue in issues
+            ],
+            "allowed_evidence_refs": allowed_evidence_refs,
+            "allowed_eda_result_refs": allowed_eda_result_refs,
+            "approved_experiment_ids": approved_experiment_ids,
+            "allowed_risk_ids": allowed_risk_ids,
+            "allowed_validation_requirement_ids": allowed_validation_requirement_ids,
+            "allowed_safety_constraint_ids": allowed_safety_constraint_ids,
+            "invalid_result": result.model_dump(mode="json"),
+            "expected_schema": FinalStrategyResult.model_json_schema(),
+        }, ensure_ascii=False, indent=2),
+        timeout=120,
+    )
+    canonical, canonicalization_diagnostics = canonicalize_final_strategy_actions(response)
+    _preserve_action_canonicalization_diagnostics(
+        canonical,
+        canonicalization_diagnostics,
+    )
+    original_response = deepcopy(canonical)
+    migrated = canonical
+    diagnostics = HypothesisReferenceMigrationDiagnostics()
+    composite_diagnostics = CompositeReferenceResolutionDiagnostics()
+    compilation_report = FinalStrategyCompilationReport()
+    try:
+        migrated, diagnostics = migrate_final_strategy_hypothesis_references(
+            canonical,
+            reference_catalog,
+        )
+        _preserve_hypothesis_migration_diagnostics(migrated, diagnostics)
+        migrated, composite_diagnostics = resolve_final_strategy_composite_references(
+            migrated,
+            reference_catalog,
+        )
+        _preserve_composite_resolution_diagnostics(migrated, composite_diagnostics)
+        migrated, compilation_report = compile_final_strategy_action_support(
+            migrated,
+            original_payload=original_response,
+            context=FinalStrategyCompilationContext(reference_catalog=reference_catalog),
+        )
+        _preserve_action_support_report(migrated, compilation_report)
+        return FinalStrategyResult.model_validate(migrated)
+    except ValidationError as exc:
+        compilation_diagnostics = _compilation_diagnostics(
+            phase="post_resolution_schema_validation",
+            initial_issues=issues,
+            payload=migrated,
+            hypothesis_diagnostics=diagnostics,
+            composite_diagnostics=composite_diagnostics,
+            compilation_report=compilation_report,
+        )
+        raise FinalStrategySchemaValidationError(
+            errors=exc.errors(
+                include_url=False,
+                include_context=False,
+                include_input=False,
+            ),
+            payload=migrated,
+            diagnostics=compilation_diagnostics,
+        ) from exc
+    except FinalStrategyCompilationError:
+        raise
+    except Exception as exc:
+        raise FinalStrategyRepairError(
+            "Final strategy failed during reference_resolution.",
+            phase="reference_resolution",
+            diagnostics=_compilation_diagnostics(
+                phase="reference_resolution",
+                initial_issues=issues,
+                payload=migrated,
+                hypothesis_diagnostics=diagnostics,
+                composite_diagnostics=composite_diagnostics,
+                compilation_report=compilation_report,
+            ),
+        ) from exc
+
+
+def _compilation_diagnostics(
+    *,
+    phase: str,
+    initial_issues: list[Any],
+    payload: dict[str, Any],
+    hypothesis_diagnostics: HypothesisReferenceMigrationDiagnostics,
+    composite_diagnostics: CompositeReferenceResolutionDiagnostics,
+    compilation_report: FinalStrategyCompilationReport,
+) -> FinalStrategyCompilationDiagnostics:
+    diagnostic_unresolved = {
+        *hypothesis_diagnostics.unknown_hypothesis_refs,
+        *hypothesis_diagnostics.hypotheses_without_backing_evidence,
+        *composite_diagnostics.composite_refs_without_evidence,
+        *composite_diagnostics.unknown_composite_refs,
+        *composite_diagnostics.policy_only_refs,
+        *composite_diagnostics.broken_backing_evidence_refs,
+    }
+    remaining_initial = sum(
+        _reference_issue_remains(payload, issue)
+        for issue in initial_issues
+    )
+    return FinalStrategyCompilationDiagnostics(
+        phase=phase,
+        initial_reference_issues=len(initial_issues),
+        resolved_references=max(0, len(initial_issues) - remaining_initial),
+        unresolved_references=max(len(diagnostic_unresolved), remaining_initial),
+        kept_actions=len(compilation_report.kept_actions),
+        downgraded_actions=len(compilation_report.downgraded_actions),
+        dropped_actions=len(compilation_report.dropped_actions),
+    )
+
+
+def _reference_issue_remains(payload: dict[str, Any], issue: Any) -> int:
+    current: Any = payload
+    for name, index in re.findall(r"([^.\[\]]+)(?:\[(\d+)\])?", issue.field_path):
+        if not isinstance(current, dict) or name not in current:
+            return 0
+        current = current[name]
+        if index:
+            if not isinstance(current, list) or int(index) >= len(current):
+                return 0
+            current = current[int(index)]
+    values = current if isinstance(current, (list, tuple, set)) else [current]
+    return int(str(issue.invalid_value) in {str(value) for value in values})
+
+
+def _final_reference_issues(
+    result: FinalStrategyResult, registries: ContractRegistries
+) -> list[ReferenceIssue]:
+    issues: list[ReferenceIssue] = []
+    allowed_evidence = {
+        *registries.evidence.ids("eda_evidence"),
+        *registries.evidence.ids("source_claim"),
+        *registries.evidence.ids("synthetic_inference"),
+    }
+    allowed_eda = set(registries.evidence.ids("eda_evidence"))
+    source_ids = set(registries.evidence.ids("source_claim"))
+
+    def actual(value: str) -> str | None:
+        try:
+            return registries.namespace_for(value)
+        except Exception:
+            return "ambiguous"
+
+    for path, action in _iter_actions_with_paths(result):
+        checks = (
+            ("evidence_refs", action.evidence_refs, allowed_evidence, "evidence"),
+            ("eda_result_refs", action.eda_result_refs, allowed_eda, "eda_evidence"),
+            ("source_refs", action.source_refs, source_ids, "source"),
+            ("hypothesis_ids", set(action.hypothesis_ids) | set(action.related_hypothesis_ids), set(registries.hypotheses.by_id), "hypothesis"),
+            ("risk_ids", action.risk_ids, set(registries.risks.by_id), "risk"),
+            ("validation_requirement_ids", action.validation_requirement_ids, set(registries.validation_requirements.by_id), "validation_requirement"),
+            ("safety_constraint_ids", action.safety_constraint_ids, set(registries.safety_constraints.by_id), "safety_constraint"),
+        )
+        for field, values, allowed, expected in checks:
+            for value in values:
+                if value not in allowed:
+                    is_context_label = str(value) in FORBIDDEN_CONTEXT_LABELS
+                    issues.append(ReferenceIssue(
+                        f"{path}.{field}", expected, str(value),
+                        "context_label" if is_context_label else actual(str(value)),
+                        "context_label_not_reference" if is_context_label
+                        else "cross_namespace" if actual(str(value)) else "unknown",
+                    ))
+        for value in action.experiment_ids:
+            if value not in registries.experiments.approved_ids:
+                namespace = "rejected_experiment" if value in registries.experiments.rejected_ids else actual(str(value))
+                issues.append(ReferenceIssue(
+                    f"{path}.experiment_ids", "approved_experiment", str(value), namespace,
+                    "rejected_experiment" if namespace == "rejected_experiment" else "unknown_or_unapproved_experiment",
+                ))
+    for index, section in enumerate(result.sections):
+        for value in section.evidence_refs:
+            if value not in allowed_evidence:
+                is_context_label = str(value) in FORBIDDEN_CONTEXT_LABELS
+                issues.append(ReferenceIssue(
+                    f"sections[{index}].evidence_refs", "evidence", str(value),
+                    "context_label" if is_context_label else actual(str(value)),
+                    "context_label_not_reference" if is_context_label
+                    else "cross_namespace" if actual(str(value)) else "unknown",
+                ))
+    return issues
+
+
+def _iter_actions_with_paths(result: FinalStrategyResult):
+    for index, action in enumerate(result.actions):
+        yield f"actions[{index}]", action
+
+
+def _derive_eda_result_refs(
+    result: FinalStrategyResult,
+    allowed_eda_refs: set[str],
 ) -> None:
-    experiments = reasoning_outputs.get("experiments") or []
-    known_ids = {
-        item.get("experiment_id")
-        for item in experiments
-        if isinstance(item, dict) and item.get("experiment_id")
-    }
-    review = reasoning_outputs.get("review") or {}
-    rejected_ids = set(review.get("rejected_experiment_ids") or []) if isinstance(review, dict) else set()
-    referenced = {
-        experiment_id
-        for action in _all_actions(result)
-        for experiment_id in action.experiment_ids
-    }
-    unknown = sorted(referenced - known_ids)
-    rejected = sorted(referenced & rejected_ids)
-    if unknown:
-        raise ValueError(f"FinalStrategyResult references unknown experiment_ids: {unknown}")
-    if rejected:
-        raise ValueError(f"FinalStrategyResult restores reviewer-rejected experiment_ids: {rejected}")
+    for action in _all_actions(result):
+        if not action.eda_result_refs:
+            action.eda_result_refs = [
+                reference for reference in action.evidence_refs
+                if reference in allowed_eda_refs
+            ]
 
 
 FINAL_SYNTHESIZER_SYSTEM_PROMPT = (
     "You are the Final Strategy Synthesizer for a Kaggle research pipeline. "
-    "Return only JSON matching the expected schema. Do not include raw chain-of-thought. "
+    "Return only JSON matching the FinalStrategyDraft schema. Do not include raw "
+    "chain-of-thought. Use typed support_refs and never write evidence_refs directly. "
     "Do not make unsupported claims. Do not claim that notebooks were executed. "
     "Do not claim that a baseline is the final solution. Link every important "
-    "recommendation to EDA evidence_refs and related Scout hypothesis ids. "
+    "recommendation through typed support_refs for EDA evidence and Scout hypotheses. "
     "Respect validation_evidence.primary_validation exactly; do not replace it with "
     "a different primary validation policy. If EDA selected StratifiedKFold, do not "
     "override it with temporal CV. If temporal validation is diagnostic only, state "
@@ -234,42 +439,43 @@ FINAL_SYNTHESIZER_SYSTEM_PROMPT = (
 
 def _build_final_synthesizer_prompt(
     *,
-    competition_desc: str,
-    plan_data: PlanData,
-    retrieved_documents: list[RetrievedDocument],
-    domain_patterns: list[dict[str, Any]],
-    research_hypotheses: ResearchHypotheses,
-    eda_evidence_pack: EdaEvidencePack,
-    reasoning_outputs: dict[str, Any],
-    eda_summary_text: str | None = None,
+    context: FinalSynthesisContext,
+    registries: ContractRegistries,
+    reference_catalog: ReferenceCatalog,
 ) -> str:
-    known_hypothesis_ids, _ = _build_hypothesis_lookup(
-        research_hypotheses.model_dump(mode="json").get("hypotheses", []),
-        eda_evidence_pack.model_dump(mode="json"),
-    )
+    experiment_registry = registries.experiments
+    context_payload = context.reference_prompt_payload()
     payload = {
-        "competition_desc": competition_desc,
-        "plan_data": plan_data.model_dump(mode="json"),
+        "competition_desc": context.competition_desc,
+        "plan_data": context.plan_data.model_dump(mode="json"),
         "retrieved_documents": [
-            _retrieved_document_payload(document) for document in retrieved_documents[:20]
+            _retrieved_document_payload(document) for document in context.retrieved_documents[:20]
         ],
-        "domain_patterns": domain_patterns,
-        "research_hypotheses": research_hypotheses.model_dump(mode="json"),
-        "eda_evidence_pack": eda_evidence_pack.model_dump(mode="json"),
-        "eda_summary_markdown": eda_summary_text[:12000] if eda_summary_text else None,
-        "must_follow_eda_evidence": _eda_must_follow_payload(eda_evidence_pack),
-        "reasoning_outputs": reasoning_outputs,
+        "domain_patterns": context.domain_patterns,
+        "eda_summary_markdown": context.eda_summary_text[:12000] if context.eda_summary_text else None,
+        "must_follow_eda_evidence": _eda_must_follow_payload(context.eda_evidence_pack),
+        "supporting_reasoning": {
+            name: _bounded_reasoning_summary(value.model_dump(mode="json"))
+            for name, value in (
+                ("metric", context.metric),
+                ("validation", context.validation),
+                ("leakage", context.leakage),
+                ("leaderboard", context.leaderboard),
+            )
+        },
+        "final_strategy_context": context_payload,
         "required_rule": (
             "Every important recommendation must follow source -> hypothesis -> EDA -> strategy: "
-            "source claim from retrieved_documents, linked Scout hypothesis id, linked EDA "
-            "evidence_refs, then a concrete strategy action."
+            "source claim from retrieved_documents, linked Scout hypothesis, linked EDA "
+            "evidence, then a concrete strategy action. Represent every supporting object as "
+            "a typed support_refs item with namespace and ref_id."
         ),
         "guardrails": [
             "Do not include raw chain-of-thought.",
             "Do not make unsupported claims.",
             "Do not claim that notebooks were executed.",
             "Do not claim that baseline is final solution.",
-            "Link every important recommendation to EDA evidence_refs.",
+            "Link every important recommendation through typed support_refs.",
             "Respect validation_evidence.primary_validation.",
             "If EDA selected StratifiedKFold, do not override it with temporal CV.",
             "If temporal validation is diagnostic only, state that clearly.",
@@ -277,20 +483,70 @@ def _build_final_synthesizer_prompt(
             "Do not recommend primary IDs as predictive features by default.",
             "If target encoding or WoE is marked unsafe, recommend only OOF/fold-fitted encoding.",
             "If drift severity is high or critical, include leaderboard-risk diagnostics.",
-            "Every action must include non-empty related_hypothesis_ids.",
-            "Every action must include non-empty evidence_refs.",
-            "Every section must include actions or evidence_refs.",
+            "Every action must include non-empty support_refs.",
+            "Every section must include actions or evidence_summary_refs.",
             "Use only allowed_hypothesis_ids; do not invent hypothesis IDs.",
+            "Every value in experiment_ids must exactly match an approved_experiment_id.",
+            "Do not place hypothesis IDs into experiment_ids.",
+            "Use namespace=hypothesis for EDA hypothesis IDs.",
+            "Do not invent experiment IDs or restore reviewer-rejected experiments.",
+            "Use only exact IDs from the corresponding allowed list.",
+            "Do not write evidence_refs directly.",
+            "Use support_refs with explicit namespace and ref_id.",
+            "Hypothesis IDs use namespace=hypothesis.",
+            "Risk IDs use namespace=risk.",
+            "Validation requirements use namespace=validation_requirement.",
+            "Safety constraints use namespace=safety_constraint.",
+            "Direct EDA paths use namespace=evidence.",
+            "Retrieved source claims use namespace=source_claim.",
         ],
-        "allowed_hypothesis_ids": known_hypothesis_ids,
+        "allowed_hypothesis_ids": context_payload["allowed_hypothesis_ids"],
+        "allowed_experiment_ids": context_payload["allowed_experiment_ids"],
+        "approved_experiment_ids": sorted(experiment_registry.approved_experiment_ids),
+        "rejected_experiment_ids": context_payload["rejected_experiment_ids"],
+        "approved_experiments": context_payload["approved_experiments"],
+        "allowed_evidence_refs": context_payload["allowed_evidence_refs"],
+        "allowed_eda_result_refs": context_payload["allowed_eda_result_refs"],
+        "allowed_risk_ids": context_payload["allowed_risk_ids"],
+        "allowed_validation_requirement_ids": context_payload["allowed_validation_requirement_ids"],
+        "allowed_safety_constraint_ids": context_payload["allowed_safety_constraint_ids"],
+        "allowed_support_refs": [
+            {
+                "namespace": entry.namespace,
+                "ref_id": entry.canonical_ref,
+            }
+            for entry in reference_catalog.entries
+        ],
         "allowed_hypothesis_ids_instruction": (
             "Every action MUST reference at least one allowed hypothesis ID in "
             "related_hypothesis_ids. Do not invent IDs."
         ),
+        "evidence_reference_instruction": (
+            "Do not write evidence_refs directly. Use support_refs with explicit namespace "
+            "and ref_id. Hypothesis IDs use namespace=hypothesis; risk IDs use namespace=risk; "
+            "validation requirements use namespace=validation_requirement; safety constraints "
+            "use namespace=safety_constraint; direct EDA paths use namespace=evidence; source "
+            "claims use namespace=source_claim. approved_experiments is a context section, not "
+            "a reference. Other context section names are not references either. Reference "
+            "approved work through concrete experiment_ids."
+        ),
         "required_sections": REQUIRED_SECTION_IDS,
-        "expected_schema": FinalStrategyResult.model_json_schema(),
+        "expected_schema": FinalStrategyDraft.model_json_schema(),
     }
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _bounded_reasoning_summary(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    allowed = {
+        "confidence", "recommended_cv", "validation_risk", "likely_split",
+        "primary_validation", "secondary_validation", "risk_level", "possible_issues",
+        "recommended_checks", "metric_explanation", "needs_calibration",
+        "rank_averaging_useful", "threshold_search_needed", "shake_up_risk",
+        "submission_selection_rule", "public_lb_trust", "warnings", "limitations",
+    }
+    return {key: value[key] for key in sorted(value) if key in allowed}
 
 
 def _retrieved_document_payload(document: RetrievedDocument) -> dict[str, Any]:
@@ -336,9 +592,15 @@ def _eda_must_follow_payload(eda_evidence_pack: EdaEvidencePack) -> dict[str, An
         "drift_severity": drift.get("feature_drift_severity") or drift.get("severity"),
         "eda_implications": eda_evidence_pack.eda_implications,
         "eda_local_risks": [item.model_dump(mode="json") for item in eda_evidence_pack.eda_risks],
-        "safety_constraints": eda_evidence_pack.safety_constraints,
-        "validation_requirements": eda_evidence_pack.validation_requirements,
-        "testable_hypotheses": eda_evidence_pack.testable_hypotheses,
+        "safety_constraints": [
+            item.model_dump(mode="json") for item in eda_evidence_pack.safety_constraints
+        ],
+        "validation_requirements": [
+            item.model_dump(mode="json") for item in eda_evidence_pack.validation_requirements
+        ],
+        "testable_hypotheses": [
+            item.model_dump(mode="json") for item in eda_evidence_pack.testable_hypotheses
+        ],
         "source_claim_validation": eda_evidence_pack.source_claim_validation,
         "evidence_origins": eda_evidence_pack.evidence_origins,
     }
@@ -352,6 +614,7 @@ def _result_from_payload(
     research_hypotheses: ResearchHypotheses,
     eda_summary: str | None = None,
     model: str,
+    reference_catalog: ReferenceCatalog,
 ) -> FinalStrategyResult:
     normalized = dict(payload)
     normalized.setdefault("competition_id", eda_evidence_pack.competition_id)
@@ -364,6 +627,30 @@ def _result_from_payload(
         **dict(normalized.get("models_used") or {}),
         "final_synthesizer": model,
     }
+    normalized, canonicalization_diagnostics = canonicalize_final_strategy_actions(
+        normalized
+    )
+    _preserve_action_canonicalization_diagnostics(
+        normalized,
+        canonicalization_diagnostics,
+    )
+    original_for_support_gate = deepcopy(normalized)
+    normalized, migration_diagnostics = migrate_final_strategy_hypothesis_references(
+        normalized,
+        reference_catalog,
+    )
+    _preserve_hypothesis_migration_diagnostics(normalized, migration_diagnostics)
+    normalized, composite_diagnostics = resolve_final_strategy_composite_references(
+        normalized,
+        reference_catalog,
+    )
+    _preserve_composite_resolution_diagnostics(normalized, composite_diagnostics)
+    normalized, compilation_report = compile_final_strategy_action_support(
+        normalized,
+        original_payload=original_for_support_gate,
+        context=FinalStrategyCompilationContext(reference_catalog=reference_catalog),
+    )
+    _preserve_action_support_report(normalized, compilation_report)
     hypotheses_payload = research_hypotheses.model_dump(mode="json").get("hypotheses", [])
     eda_payload = eda_evidence_pack.model_dump(mode="json")
     known_ids, _ = _build_hypothesis_lookup(hypotheses_payload, eda_payload)
@@ -412,6 +699,95 @@ def _result_from_payload(
     result = FinalStrategyResult.model_validate(fallback)
     _apply_eda_grounding(result, eda_evidence_pack, research_hypotheses)
     return result
+
+
+def _preserve_hypothesis_migration_diagnostics(
+    payload: dict[str, Any],
+    diagnostics: HypothesisReferenceMigrationDiagnostics,
+) -> None:
+    if not diagnostics.changed:
+        return
+    repairs = list(payload.get("reference_repairs") or [])
+    for field_name in (
+        "moved_hypothesis_refs",
+        "inherited_evidence_refs",
+        "unknown_hypothesis_refs",
+        "hypotheses_without_backing_evidence",
+    ):
+        for value in getattr(diagnostics, field_name):
+            record = {
+                "field_path": f"hypothesis_reference_migration.{field_name}",
+                "original_id": value,
+                "replacement_id": value if field_name != "unknown_hypothesis_refs" else "",
+            }
+            if record not in repairs:
+                repairs.append(record)
+    payload["reference_repairs"] = repairs
+
+
+def _preserve_action_canonicalization_diagnostics(
+    payload: dict[str, Any],
+    diagnostics: ActionCanonicalizationDiagnostics,
+) -> None:
+    repairs = list(payload.get("reference_repairs") or [])
+    for field_name in ("generated_action_ids", "merged_duplicate_actions"):
+        for action_id in getattr(diagnostics, field_name):
+            record = {
+                "field_path": f"action_canonicalization.{field_name}",
+                "original_id": action_id,
+                "replacement_id": action_id,
+            }
+            if record not in repairs:
+                repairs.append(record)
+    payload["reference_repairs"] = repairs
+
+
+def _preserve_composite_resolution_diagnostics(
+    payload: dict[str, Any],
+    diagnostics: CompositeReferenceResolutionDiagnostics,
+) -> None:
+    if not diagnostics.changed:
+        return
+    repairs = list(payload.get("reference_repairs") or [])
+    for field_name in (
+        "resolved_composite_refs",
+        "inherited_backing_evidence_refs",
+        "composite_refs_without_evidence",
+        "unknown_composite_refs",
+        "policy_only_refs",
+        "broken_backing_evidence_refs",
+    ):
+        for value in getattr(diagnostics, field_name):
+            record = {
+                "field_path": f"composite_reference_resolution.{field_name}",
+                "original_id": value,
+                "replacement_id": value if field_name == "inherited_backing_evidence_refs" else "",
+            }
+            if record not in repairs:
+                repairs.append(record)
+    payload["reference_repairs"] = repairs
+
+
+def _preserve_action_support_report(
+    payload: dict[str, Any],
+    report: FinalStrategyCompilationReport,
+) -> None:
+    repairs = list(payload.get("reference_repairs") or [])
+    for field_name in (
+        "kept_actions",
+        "downgraded_actions",
+        "dropped_actions",
+        "failed_actions",
+    ):
+        for decision in getattr(report, field_name):
+            record = {
+                "field_path": f"action_support_compilation.{field_name}",
+                "original_id": decision.action_id,
+                "replacement_id": decision.reason,
+            }
+            if record not in repairs:
+                repairs.append(record)
+    payload["reference_repairs"] = repairs
 
 
 def repair_final_strategy_payload(
@@ -494,7 +870,11 @@ def repair_final_strategy_payload(
     # Unknown IDs are unsupported even though they satisfy the string schema.
     for action in _iter_action_payloads(repaired):
         action["related_hypothesis_ids"] = _known_only(
-            action.get("related_hypothesis_ids"), known_set
+            [
+                *_string_values(action.get("related_hypothesis_ids")),
+                *_string_values(action.get("hypothesis_ids")),
+            ],
+            known_set,
         )
         if not action["related_hypothesis_ids"]:
             inferred = _infer_hypothesis_ids(
@@ -504,6 +884,7 @@ def repair_final_strategy_payload(
                 section_context="",
             )
             action["related_hypothesis_ids"] = inferred
+        action["hypothesis_ids"] = list(action["related_hypothesis_ids"])
     return repaired
 
 
@@ -691,6 +1072,7 @@ def _build_hypothesis_lookup(
     category_ids: dict[str, list[str]] = {}
     candidates = list(research_hypotheses or [])
     candidates.extend((eda_evidence_pack or {}).get("hypothesis_results") or [])
+    candidates.extend((eda_evidence_pack or {}).get("testable_hypotheses") or [])
     for candidate in candidates:
         item = _to_dict(candidate)
         hypothesis_id = str(item.get("hypothesis_id") or item.get("id") or "").strip()
@@ -760,7 +1142,11 @@ def _repair_action_payload(
     fixed["evidence_refs"] = _string_values(fixed.get("evidence_refs"))
     known_set = set(known_ids)
     fixed["related_hypothesis_ids"] = _known_only(
-        fixed.get("related_hypothesis_ids"), known_set
+        [
+            *_string_values(fixed.get("related_hypothesis_ids")),
+            *_string_values(fixed.get("hypothesis_ids")),
+        ],
+        known_set,
     )
     if not fixed["related_hypothesis_ids"]:
         fixed["related_hypothesis_ids"] = _infer_hypothesis_ids(
@@ -769,6 +1155,7 @@ def _repair_action_payload(
             category_ids=category_ids,
             section_context=section_context,
         )
+    fixed["hypothesis_ids"] = list(fixed["related_hypothesis_ids"])
     if not fixed["evidence_refs"]:
         fixed["evidence_refs"] = _infer_evidence_refs(fixed, section_context)
         if fixed["evidence_refs"] == ["final_synthesizer.repaired"]:
@@ -1058,20 +1445,15 @@ def postprocess_final_strategy_result(
 
     primary_id = _primary_id_from_eda(eda)
     validation_method = _primary_validation_method_from_dict(eda)
-    for section in cleaned.sections:
-        for action in section.actions:
-            _normalize_strategy_action(
-                action,
-                section_id=section.section_id,
-                eda=eda,
-                source_ids=source_ids,
-                primary_id=primary_id,
-                validation_method=validation_method,
-            )
+    section_by_action_id = {
+        action_id: section.section_id
+        for section in cleaned.sections
+        for action_id in section.action_ids
+    }
     for action in cleaned.actions:
         _normalize_strategy_action(
             action,
-            section_id="",
+            section_id=section_by_action_id.get(action.action_id or "", ""),
             eda=eda,
             source_ids=source_ids,
             primary_id=primary_id,
@@ -1093,9 +1475,15 @@ def render_final_strategy(result: FinalStrategyResult) -> str:
         f"Validation: `{result.recommended_validation or 'unknown'}`",
         "",
     ]
+    action_map = {
+        action.action_id: action
+        for action in result.actions
+        if action.action_id
+    }
     for section in result.sections:
         lines.extend([f"## {section.title}", "", section.summary, ""])
-        for action in section.actions:
+        for action_id in section.action_ids:
+            action = action_map[action_id]
             evidence = ", ".join(action.evidence_refs)
             lines.append(
                 f"- {action.priority} [{action.evidence_origin}]: "
@@ -1103,8 +1491,46 @@ def render_final_strategy(result: FinalStrategyResult) -> str:
             )
             if action.reason:
                 lines.append(f"  Rationale: {action.reason}")
-        if section.evidence_refs and not section.actions:
+            if action.risk_ids:
+                lines.append(f"  Risks: {', '.join(action.risk_ids)}")
+            if action.validation_requirement_ids:
+                lines.append(
+                    "  Validation requirements: "
+                    + ", ".join(action.validation_requirement_ids)
+                )
+            if action.safety_constraint_ids:
+                lines.append(
+                    "  Safety constraints: " + ", ".join(action.safety_constraint_ids)
+                )
+        if section.evidence_refs and not section.action_ids:
             lines.append(f"- Evidence: {', '.join(section.evidence_refs)}")
+        lines.append("")
+    if result.actions and not result.sections:
+        lines.extend(["## Prioritized Actions", ""])
+        for action in result.actions:
+            lines.append(
+                f"- {action.priority} [{action.evidence_origin}]: {action.action} "
+                f"Evidence: {', '.join(action.evidence_refs)}"
+            )
+            if action.risk_ids:
+                lines.append(f"  Risks: {', '.join(action.risk_ids)}")
+            if action.validation_requirement_ids:
+                lines.append("  Validation requirements: " + ", ".join(action.validation_requirement_ids))
+            if action.safety_constraint_ids:
+                lines.append("  Safety constraints: " + ", ".join(action.safety_constraint_ids))
+        lines.append("")
+    if any((
+        result.acknowledged_risk_ids,
+        result.selected_validation_requirement_ids,
+        result.enforced_safety_constraint_ids,
+    )):
+        lines.extend(["## Enforced Contract References", ""])
+        if result.acknowledged_risk_ids:
+            lines.append("- Acknowledged risks: " + ", ".join(result.acknowledged_risk_ids))
+        if result.selected_validation_requirement_ids:
+            lines.append("- Selected validation requirements: " + ", ".join(result.selected_validation_requirement_ids))
+        if result.enforced_safety_constraint_ids:
+            lines.append("- Enforced safety constraints: " + ", ".join(result.enforced_safety_constraint_ids))
         lines.append("")
     if result.limitations:
         lines.extend(["## Evidence Availability & Uncertainty", ""])
@@ -1164,8 +1590,13 @@ def validate_rendered_strategy_quality(
 ) -> list[str]:
     warnings: list[str] = []
     eda = eda_evidence_pack or {}
+    action_map = {
+        action.action_id: action for action in result.actions if action.action_id
+    }
     rendered_actions = [
-        action for section in result.sections for action in section.actions
+        action_map[action_id]
+        for section in result.sections
+        for action_id in section.action_ids
     ]
     actions = _unique_model_actions(_all_actions(result))
     seen: list[FinalStrategyAction] = []
@@ -1191,7 +1622,7 @@ def validate_rendered_strategy_quality(
             break
     if "perfectly separate" in full_text.lower():
         warnings.append("Drift language overstates diagnostic separability.")
-    if full_text and len(summary_text) >= 0.4 * len(full_text):
+    if full_text and len(summary_text) >= 0.5 * len(full_text):
         warnings.append("Final strategy summary is too close in length to the full strategy.")
     if any(
         action.source_refs
@@ -1236,8 +1667,15 @@ def _normalize_strategy_action(
             action.priority = embedded_priority
         action.action = action.action[priority_match.end():].strip()
     action.evidence_refs = _unique_strings(action.evidence_refs)
-    action.eda_result_refs = _unique_strings(action.eda_result_refs or action.evidence_refs)
+    action.eda_result_refs = _unique_strings(action.eda_result_refs)
+    action.risk_ids = _unique_strings(action.risk_ids)
+    action.validation_requirement_ids = _unique_strings(action.validation_requirement_ids)
+    action.safety_constraint_ids = _unique_strings(action.safety_constraint_ids)
     action.related_hypothesis_ids = _unique_strings(action.related_hypothesis_ids)
+    action.hypothesis_ids = _unique_strings(
+        [*action.related_hypothesis_ids, *action.hypothesis_ids]
+    )
+    action.related_hypothesis_ids = list(action.hypothesis_ids)
     text = f"{action.action} {action.reason}".lower()
 
     if _unsafe_primary_id_feature_text(text, primary_id):
@@ -1316,40 +1754,17 @@ def _normalize_strategy_action(
 
 
 def _deduplicate_strategy_actions(result: FinalStrategyResult) -> None:
-    groups: list[dict[str, Any]] = []
-    for section_index, section in enumerate(result.sections):
-        for action in section.actions:
-            _merge_action_candidate(groups, action, section_index)
-            section.evidence_refs = _unique_strings([*section.evidence_refs, *action.evidence_refs])
-    for action in result.actions:
-        _merge_action_candidate(groups, action, None)
-
-    for section in result.sections:
-        section.actions = []
-    for group in groups:
-        action = group["action"]
-        locations = group["locations"]
-        section_locations = [item for item in locations if item is not None]
-        candidate_indexes = section_locations or list(range(len(result.sections)))
-        if not candidate_indexes:
-            result.sections.append(
-                FinalStrategySection(
-                    section_id="experiments_queue",
-                    title="Experiments Queue",
-                    summary="Actions produced by final strategy synthesis.",
-                    evidence_refs=list(action.evidence_refs),
-                )
-            )
-            candidate_indexes = [0]
-        best_index = max(
-            candidate_indexes,
-            key=lambda index: _section_relevance(
-                result.sections[index].section_id,
-                _primary_evidence_category(action.evidence_refs),
-            ),
-        )
-        result.sections[best_index].actions.append(action.model_copy(deep=True))
-    result.actions = [group["action"] for group in groups]
+    canonical, _ = canonicalize_final_strategy_actions(result.model_dump(mode="json"))
+    canonical_actions = [
+        FinalStrategyAction.model_validate(action)
+        for action in canonical["actions"]
+    ]
+    canonical_sections = [
+        FinalStrategySection.model_validate(section)
+        for section in canonical["sections"]
+    ]
+    object.__setattr__(result, "actions", canonical_actions)
+    object.__setattr__(result, "sections", canonical_sections)
 
 
 def _merge_action_candidate(
@@ -1366,6 +1781,21 @@ def _merge_action_candidate(
         existing.related_hypothesis_ids = _unique_strings(
             [*existing.related_hypothesis_ids, *action.related_hypothesis_ids]
         )
+        existing.hypothesis_ids = _unique_strings(
+            [*existing.hypothesis_ids, *action.hypothesis_ids]
+        )
+        existing.experiment_ids = _unique_strings(
+            [*existing.experiment_ids, *action.experiment_ids]
+        )
+        existing.risk_ids = _unique_strings([*existing.risk_ids, *action.risk_ids])
+        existing.validation_requirement_ids = _unique_strings([
+            *existing.validation_requirement_ids,
+            *action.validation_requirement_ids,
+        ])
+        existing.safety_constraint_ids = _unique_strings([
+            *existing.safety_constraint_ids,
+            *action.safety_constraint_ids,
+        ])
         if _priority_rank(action.priority) < _priority_rank(existing.priority):
             existing.priority = action.priority
         if len(action.reason) > len(existing.reason):
@@ -1530,9 +1960,7 @@ def _ensure_conservative_baseline(
         related_hypothesis_ids=hypothesis_ids,
         confidence="medium",
     )
-    section = _find_or_create_section(result, "baseline_findings", action)
-    section.actions.append(action)
-    result.actions.append(action)
+    _add_grounding_action(result, "baseline_findings", action)
 
 
 def _ensure_primary_id_safety_action(
@@ -1564,9 +1992,7 @@ def _ensure_primary_id_safety_action(
         confidence="high",
         evidence_origin="Safety-warning",
     )
-    section = _find_or_create_section(result, "what_not_to_do", action)
-    section.actions.append(action)
-    result.actions.append(action)
+    _add_grounding_action(result, "what_not_to_do", action)
 
 
 def _ensure_leakage_safety_action(
@@ -1592,9 +2018,7 @@ def _ensure_leakage_safety_action(
         confidence="high",
         evidence_origin="Safety-warning",
     )
-    section = _find_or_create_section(result, "leakage_and_data_quality", action)
-    section.actions.append(action)
-    result.actions.append(action)
+    _add_grounding_action(result, "leakage_and_data_quality", action)
 
 
 def _append_evidence_availability_limitations(
@@ -1923,9 +2347,15 @@ def _add_grounding_action(
 ) -> None:
     if _has_similar_action(result, action):
         return
+    if not action.action_id:
+        canonical, _ = canonicalize_final_strategy_actions({"actions": [
+            action.model_dump(mode="json")
+        ]})
+        action = FinalStrategyAction.model_validate(canonical["actions"][0])
     result.actions.append(action)
     section = _find_or_create_section(result, section_id, action)
-    section.actions.append(action)
+    if action.action_id not in section.action_ids:
+        section.action_ids.append(action.action_id)
     for ref in action.evidence_refs:
         if ref not in section.evidence_refs:
             section.evidence_refs.append(ref)
@@ -2056,10 +2486,7 @@ def _enforce_primary_validation(
 
 
 def _all_actions(result: FinalStrategyResult) -> list[FinalStrategyAction]:
-    actions = list(result.actions)
-    for section in result.sections:
-        actions.extend(section.actions)
-    return actions
+    return list(result.actions)
 
 
 __all__ = [
@@ -2070,6 +2497,11 @@ __all__ = [
     "FinalValidationMethod",
     "REQUIRED_SECTION_IDS",
     "build_fallback_final_strategy",
+    "migrate_final_strategy_hypothesis_references", "migrate_hypothesis_references",
+    "resolve_composite_action_references", "resolve_final_strategy_composite_references",
+    "UnsupportedFinalStrategyActionError", "compile_final_strategy_action_support",
+    "enforce_action_evidence_support",
+    "ActionCanonicalizationDiagnostics", "canonicalize_final_strategy_actions",
     "postprocess_final_strategy_result",
     "repair_final_strategy_payload",
     "render_final_strategy",

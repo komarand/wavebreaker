@@ -1,0 +1,18 @@
+{
+  "run_id": "legacy-run",
+  "competition_id": "demo",
+  "status": "in_progress",
+  "config": {"profile": "standard", "download_dataset": false},
+  "stages": {
+    "scout": {
+      "status": "success",
+      "outputs": {
+        "research_hypotheses": "research/research_hypotheses.json",
+        "eda_task_plan": "research/eda_task_plan.json",
+        "plan": "research/plan.json",
+        "retrieved_documents": "research/retrieved_documents.json"
+      }
+    }
+  },
+  "final_outputs": {}
+}

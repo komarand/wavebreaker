@@ -35,7 +35,9 @@ CORE_MODULE_SEQUENCE = [
     "validation_analyzer",
     "leakage_checker",
 ]
-CORE_BLOCKING_MODULES = ["schema_inferer", "validation_analyzer", "leakage_checker"]
+CORE_BLOCKING_MODULES = [
+    "file_inventory", "schema_inferer", "validation_analyzer", "leakage_checker"
+]
 
 
 async def run_research_scout(
@@ -296,6 +298,14 @@ def _ensure_core_hypotheses(
 def _core_hypotheses(plan_data: PlanData) -> list[ScoutHypothesis]:
     metric_name = _metric_name(plan_data)
     task_type = _task_type(plan_data)
+    normalized_metric = metric_name.strip().lower().replace("-", "_").replace(" ", "_")
+    validation_checks = ["validation_analyzer.primary_policy"]
+    leakage_checks = ["leakage_checker.basic"]
+    if normalized_metric == "gini_stability":
+        validation_checks.append("validation_analyzer.temporal_cv_feasibility")
+    if task_type == "ranking":
+        validation_checks.append("validation_analyzer.ranking_validation")
+        leakage_checks.append("leakage_checker.ranking_query_overlap")
     return [
         ScoutHypothesis(
             hypothesis_id="schema_001",
@@ -322,7 +332,7 @@ def _core_hypotheses(plan_data: PlanData) -> list[ScoutHypothesis]:
             category="validation",
             claim=f"Select a primary validation policy for {task_type} from metric and data evidence.",
             rationale="Validation must fit task structure without assuming temporal splits by default.",
-            expected_eda_checks=["validation_analyzer.primary_policy"],
+            expected_eda_checks=validation_checks,
             priority="P0",
             confidence_before_eda="medium",
             source_refs=[],
@@ -332,7 +342,7 @@ def _core_hypotheses(plan_data: PlanData) -> list[ScoutHypothesis]:
             category="leakage",
             claim="Check generic leakage risks before using any features for modeling.",
             rationale="Leakage can invalidate local validation and strategy decisions.",
-            expected_eda_checks=["leakage_checker.basic"],
+            expected_eda_checks=leakage_checks,
             priority="P0",
             confidence_before_eda="medium",
             source_refs=[],

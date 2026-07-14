@@ -2,9 +2,19 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, StrictBool, model_validator
+from pydantic import BaseModel, Field, HttpUrl
 
-from kaggle_researcher.contracts.normalization import normalize_contract_payload
+from kaggle_researcher.contracts.experiments import ExperimentItem
+from kaggle_researcher.contracts.review import ReviewResult
+from kaggle_researcher.contracts.validation import (
+    ConfidenceLevel,
+    LeaderboardAuditResult,
+    LeakageRiskResult,
+    MetricResult,
+    ReasoningBaseResult,
+    ValidationPolicy,
+    ValidationResult,
+)
 
 
 SourceType = Literal[
@@ -15,8 +25,6 @@ SourceType = Literal[
     "huggingface_papers",
     "github",
 ]
-ConfidenceLevel = Literal["low", "medium", "high"]
-PriorityLevel = Literal["P0", "P1", "P2", "P3"]
 
 
 class SourceDocument(BaseModel):
@@ -73,80 +81,3 @@ class ResearchRunResult(BaseModel):
     eda_summary_path: str | None = None
     final_strategy_path: str | None = None
     final_strategy_summary_path: str | None = None
-
-
-class ReasoningBaseResult(BaseModel):
-    confidence: ConfidenceLevel
-    evidence_ids: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_registered_collections(cls, value: Any) -> Any:
-        return normalize_contract_payload(value, cls.__name__)
-
-
-class ValidationPolicy(BaseModel):
-    """A concrete validation policy; secondary policies may be absent when unjustified."""
-
-    model_config = ConfigDict(extra="allow")
-
-    method: str = Field(min_length=1)
-
-
-class ValidationResult(ReasoningBaseResult):
-    recommended_cv: str
-    validation_risk: ConfidenceLevel
-    likely_split: str
-    failure_modes: list[str] = Field(default_factory=list)
-    reasoning: str
-    primary_validation: ValidationPolicy
-    secondary_validation: ValidationPolicy | None = None
-    do_not_use: list[str] = Field(default_factory=list)
-    policy_enforced: StrictBool = False
-    policy_notes: list[str] = Field(default_factory=list)
-
-class LeakageRiskResult(ReasoningBaseResult):
-    risk_level: ConfidenceLevel
-    possible_issues: list[str] = Field(default_factory=list)
-    recommended_checks: list[str] = Field(default_factory=list)
-
-
-class MetricResult(ReasoningBaseResult):
-    metric_explanation: str
-    needs_calibration: StrictBool
-    rank_averaging_useful: StrictBool
-    threshold_search_needed: StrictBool
-    surrogate_loss_suggestion: str
-
-
-class LeaderboardAuditResult(ReasoningBaseResult):
-    shake_up_risk: ConfidenceLevel
-    submission_selection_rule: str
-    public_lb_trust: str
-    warnings: list[str] = Field(default_factory=list)
-
-
-class ExperimentItem(BaseModel):
-    experiment_id: str | None = None
-    priority: PriorityLevel
-    experiment: str
-    why: str
-    cost: str
-    expected_gain: str
-    risk: str
-    evidence_ids: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_registered_collections(cls, value: Any) -> Any:
-        return normalize_contract_payload(value, cls.__name__)
-
-
-class ReviewResult(ReasoningBaseResult):
-    confidence: ConfidenceLevel = "medium"
-    unsupported_claims: list[str] = Field(default_factory=list)
-    too_generic: list[str] = Field(default_factory=list)
-    unnecessary_experiments: list[str] = Field(default_factory=list)
-    approved_experiment_ids: list[str] = Field(default_factory=list)
-    rejected_experiment_ids: list[str] = Field(default_factory=list)
-    revised_sections: dict[str, Any] = Field(default_factory=dict)

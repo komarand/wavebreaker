@@ -43,9 +43,21 @@ from kaggle_researcher.contracts.eda_task_plan import (
     validate_research_artifact_bundle,
     write_eda_task_plan_atomic,
 )
+from kaggle_researcher.contracts.artifacts import (
+    EdaStageResult,
+    ReasoningStageResult,
+    ResearchStageResult,
+    load_experiment_plan,
+    load_skeptical_review,
+    write_json_atomic,
+)
+from kaggle_researcher.contracts.registries import build_contract_registries
+from kaggle_researcher.contracts.synthesis_context import build_final_synthesis_context
+from kaggle_researcher.contracts.experiments import ExperimentPlan
 from kaggle_researcher.config import load_config
 from kaggle_researcher.eda import orchestrator as eda_orchestrator
 from kaggle_researcher.eda.schemas import EdaEvidencePack, EdaRunConfig, ResearchHypotheses
+from kaggle_researcher.contracts.research_to_eda import require_valid_research_to_eda_contract
 from kaggle_researcher.embedder import embed_texts
 from kaggle_researcher.planner import fallback_plan, plan
 from kaggle_researcher.research_scout import (
@@ -79,6 +91,10 @@ from kaggle_researcher.schemas import (
     RetrievedDocument,
     ReviewResult,
     SourceDocument,
+    LeaderboardAuditResult,
+    LeakageRiskResult,
+    MetricResult,
+    ValidationResult,
 )
 from kaggle_researcher.store.domain_memory import DomainMemory
 from kaggle_researcher.store.pg_store import PgStore
@@ -491,7 +507,21 @@ async def run_research(
             else:
                 _write_json_artifact(run_dir, "research_scout_validation.json", validation_payload)
 
-            migration = migrate_research_hypotheses_payload(scout_payload)
+            # The legacy Scout result is a rich pre-publication envelope.  Project it
+            # explicitly into the legacy hypothesis payload before canonical migration;
+            # published schema 1.0 artifacts themselves remain strict/extra-forbid.
+            research_boundary_payload = {
+                key: scout_payload[key]
+                for key in (
+                    "competition_id", "created_at", "hypotheses", "eda_tasks",
+                    "structured_findings", "scout_limitations", "models_used",
+                )
+                if key in scout_payload
+            }
+            research_boundary_payload["hypotheses"] = _adapt_legacy_scout_hypotheses(
+                list(scout_payload.get("hypotheses") or [])
+            )
+            migration = migrate_research_hypotheses_payload(research_boundary_payload)
             canonical_hypotheses = ResearchHypotheses.model_validate(migration.canonical_payload)
             if migration.migrated:
                 warnings.extend(migration.warnings)
@@ -506,9 +536,33 @@ async def run_research(
                     },
                 )
             eda_task_plan = split_eda_task_plan(scout_payload)
-            task_plan_migration = migrate_eda_task_plan_payload(eda_task_plan)
+            adapted_tasks = _adapt_legacy_scout_tasks(
+                list(eda_task_plan.get("eda_tasks") or [])
+            )
+            task_plan_boundary_payload = {
+                key: eda_task_plan[key]
+                for key in (
+                    "competition_id", "task_type", "metric", "dataset", "eda_tasks",
+                    "hypothesis_index", "recommended_module_sequence",
+                    "recommended_human_checklist", "blocking_tasks",
+                )
+                if key in eda_task_plan
+            }
+            task_plan_boundary_payload["eda_tasks"] = adapted_tasks
+            task_plan_boundary_payload["hypothesis_index"] = _derive_hypothesis_index(
+                adapted_tasks
+            )
+            task_plan_boundary_payload["recommended_module_sequence"] = [
+                _legacy_scout_module_name(value)
+                for value in eda_task_plan.get("recommended_module_sequence") or []
+            ]
+            task_plan_boundary_payload["blocking_tasks"] = list(dict.fromkeys(
+                task["module"] for task in adapted_tasks if task.get("blocking")
+            ))
+            task_plan_migration = migrate_eda_task_plan_payload(task_plan_boundary_payload)
             canonical_task_plan = EdaTaskPlan.model_validate(task_plan_migration.canonical_payload)
             validate_research_artifact_bundle(canonical_hypotheses, canonical_task_plan)
+            require_valid_research_to_eda_contract(canonical_hypotheses, canonical_task_plan)
             scout_summary = build_research_scout_summary(scout_payload)
             _write_json_artifact(run_dir, "research_scout_raw.json", scout_raw_payload)
             hypotheses_path = run_dir / "research_hypotheses.json"
@@ -632,18 +686,42 @@ async def run_research(
                 EdaEvidencePack,
             )
             _stage("Running final strategy synthesis...", show_progress)
-            final_strategy = await synthesize_final_strategy(
+            final_hypotheses = _load_json_model(
+                research_hypotheses_for_final, ResearchHypotheses
+            )
+            final_task_plan_path = Path(scout_output_paths["eda_task_plan"])
+            final_task_plan = _load_json_model(final_task_plan_path, EdaTaskPlan)
+            research_stage = ResearchStageResult(
+                final_hypotheses,
+                final_task_plan,
+                research_hypotheses_for_final,
+                final_task_plan_path,
+                plan_data,
+                tuple(retrieved_documents),
+                tuple(_load_domain_patterns(run_dir)),
+            )
+            eda_stage = EdaStageResult(
+                eda_pack_for_final,
+                eda_evidence_pack_path,
+                eda_summary_path or eda_evidence_pack_path.with_suffix(".md"),
+            )
+            reasoning_stage = _load_reasoning_stage_for_synthesis(
+                run_dir, eda_pack_for_final
+            )
+            registries = build_contract_registries(
+                research=research_stage, eda=eda_stage, reasoning=reasoning_stage
+            )
+            synthesis_context = build_final_synthesis_context(
                 competition_desc=competition_desc,
-                plan_data=plan_data,
-                retrieved_documents=retrieved_documents,
-                domain_patterns=_load_domain_patterns(run_dir),
-                research_hypotheses=_load_json_model(
-                    research_hypotheses_for_final,
-                    ResearchHypotheses,
-                ),
-                eda_evidence_pack=eda_pack_for_final,
+                research=research_stage,
+                eda=eda_stage,
+                reasoning=reasoning_stage,
+                registries=registries,
                 eda_summary_text=_load_optional_text(eda_summary_path),
-                reasoning_outputs=_reasoning_outputs_summary(run_dir),
+            )
+            final_strategy = await synthesize_final_strategy(
+                context=synthesis_context,
+                registries=registries,
                 client=client,
                 model=settings.deepseek_v4_pro,
             )
@@ -1325,8 +1403,7 @@ def _write_json_artifact(run_dir: Path, filename: str, value: Any) -> None:
 
 
 def _write_json_file(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_jsonable(value), ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_atomic(path, _jsonable(value))
 
 
 def _write_text_artifact(run_dir: Path, filename: str, value: str) -> None:
@@ -1579,6 +1656,75 @@ def _reasoning_outputs_summary(run_dir: Path) -> dict[str, Any]:
     return summary
 
 
+def _load_reasoning_stage_for_synthesis(
+    run_dir: Path, eda_pack: EdaEvidencePack
+) -> ReasoningStageResult:
+    """Load typed reasoning artifacts, with bounded in-memory standalone defaults.
+
+    The canonical full-run path always has these artifacts. The defaults keep the
+    older standalone `--final-synthesis` surface usable without persisting a
+    second artifact family or passing an untyped summary map.
+    """
+
+    primary = (eda_pack.validation_evidence.get("primary_validation") or {}).get("method") or "custom_required"
+
+    def load_or(path: Path, model: type[BaseModel], default: BaseModel):
+        return _load_json_model(path, model) if path.is_file() else default
+
+    metric = load_or(
+        run_dir / "metric_result.json",
+        MetricResult,
+        MetricResult(
+            confidence="low",
+            metric_explanation="Metric reasoning was not run in standalone synthesis mode.",
+            needs_calibration=False,
+            rank_averaging_useful=False,
+            threshold_search_needed=False,
+            surrogate_loss_suggestion="Use the competition metric consistently.",
+        ),
+    )
+    validation = load_or(
+        run_dir / "validation_result.json",
+        ValidationResult,
+        ValidationResult(
+            confidence="low",
+            recommended_cv=str(primary),
+            validation_risk="medium",
+            likely_split="unknown",
+            reasoning="Use the EDA-selected primary validation policy.",
+            primary_validation={"method": str(primary)},
+        ),
+    )
+    leakage = load_or(
+        run_dir / "leakage_result.json",
+        LeakageRiskResult,
+        LeakageRiskResult(
+            confidence="low", risk_level="medium", possible_issues=[], recommended_checks=[]
+        ),
+    )
+    leaderboard = load_or(
+        run_dir / "leaderboard_audit.json",
+        LeaderboardAuditResult,
+        LeaderboardAuditResult(
+            confidence="low",
+            shake_up_risk="medium",
+            submission_selection_rule="Use the canonical validation policy.",
+            public_lb_trust="low",
+            warnings=[],
+        ),
+    )
+    experiment_path = run_dir / "experiments.json"
+    review_path = run_dir / "review_result.json"
+    return ReasoningStageResult(
+        metric=metric,
+        validation=validation,
+        leakage=leakage,
+        leaderboard=leaderboard,
+        experiments=load_experiment_plan(experiment_path) if experiment_path.is_file() else ExperimentPlan(),
+        review=load_skeptical_review(review_path) if review_path.is_file() else None,
+    )
+
+
 def _summarize_reasoning_output(value: Any) -> Any:
     if isinstance(value, list):
         return {
@@ -1620,6 +1766,11 @@ def _slugify(value: str) -> str:
 
 async def run(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "validate-contracts":
+        from kaggle_researcher.contracts.artifacts import validate_contract_definitions
+
+        print(json.dumps(validate_contract_definitions(), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
     if argv and argv[0] in {"full-run", "run-all"}:
         from kaggle_researcher.orchestration.full_run import FullRunConfig, run_full_research
 
@@ -1741,6 +1892,129 @@ async def run(argv: list[str] | None = None) -> int:
         print(f"  - {warning}")
     print(result.model_dump_json(indent=2))
     return 0
+
+
+_LEGACY_SCOUT_MODULE_ALIASES = {
+    "notebook_reverse_engineering": "notebook_static_analysis",
+}
+
+_DEFAULT_CONTRACT_CHECK_BY_CATEGORY = {
+    "dataset_schema": "schema_inferer.roles",
+    "schema": "schema_inferer.roles",
+    "metric": "metric_analyzer.resolve_metric",
+    "validation": "validation_analyzer.select_primary_validation",
+    "leakage": "leakage_checker.basic",
+    "relationships": "relationship_inferer.relationships",
+    "relationship": "relationship_inferer.relationships",
+    "drift": "drift_analyzer.generic",
+    "feature_engineering": "feature_probe.feature_family_probe",
+    "feature": "feature_probe.feature_family_probe",
+    "baseline": "baseline_runner.honest_baseline",
+    "notebook_reverse_engineering": "notebook_static_analysis.static_patterns",
+    "notebook": "notebook_static_analysis.static_patterns",
+    "leaderboard_risk": "drift_analyzer.train_test_shift",
+}
+
+
+def _legacy_scout_module_name(value: Any) -> str:
+    name = str(value)
+    return _LEGACY_SCOUT_MODULE_ALIASES.get(name, name)
+
+
+def _adapt_legacy_scout_hypotheses(items: list[Any]) -> list[Any]:
+    """Adapt the rich legacy Scout envelope before publishing strict artifacts."""
+
+    result: list[Any] = []
+    for raw in items:
+        if not isinstance(raw, dict):
+            result.append(raw)
+            continue
+        item = dict(raw)
+        category = str(item.get("category") or "")
+        checks: list[str] = []
+        for step in item.get("verification_steps") or []:
+            if not isinstance(step, dict):
+                continue
+            module = _legacy_scout_module_name(step.get("module"))
+            operation = str(step.get("operation") or "").lower()
+            if module == "file_inventory":
+                check = "file_inventory.roles"
+            elif module == "schema_inferer":
+                check = (
+                    "schema_inferer.detect_time_columns"
+                    if "time" in operation or "date" in operation
+                    else "schema_inferer.roles"
+                )
+            elif module == "table_profiler":
+                check = "table_profiler.profile_tables"
+            elif module == "metric_analyzer":
+                check = "metric_analyzer.resolve_metric"
+            elif module == "validation_analyzer":
+                if any(token in operation for token in ("time", "oot", "rolling", "period")):
+                    check = "validation_analyzer.temporal_cv_feasibility"
+                elif "rank" in operation or "query" in operation:
+                    check = "validation_analyzer.ranking_validation"
+                elif "group" in operation:
+                    check = "validation_analyzer.group_cv_feasibility"
+                else:
+                    check = "validation_analyzer.select_primary_validation"
+            elif module == "leakage_checker":
+                if "query" in operation or "rank" in operation:
+                    check = "leakage_checker.ranking_query_overlap"
+                elif "group" in operation:
+                    check = "leakage_checker.group_overlap"
+                elif "id" in operation or "overlap" in operation:
+                    check = "leakage_checker.train_test_id_overlap"
+                else:
+                    check = "leakage_checker.target_proxy_scan"
+            elif module == "relationship_inferer":
+                check = "relationship_inferer.relationships"
+            elif module == "drift_analyzer":
+                check = "drift_analyzer.generic"
+            elif module == "baseline_runner":
+                check = "baseline_runner.honest_baseline"
+            elif module == "feature_probe":
+                check = "feature_probe.feature_family_probe"
+            elif module == "notebook_static_analysis":
+                check = "notebook_static_analysis.static_patterns"
+            else:
+                continue
+            if check not in checks:
+                checks.append(check)
+        if not checks:
+            checks = [_DEFAULT_CONTRACT_CHECK_BY_CATEGORY.get(
+                category, "table_profiler.profile_tables"
+            )]
+        item["expected_eda_checks"] = checks
+        if category in {"dataset_schema", "schema", "metric", "validation", "leakage"}:
+            item["priority"] = "P0"
+        result.append(item)
+    return result
+
+
+def _adapt_legacy_scout_tasks(items: list[Any]) -> list[Any]:
+    result: list[Any] = []
+    for raw in items:
+        if not isinstance(raw, dict):
+            result.append(raw)
+            continue
+        item = dict(raw)
+        item["module"] = _legacy_scout_module_name(item.get("module"))
+        result.append(item)
+    return result
+
+
+def _derive_hypothesis_index(tasks: list[Any]) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        task_id = str(task.get("task_id") or task.get("id") or "")
+        for hypothesis_id in task.get("related_hypothesis_ids") or []:
+            values = result.setdefault(str(hypothesis_id), [])
+            if task_id and task_id not in values:
+                values.append(task_id)
+    return result
 
 
 def main() -> int:

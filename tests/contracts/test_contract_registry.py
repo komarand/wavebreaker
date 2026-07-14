@@ -51,6 +51,6 @@ def test_no_duplicate_canonical_class_definitions() -> None:
                 definitions[node.name].append(path)
 
     assert definitions == {
-        "ResearchHypotheses": [Path("kaggle_researcher/contracts/research_hypotheses.py")],
-        "EdaTaskPlan": [Path("kaggle_researcher/contracts/eda_task_plan.py")],
+        "ResearchHypotheses": [Path("kaggle_researcher/contracts/research.py")],
+        "EdaTaskPlan": [Path("kaggle_researcher/contracts/eda.py")],
     }

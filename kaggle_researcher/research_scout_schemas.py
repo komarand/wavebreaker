@@ -84,7 +84,7 @@ class ScoutFinding(BaseModel):
     confidence: Literal["low", "medium", "high"] = "medium"
 
 
-class ResearchHypothesis(BaseModel):
+class ScoutResearchHypothesis(BaseModel):
     id: str
     category: HypothesisCategory
     priority: Priority
@@ -101,7 +101,7 @@ class ResearchHypothesis(BaseModel):
     status: HypothesisStatus = "untested"
 
 
-class EdaTask(BaseModel):
+class ScoutEdaTask(BaseModel):
     id: str = Field(min_length=1)
     priority: Priority
     module: EdaModule
@@ -125,8 +125,8 @@ class ResearchHypothesesPayload(BaseModel):
     source_summary: dict = Field(default_factory=dict)
     source_quality_summary: dict | None = None
 
-    hypotheses: list[ResearchHypothesis] = Field(default_factory=list)
-    eda_tasks: list[EdaTask] = Field(default_factory=list)
+    hypotheses: list[ScoutResearchHypothesis] = Field(default_factory=list)
+    eda_tasks: list[ScoutEdaTask] = Field(default_factory=list)
 
     structured_findings: list[ScoutFinding] = Field(default_factory=list)
     scout_findings: list[str] = Field(default_factory=list)
@@ -137,3 +137,9 @@ class ResearchHypothesesPayload(BaseModel):
     recommended_eda_sequence: list[str] = Field(default_factory=list)
 
     models_used: dict = Field(default_factory=dict)
+
+
+# Deprecated producer-draft names. These are not canonical inter-stage models;
+# Scout output is migrated into contracts.research and contracts.eda before I/O.
+ResearchHypothesis = ScoutResearchHypothesis
+EdaTask = ScoutEdaTask

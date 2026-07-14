@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from pydantic import BaseModel
 
 from kaggle_researcher.contracts.eda_task_plan import EdaTaskPlan
-from kaggle_researcher.contracts.pipeline import RunManifest
+from kaggle_researcher.contracts.experiments import ExperimentPlan
+from kaggle_researcher.contracts.manifest import RunManifest
 from kaggle_researcher.contracts.research_hypotheses import ResearchHypotheses
 from kaggle_researcher.eda.schemas import EdaEvidencePack
 from kaggle_researcher.reasoning.final_synthesizer import FinalStrategyResult
@@ -57,7 +58,7 @@ CONTRACT_DEFINITIONS = (
     ),
     ContractDefinition(
         "validation_result", "validation_architect", ("experiment_planner", "leaderboard_auditor", "final_strategy"),
-        ValidationResult, None, ("evidence_ids",), "validation_result.json",
+        ValidationResult, "1.0", ("evidence_ids",), "validation_result.json",
         ("secondary_validation",), ("evidence_ids", "failure_modes", "do_not_use", "policy_notes"),
         ("final_report",),
     ),
@@ -78,19 +79,25 @@ CONTRACT_DEFINITIONS = (
     ),
     ContractDefinition(
         "experiment_plan", "experiment_planner", ("skeptical_reviewer", "final_strategy"),
-        ExperimentItem, None, ("[].experiment_id", "[].evidence_ids"), "experiment_plan.json",
+        ExperimentPlan, "1.0", ("experiments[].experiment_id", "experiments[].source_hypothesis_ids", "experiments[].evidence_ids"), "experiment_plan.json",
         collection_fields=("[].evidence_ids",), renderer_consumers=("final_report",),
     ),
     ContractDefinition(
-        "skeptical_review", "skeptical_reviewer", ("final_strategy",), ReviewResult, None,
-        ("evidence_ids", "approved_experiment_ids", "rejected_experiment_ids"), "skeptical_review.json",
+        "skeptical_review", "skeptical_reviewer", ("final_strategy",), ReviewResult, "1.0",
+        ("evidence_ids", "reviewed_experiment_ids", "approved_experiment_ids", "rejected_experiment_ids"), "skeptical_review.json",
         collection_fields=("evidence_ids", "unsupported_claims", "too_generic", "unnecessary_experiments", "approved_experiment_ids", "rejected_experiment_ids"),
         renderer_consumers=("final_report",),
     ),
     ContractDefinition(
         "final_strategy", "final_strategy", ("final_report", "artifact_validation"),
         FinalStrategyResult, "1.0",
-        ("actions[].evidence_refs", "actions[].related_hypothesis_ids", "actions[].source_refs"),
+        (
+            "actions[].evidence_refs", "actions[].related_hypothesis_ids",
+            "actions[].hypothesis_ids", "actions[].experiment_ids", "actions[].source_refs",
+            "actions[].risk_ids", "actions[].validation_requirement_ids",
+            "actions[].safety_constraint_ids", "acknowledged_risk_ids",
+            "selected_validation_requirement_ids", "enforced_safety_constraint_ids",
+        ),
         "final_strategy.json", ("task_type", "recommended_validation"),
         ("sections", "actions", "limitations"), ("final_report",),
     ),

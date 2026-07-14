@@ -347,7 +347,9 @@ def _scout_output(*, competition_id: str, competition_url: str) -> ResearchScout
                 "leakage_checker",
             ],
             recommended_human_checklist=["Confirm metric and target column from competition metadata."],
-            blocking_tasks=["schema_inferer", "validation_analyzer", "leakage_checker"],
+            blocking_tasks=[
+                "schema_inferer", "metric_analyzer", "validation_analyzer", "leakage_checker"
+            ],
         ),
         models_used={"research_scout": "deepseek-v4-pro"},
         summary="# Research Scout Summary\n\nGeneric binary classification EDA plan.\n",

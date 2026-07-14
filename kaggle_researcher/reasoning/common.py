@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from collections.abc import Iterable
-from typing import Any, TypeVar
+from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel
-from pydantic_core import ValidationError
-
 from kaggle_researcher.clients.deepseek_client import DeepSeekClient
+from kaggle_researcher.contracts.errors import BoundaryRepairError
+from kaggle_researcher.contracts.repair import validate_with_one_repair
 from kaggle_researcher.reasoning.prompts import SYSTEM_RULES
 from kaggle_researcher.schemas import RetrievedDocument
 
@@ -72,6 +72,7 @@ async def call_reasoning_json(
     stage: str | None = None,
     artifact_dir: Path | str | None = None,
     raw_artifact_name: str | None = None,
+    response_normalizer: Callable[[Any], Any] | None = None,
 ) -> ResultModel:
     response = await client.chat_json(
         model=model,
@@ -79,14 +80,15 @@ async def call_reasoning_json(
         user_prompt=json.dumps(user_payload, ensure_ascii=False, indent=2),
         timeout=120,
     )
-    try:
-        return result_model.model_validate(response)
-    except ValidationError as initial_error:
+    repaired_response: Any = None
+
+    async def repair_once(repair_input: dict[str, Any]) -> Any:
+        nonlocal repaired_response
         if artifact_dir is not None and raw_artifact_name is not None:
             path = Path(artifact_dir) / raw_artifact_name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(response, ensure_ascii=False, indent=2), encoding="utf-8")
-        repaired = await client.chat_json(
+        repaired_response = await client.chat_json(
             model=model,
             system_prompt=(
                 f"{SYSTEM_RULES}\n\nCorrect the existing response to the provided schema. "
@@ -94,23 +96,46 @@ async def call_reasoning_json(
                 "when an optional result is unsupported. Return JSON only."
             ),
             user_prompt=json.dumps({
-                "validation_errors": initial_error.errors(include_url=False),
+                "validation_errors": repair_input["validation_issues"],
                 "expected_schema": result_model.model_json_schema(),
                 "invalid_response": response,
             }, ensure_ascii=False, indent=2),
             timeout=120,
         )
-        try:
-            return result_model.model_validate(repaired)
-        except ValidationError as final_error:
-            returned_keys = list(repaired.keys()) if isinstance(repaired, dict) else []
-            raise ReasoningResponseValidationError(
-                stage=stage or result_model.__name__,
-                model=model,
-                result_model=result_model,
-                validation_errors=final_error.errors(include_url=False),
-                returned_keys=returned_keys,
-            ) from final_error
+        return (
+            response_normalizer(repaired_response)
+            if response_normalizer is not None
+            else repaired_response
+        )
+
+    try:
+        normalized_response = (
+            response_normalizer(response) if response_normalizer is not None else response
+        )
+        validated = await validate_with_one_repair(
+            normalized_response,
+            model=result_model,
+            repair=repair_once,
+            contract_name=stage or result_model.__name__,
+        )
+        return validated.value
+    except BoundaryRepairError as exc:
+        returned_keys = list(repaired_response.keys()) if isinstance(repaired_response, dict) else []
+        validation_errors = [
+            {
+                "loc": tuple(part for part in issue.field_path.split(".") if part),
+                "type": issue.expected,
+                "msg": issue.reason,
+            }
+            for issue in exc.issues
+        ]
+        raise ReasoningResponseValidationError(
+            stage=stage or result_model.__name__,
+            model=model,
+            result_model=result_model,
+            validation_errors=validation_errors,
+            returned_keys=returned_keys,
+        ) from exc
 
 
 def known_evidence_ids(

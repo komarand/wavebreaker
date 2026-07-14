@@ -28,13 +28,38 @@ def test_eda_cli_runs_local_dataset_without_network(tmp_path: Path) -> None:
             {
                 "competition_id": "cli_fixture",
                 "hypotheses": [
-                    {
-                        "hypothesis_id": "schema_001",
-                        "category": "schema",
-                        "claim": "Schema roles can be inferred.",
-                        "priority": "P0",
-                        "confidence_before_eda": "medium",
-                    }
+                        {
+                            "hypothesis_id": "schema_001",
+                            "category": "schema",
+                            "claim": "Check whether schema roles can be inferred.",
+                            "expected_eda_checks": ["schema_inferer.roles"],
+                            "priority": "P0",
+                            "confidence_before_eda": "medium",
+                        },
+                        {
+                            "hypothesis_id": "metric_001",
+                            "category": "metric",
+                            "claim": "EDA should verify the AUC metric contract.",
+                            "expected_eda_checks": ["metric_analyzer.resolve_metric"],
+                            "priority": "P0",
+                            "confidence_before_eda": "medium",
+                        },
+                        {
+                            "hypothesis_id": "val_001",
+                            "category": "validation",
+                            "claim": "EDA should verify a primary validation policy.",
+                            "expected_eda_checks": ["validation_analyzer.primary_policy"],
+                            "priority": "P0",
+                            "confidence_before_eda": "medium",
+                        },
+                        {
+                            "hypothesis_id": "leak_001",
+                            "category": "leakage",
+                            "claim": "Check whether generic leakage exists.",
+                            "expected_eda_checks": ["leakage_checker.basic"],
+                            "priority": "P0",
+                            "confidence_before_eda": "medium",
+                        },
                 ],
             }
         ),
@@ -45,9 +70,29 @@ def test_eda_cli_runs_local_dataset_without_network(tmp_path: Path) -> None:
             {
                 "competition_id": "cli_fixture",
                 "task_type": "binary_classification",
-                "metric": {"name": "auc"},
-                "dataset": {"local_dataset_path": str(dataset)},
-            }
+                    "metric": {"name": "auc"},
+                    "dataset": {"local_dataset_path": str(dataset)},
+                    "eda_tasks": [
+                        {"task_id": "inventory", "module": "file_inventory", "priority": "P0", "blocking": True, "related_hypothesis_ids": ["schema_001"]},
+                        {"task_id": "schema", "module": "schema_inferer", "priority": "P0", "blocking": True, "related_hypothesis_ids": ["schema_001"]},
+                        {"task_id": "metric", "module": "metric_analyzer", "priority": "P0", "related_hypothesis_ids": ["metric_001"]},
+                        {"task_id": "validation", "module": "validation_analyzer", "priority": "P0", "blocking": True, "related_hypothesis_ids": ["val_001"]},
+                        {"task_id": "leakage", "module": "leakage_checker", "priority": "P0", "blocking": True, "related_hypothesis_ids": ["leak_001"]},
+                    ],
+                    "hypothesis_index": {
+                        "schema_001": ["inventory", "schema"],
+                        "metric_001": ["metric"],
+                        "val_001": ["validation"],
+                        "leak_001": ["leakage"],
+                    },
+                    "recommended_module_sequence": [
+                        "file_inventory", "schema_inferer", "metric_analyzer",
+                        "validation_analyzer", "leakage_checker",
+                    ],
+                    "blocking_tasks": [
+                        "file_inventory", "schema_inferer", "validation_analyzer", "leakage_checker",
+                    ],
+                }
         ),
         encoding="utf-8",
     )

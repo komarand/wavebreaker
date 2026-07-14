@@ -43,7 +43,16 @@ class FakeClient:
 
     async def chat_json(self, **kwargs: Any) -> dict[str, Any]:
         FakeClient.calls.append(kwargs)
-        return _final_strategy_payload()
+        payload = _final_strategy_payload()
+        prompt = json.loads(kwargs["user_prompt"])
+        payload["acknowledged_risk_ids"] = prompt.get("allowed_risk_ids", [])
+        payload["selected_validation_requirement_ids"] = prompt.get(
+            "allowed_validation_requirement_ids", []
+        )
+        payload["enforced_safety_constraint_ids"] = prompt.get(
+            "allowed_safety_constraint_ids", []
+        )
+        return payload
 
 
 class FakeStore:

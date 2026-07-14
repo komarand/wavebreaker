@@ -146,6 +146,34 @@ async def test_plan_experiments_validates_mock_response_and_sorts_by_priority() 
     assert "expected_schema" in payload
 
 
+@pytest.mark.contract
+@pytest.mark.asyncio
+async def test_planner_prompt_separates_experiment_and_source_hypothesis_ids() -> None:
+    item = _item("P0", "Build baseline model on honest validation")
+    item["source_hypothesis_ids"] = ["eda_hypothesis_007"]
+    client = FakeClient({"experiments": [item]})
+
+    result = await plan_experiments(
+        validation_result=_validation(),
+        leakage_result=_leakage(),
+        metric_result=_metric(),
+        retrieved_documents=[_doc()],
+        eda_hypotheses=[{
+            "hypothesis_id": "eda_hypothesis_007",
+            "hypothesis": "High-cardinality encoding may help.",
+        }],
+        client=client,
+    )
+
+    assert result[0].experiment_id
+    assert result[0].experiment_id != "eda_hypothesis_007"
+    assert result[0].source_hypothesis_ids == ["eda_hypothesis_007"]
+    payload = json.loads(str(client.kwargs["user_prompt"]))
+    assert payload["allowed_hypothesis_ids"] == ["eda_hypothesis_007"]
+    assert payload["eda_testable_hypotheses"][0]["hypothesis_id"] == "eda_hypothesis_007"
+    assert "must not equal a hypothesis ID" in str(client.kwargs["system_prompt"])
+
+
 @pytest.mark.asyncio
 async def test_plan_experiments_invalid_priority_fails_validation() -> None:
     client = FakeClient({"experiments": [_item("P4", "Invalid priority experiment")]})

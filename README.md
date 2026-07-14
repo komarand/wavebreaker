@@ -39,6 +39,13 @@ Use `--profile minimal|standard|full` to choose the EDA profile; `standard` is
 the default. Resume a verified run with `--resume-run-dir <run-directory>` or
 rerun a stage and its downstream work with repeated `--force-rerun-stage`.
 
+Full-run orchestration uses typed stage results rather than a shared context map.
+`run_manifest.json` is versioned and records integrity-checked relative artifact
+pointers; supported legacy manifests are backed up and migrated atomically on
+resume. Final Strategy keeps risk, validation-requirement, and safety-constraint
+IDs in dedicated namespaces. See `docs/contracts.md` and
+`docs/contract_cleanup_audit.md` for the contract and migration rules.
+
 ### Research Hypotheses Contract
 
 `research_hypotheses.json` uses schema version `1.0`. Each hypothesis has a

@@ -41,8 +41,14 @@ def _pack() -> EdaEvidencePack:
         created_at="2026-07-13T00:00:00Z",
         run_id="run-001",
         validation_evidence={"primary_validation": {"method": "stratified_kfold"}},
-        safety_constraints=[{"constraint_id": "safe-001", "rule": "Fit transforms within folds."}],
-        validation_requirements=[{"requirement_id": "val-001", "method": "stratified_kfold"}],
+        safety_constraints=[{
+            "safety_constraint_id": "safe-001", "scope": "validation",
+            "rule": "Fit transforms within folds.", "reason": "Prevent leakage.",
+        }],
+        validation_requirements=[{
+            "validation_requirement_id": "val-001",
+            "rule": "Use stratified folds.", "reason": "Preserve class balance.",
+        }],
     )
 
 
@@ -85,6 +91,23 @@ def test_final_strategy_references_are_checked_by_namespace() -> None:
         )
     assert set(raised.value.invalid_ids) == {"unknown.measurement", "unknown-hypothesis"}
     assert raised.value.suggested_rerun_stage == "final_strategy"
+
+
+def test_final_strategy_eda_result_refs_reject_global_source_ids() -> None:
+    bad = _strategy().model_copy(deep=True)
+    bad.actions[0].evidence_refs = ["source-001"]
+    bad.actions[0].eda_result_refs = ["source-001"]
+
+    with pytest.raises(ArtifactContractValidationError) as raised:
+        validate_final_strategy_references(
+            bad,
+            _pack(),
+            hypothesis_ids={"val_001"},
+            source_ids={"source-001"},
+        )
+
+    assert raised.value.invalid_ids == ("source-001",)
+    assert raised.value.field_paths == ("actions[0].eda_result_refs",)
 
 
 def test_real_artifact_validator_checks_bundle_and_final_references(tmp_path: Path) -> None:

@@ -21,14 +21,15 @@ def test_final_strategy_result_validates_linked_strategy_contract() -> None:
                 section_id="validation",
                 title="Validation",
                 summary="Use generic iid classification validation evidence.",
-                actions=[
-                    _action(
-                        action_id="action_validation",
-                        validation_strategy="stratified_kfold",
-                    )
-                ],
+                action_ids=["action_validation"],
                 evidence_refs=["validation_evidence.primary_validation"],
                 related_hypothesis_ids=["val_001"],
+            )
+        ],
+        actions=[
+            _action(
+                action_id="action_validation",
+                validation_strategy="stratified_kfold",
             )
         ],
         source_to_hypothesis_links=[
@@ -46,11 +47,11 @@ def test_final_strategy_result_validates_linked_strategy_contract() -> None:
         ],
     )
 
-    assert result.sections[0].actions[0].evidence_refs == [
+    assert result.actions[0].evidence_refs == [
         "validation_evidence.primary_validation"
     ]
-    assert result.sections[0].actions[0].related_hypothesis_ids == ["val_001"]
-    assert result.sections[0].actions[0].eda_result_refs == [
+    assert result.actions[0].related_hypothesis_ids == ["val_001"]
+    assert result.actions[0].eda_result_refs == [
         "validation_evidence.primary_validation"
     ]
 
@@ -99,7 +100,7 @@ def test_action_accepts_required_contract_fields_only() -> None:
     )
 
     assert action.action_id is None
-    assert action.eda_result_refs == ["validation_evidence.primary_validation"]
+    assert action.eda_result_refs == []
 
 
 def _action(

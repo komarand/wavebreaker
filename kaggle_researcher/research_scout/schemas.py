@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from kaggle_researcher.contracts.research_hypotheses import (
     ResearchHypotheses,
@@ -13,8 +13,10 @@ from kaggle_researcher.contracts.research_hypotheses import (
 )
 from kaggle_researcher.contracts.eda_task_plan import (
     EdaTaskPlan,
-    validate_research_artifact_bundle,
     write_eda_task_plan_atomic,
+)
+from kaggle_researcher.contracts.research_to_eda import (
+    require_valid_research_to_eda_contract,
 )
 
 
@@ -67,12 +69,16 @@ CATEGORY_PREFIXES = {
 REQUIRED_CORE_HYPOTHESES = {"schema_001", "metric_001", "val_001", "leak_001"}
 
 
-class ScoutHypothesis(BaseModel):
+class StrictScoutModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+class ScoutHypothesis(StrictScoutModel):
     hypothesis_id: NonEmptyString
     category: HypothesisCategory
     claim: NonEmptyString
     rationale: NonEmptyString
-    expected_eda_checks: list[NonEmptyString] = Field(default_factory=list)
+    expected_eda_checks: list[NonEmptyString] = Field(min_length=1)
     priority: Priority
     confidence_before_eda: Confidence
     source_refs: list[NonEmptyString] = Field(default_factory=list)
@@ -89,7 +95,7 @@ class ScoutHypothesis(BaseModel):
         return self
 
 
-class ScoutEdaTask(BaseModel):
+class ScoutEdaTask(StrictScoutModel):
     task_id: NonEmptyString
     module: EdaModule
     priority: Priority
@@ -98,7 +104,7 @@ class ScoutEdaTask(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
-class ScoutStructuredFinding(BaseModel):
+class ScoutStructuredFinding(StrictScoutModel):
     finding_id: NonEmptyString
     category: FindingCategory
     finding: NonEmptyString
@@ -107,14 +113,14 @@ class ScoutStructuredFinding(BaseModel):
     confidence: Confidence = "medium"
 
 
-class ScoutLimitation(BaseModel):
+class ScoutLimitation(StrictScoutModel):
     limitation_id: NonEmptyString
     description: NonEmptyString
     severity: LimitationSeverity = "medium"
     affected_outputs: list[NonEmptyString] = Field(default_factory=list)
 
 
-class EdaTaskPlanDraft(BaseModel):
+class EdaTaskPlanDraft(StrictScoutModel):
     schema_version: str = "1.0"
     competition_id: NonEmptyString
     task_type: NonEmptyString | None = None
@@ -152,7 +158,7 @@ class EdaTaskPlanDraft(BaseModel):
         return EdaTaskPlan.model_validate(payload).model_dump(mode="json")
 
 
-class ResearchScoutOutput(BaseModel):
+class ResearchScoutOutput(StrictScoutModel):
     schema_version: str = "1.0"
     competition_id: NonEmptyString
     competition_url: str | None = None
@@ -194,7 +200,7 @@ class ResearchScoutOutput(BaseModel):
                 "EDA tasks reference unknown hypothesis ids: "
                 + ", ".join(sorted(unknown_ids))
             )
-        validate_research_artifact_bundle(
+        require_valid_research_to_eda_contract(
             ResearchHypotheses.model_validate(self.to_research_hypotheses_payload()),
             EdaTaskPlan.model_validate(self.to_eda_task_plan_payload()),
         )

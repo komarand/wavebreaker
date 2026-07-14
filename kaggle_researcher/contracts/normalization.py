@@ -34,7 +34,7 @@ NULL_COLLECTION_DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "MetricResult": {"evidence_ids": []},
     "LeaderboardAuditResult": {"evidence_ids": [], "warnings": []},
-    "ExperimentItem": {"evidence_ids": []},
+    "ExperimentItem": {"source_hypothesis_ids": [], "evidence_ids": []},
     "ReviewResult": {
         "evidence_ids": [],
         "unsupported_claims": [],
@@ -42,14 +42,19 @@ NULL_COLLECTION_DEFAULTS: dict[str, dict[str, Any]] = {
         "unnecessary_experiments": [],
         "approved_experiment_ids": [],
         "rejected_experiment_ids": [],
+        "reviewed_experiment_ids": [],
         "revised_sections": {},
     },
     "FinalStrategyAction": {
         "evidence_refs": [],
         "related_hypothesis_ids": [],
+        "hypothesis_ids": [],
         "experiment_ids": [],
         "source_refs": [],
         "eda_result_refs": [],
+        "risk_ids": [],
+        "validation_requirement_ids": [],
+        "safety_constraint_ids": [],
         "limitations": [],
     },
     "FinalStrategySection": {
@@ -64,6 +69,10 @@ NULL_COLLECTION_DEFAULTS: dict[str, dict[str, Any]] = {
         "hypothesis_to_eda_links": [],
         "limitations": [],
         "models_used": {},
+        "reference_repairs": [],
+        "acknowledged_risk_ids": [],
+        "selected_validation_requirement_ids": [],
+        "enforced_safety_constraint_ids": [],
     },
 }
 
