@@ -10,7 +10,9 @@
       "rationale": "Home Credit-style competitions usually expose base train/test tables and secondary static tables.",
       "expected_eda_checks": [
         "file_inventory.detect_table_roles",
-        "schema_inferer.detect_global_roles"
+        "schema_inferer.detect_global_roles",
+        "schema_inferer.detect_prediction_column",
+        "schema_inferer.detect_time_columns"
       ],
       "priority": "P0",
       "confidence_before_eda": "medium",
@@ -24,8 +26,7 @@
       "claim": "The task should be evaluated with probability scores suitable for a rank-based binary classification metric.",
       "rationale": "The sample submission contains a score column and the task plan uses gini_stability.",
       "expected_eda_checks": [
-        "metric_analyzer.basic_metric_contract",
-        "schema_inferer.detect_prediction_column"
+        "metric_analyzer.basic_metric_contract"
       ],
       "priority": "P0",
       "confidence_before_eda": "medium",
@@ -39,7 +40,6 @@
       "claim": "Temporal validation should be feasible because WEEK_NUM exists in train and test base tables.",
       "rationale": "The fixture includes ordered WEEK_NUM periods and target rate changes by period.",
       "expected_eda_checks": [
-        "schema_inferer.detect_time_columns",
         "validation_analyzer.period_distribution",
         "validation_analyzer.temporal_cv_feasibility"
       ],

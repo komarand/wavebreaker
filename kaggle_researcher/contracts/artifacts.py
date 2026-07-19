@@ -150,7 +150,11 @@ def load_skeptical_review(path: Path) -> SkepticalReview:
 
 def load_final_strategy(path: Path) -> BaseModel:
     from kaggle_researcher.reasoning.final_synthesizer import FinalStrategyResult
-    return _validate(FinalStrategyResult, _read_object(path), "final_strategy")
+    from kaggle_researcher.contracts.final_strategy import (
+        upgrade_legacy_final_strategy_synthesis_status,
+    )
+    payload = upgrade_legacy_final_strategy_synthesis_status(_read_object(path))
+    return _validate(FinalStrategyResult, payload, "final_strategy")
 
 
 def write_research_hypotheses_atomic(path: Path, value: ResearchHypotheses) -> None:

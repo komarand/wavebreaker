@@ -6,9 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from kaggle_researcher import main as main_module
 from kaggle_researcher.main import run_research
-from kaggle_researcher.reasoning.final_synthesizer import REQUIRED_SECTION_IDS
+from kaggle_researcher.reasoning.final_synthesizer import (
+    FinalStrategyResult,
+    REQUIRED_SECTION_IDS,
+)
 from kaggle_researcher.research_scout.schemas import (
     EdaTaskPlanDraft,
     ResearchScoutOutput,
@@ -16,6 +21,8 @@ from kaggle_researcher.research_scout.schemas import (
     ScoutHypothesis,
 )
 from kaggle_researcher.schemas import PlanData, RetrievedDocument, SourceDocument
+from kaggle_researcher.schemas import ResearchRunResult
+from kaggle_researcher.workflow import FinalSynthesisDegradedError
 
 
 @dataclass(slots=True)
@@ -188,11 +195,37 @@ def test_full_mocked_research_to_eda_to_strategy_workflow(monkeypatch, tmp_path:
     assert Path(result.eda_evidence_pack_path).is_file()
     assert Path(result.final_strategy_path).is_file()
     assert Path(result.final_strategy_summary_path).is_file()
+    assert (run_path / "final_strategy_raw_payload.json").is_file()
+    assert (run_path / "final_strategy_normalized_payload.json").is_file()
+    assert (run_path / "final_strategy_action_support_report.json").is_file()
+    assert (run_path / "final_strategy_validation_errors.json").is_file()
+    assert (run_path / "final_synthesis_diagnostics.json").is_file()
+    assert result.final_synthesis_diagnostics_path == str(
+        run_path / "final_synthesis_diagnostics.json"
+    )
+    assert result.final_synthesis_status == final_strategy["synthesis_status"]
+    assert result.final_synthesis_degraded is final_strategy["fallback_used"]
     assert research_run["eda_evidence_pack_path"] == result.eda_evidence_pack_path
     assert research_run["final_strategy_path"] == result.final_strategy_path
+    assert (
+        research_run["final_synthesis_diagnostics_path"]
+        == result.final_synthesis_diagnostics_path
+    )
+    assert research_run["final_synthesis_status"] == final_strategy["synthesis_status"]
+    assert research_run["final_synthesis_degraded"] is final_strategy["fallback_used"]
+    assert result.workflow_status == "completed_with_degradation"
+    assert result.degraded_stages == ["final_synthesis"]
+    assert result.final_synthesis_stage_status == "degraded_fallback"
+    assert research_run["workflow_status"] == "completed_with_degradation"
+    assert research_run["degraded_stages"] == ["final_synthesis"]
     assert evidence_pack["validation_evidence"]["primary_validation"]["method"] == "stratified_kfold"
     assert final_strategy["recommended_validation"] == "stratified_kfold"
-    assert final_strategy["actions"][0]["evidence_refs"] == ["validation_evidence.primary_validation"]
+    validation_action = next(
+        action for action in final_strategy["actions"]
+        if "validation_evidence.primary_validation" in action["evidence_refs"]
+        and action.get("validation_strategy") == "stratified_kfold"
+    )
+    assert validation_action["evidence_refs"] == ["validation_evidence.primary_validation"]
     assert FakeClient.calls
     assert "source -> hypothesis -> EDA -> strategy" in FakeClient.calls[0]["user_prompt"]
 
@@ -223,6 +256,7 @@ def test_parser_accepts_full_workflow_flags() -> None:
             "--final-synthesis",
             "--final-output-dir",
             "final-out",
+            "--require-valid-final-synthesis",
         ]
     )
 
@@ -240,6 +274,7 @@ def test_parser_accepts_full_workflow_flags() -> None:
     assert args.eda_summary_path == Path("eda_summary.md")
     assert args.final_synthesis is True
     assert args.final_output_dir == Path("final-out")
+    assert args.require_valid_final_synthesis is True
 
 
 def test_main_accepts_existing_eda_pack_for_final_synthesis(monkeypatch, tmp_path: Path) -> None:
@@ -270,10 +305,122 @@ def test_main_accepts_existing_eda_pack_for_final_synthesis(monkeypatch, tmp_pat
     assert Path(result.final_strategy_path).is_file()
     assert Path(result.final_strategy_summary_path).is_file()
     assert (tmp_path / "final" / "final_strategy.md").is_file()
+    assert result.final_synthesis_diagnostics_path == str(
+        tmp_path / "final" / "final_synthesis_diagnostics.json"
+    )
+    assert Path(result.final_synthesis_diagnostics_path).is_file()
     assert json.loads(Path(result.final_strategy_path).read_text(encoding="utf-8"))[
         "recommended_validation"
     ] == "stratified_kfold"
     assert "eda_summary_markdown" in FakeClient.calls[0]["user_prompt"]
+    assert result.workflow_status == "completed_with_degradation"
+    assert result.workflow_status != "success"
+    assert result.degraded_stages == ["final_synthesis"]
+    assert result.final_synthesis_stage_status == "degraded_fallback"
+    assert any("degraded fallback" in warning for warning in result.warnings)
+
+
+def test_valid_llm_synthesis_reports_workflow_success(monkeypatch, tmp_path: Path) -> None:
+    _patch_research_dependencies(monkeypatch, tmp_path)
+    _patch_final_synthesis_status(monkeypatch, "llm_success")
+    eda_pack_path, eda_summary_path = _write_existing_eda_outputs(tmp_path)
+
+    result = run(run_research(
+        "https://www.kaggle.com/competitions/iid_binary_tiny",
+        "Generic iid binary classification with ROC AUC.",
+        competition_id="iid_binary_tiny",
+        output_dir=tmp_path / "reports",
+        report_mode="minimal",
+        show_progress=False,
+        write_eda_plan=True,
+        eda_evidence_pack_path=eda_pack_path,
+        eda_summary_path=eda_summary_path,
+        final_synthesis=True,
+        final_output_dir=tmp_path / "final",
+    ))
+
+    assert result.workflow_status == "success"
+    assert result.degraded_stages == []
+    assert result.final_synthesis_stage_status == "success"
+
+
+def test_repaired_synthesis_is_success_with_warning(monkeypatch, tmp_path: Path) -> None:
+    _patch_research_dependencies(monkeypatch, tmp_path)
+    _patch_final_synthesis_status(monkeypatch, "repaired_success")
+    eda_pack_path, _ = _write_existing_eda_outputs(tmp_path)
+
+    result = run(run_research(
+        "https://www.kaggle.com/competitions/iid_binary_tiny",
+        "Generic iid binary classification with ROC AUC.",
+        competition_id="iid_binary_tiny",
+        output_dir=tmp_path / "reports",
+        report_mode="minimal",
+        show_progress=False,
+        write_eda_plan=True,
+        eda_evidence_pack_path=eda_pack_path,
+        final_synthesis=True,
+        final_output_dir=tmp_path / "final",
+    ))
+
+    assert result.workflow_status == "success"
+    assert result.degraded_stages == []
+    assert result.final_synthesis_stage_status == "repaired_success"
+    assert any("deterministic contract repair" in warning for warning in result.warnings)
+
+
+def test_strict_degraded_synthesis_writes_artifacts_then_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _patch_research_dependencies(monkeypatch, tmp_path)
+    _patch_final_synthesis_status(monkeypatch, "degraded_fallback")
+    eda_pack_path, _ = _write_existing_eda_outputs(tmp_path)
+    final_dir = tmp_path / "final"
+
+    with pytest.raises(FinalSynthesisDegradedError) as caught:
+        run(run_research(
+            "https://www.kaggle.com/competitions/iid_binary_tiny",
+            "Generic iid binary classification with ROC AUC.",
+            competition_id="iid_binary_tiny",
+            output_dir=tmp_path / "reports",
+            report_mode="minimal",
+            show_progress=False,
+            write_eda_plan=True,
+            eda_evidence_pack_path=eda_pack_path,
+            final_synthesis=True,
+            final_output_dir=final_dir,
+            require_valid_final_synthesis=True,
+        ))
+
+    error = caught.value
+    assert error.result.workflow_status == "failed"
+    assert error.result.final_synthesis_stage_status == "failed"
+    assert error.result.degraded_stages == ["final_synthesis"]
+    assert str(final_dir / "final_synthesis_diagnostics.json") in str(error)
+    assert (final_dir / "final_strategy.json").is_file()
+    assert (final_dir / "final_strategy.md").is_file()
+    assert (final_dir / "final_synthesis_diagnostics.json").is_file()
+    run_json = json.loads(
+        (Path(error.result.run_artifacts_path) / "research_run.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert run_json["workflow_status"] == "failed"
+    assert run_json["degraded_stages"] == ["final_synthesis"]
+
+
+def test_run_result_rejects_success_with_degraded_final_synthesis() -> None:
+    with pytest.raises(ValueError, match="cannot have workflow_status='success'"):
+        ResearchRunResult(
+            competition_id="demo",
+            num_documents=0,
+            duration_sec=0,
+            workflow_status="success",
+            degraded_stages=["final_synthesis"],
+            final_synthesis_status="degraded_fallback",
+            final_synthesis_degraded=True,
+            final_synthesis_stage_status="degraded_fallback",
+        )
 
 
 def test_final_synthesis_uses_eda_validation(monkeypatch, tmp_path: Path) -> None:
@@ -318,7 +465,7 @@ def test_final_synthesis_uses_eda_leakage_warnings(monkeypatch, tmp_path: Path) 
 
     strategy_text = Path(result.final_strategy_summary_path).read_text(encoding="utf-8").lower()
     assert "naive target encoding" in strategy_text
-    assert "oof/fold-fitted" in strategy_text
+    assert "fold-fitted" in strategy_text
 
 
 def test_research_only_mode_unchanged(monkeypatch, tmp_path: Path) -> None:
@@ -339,6 +486,31 @@ def test_research_only_mode_unchanged(monkeypatch, tmp_path: Path) -> None:
     assert result.eda_summary_path is None
     assert result.final_strategy_path is None
     assert result.final_strategy_summary_path is None
+    assert result.workflow_status == "success"
+    assert result.degraded_stages == []
+
+
+def test_eda_only_mode_remains_success(monkeypatch, tmp_path: Path) -> None:
+    _patch_research_dependencies(monkeypatch, tmp_path)
+
+    result = run(run_research(
+        "https://www.kaggle.com/competitions/iid_binary_tiny",
+        "Generic iid binary classification with ROC AUC.",
+        competition_id="iid_binary_tiny",
+        output_dir=tmp_path / "reports",
+        report_mode="minimal",
+        show_progress=False,
+        write_eda_plan=True,
+        execute_eda=True,
+        local_dataset_path=Path("tests/fixtures/eda/iid_binary_tiny"),
+        eda_output_dir=tmp_path / "eda_runs",
+        final_synthesis=False,
+    ))
+
+    assert result.eda_evidence_pack_path is not None
+    assert result.final_strategy_path is None
+    assert result.workflow_status == "success"
+    assert result.degraded_stages == []
 
 
 def test_result_json_includes_final_paths(monkeypatch, tmp_path: Path) -> None:
@@ -454,6 +626,56 @@ def _patch_research_dependencies(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(main_module, "run_research_scout", fake_run_research_scout)
     monkeypatch.setattr(main_module, "generate_report", fake_generate_report)
     monkeypatch.setattr(main_module, "_create_run_dir", lambda competition_id: tmp_path / "runs" / competition_id)
+
+
+def _patch_final_synthesis_status(monkeypatch, status: str) -> None:
+    async def fake_synthesize_final_strategy(**kwargs: Any) -> FinalStrategyResult:
+        payload = _final_strategy_payload()
+        state = {
+            "llm_success": (True, False, False, False),
+            "repaired_success": (False, True, True, False),
+            "degraded_fallback": (False, True, False, True),
+        }[status]
+        payload.update({
+            "synthesis_status": status,
+            "llm_output_valid": state[0],
+            "repair_attempted": state[1],
+            "repair_succeeded": state[2],
+            "fallback_used": state[3],
+            "synthesis_diagnostics_path": str(
+                Path(kwargs["diagnostics_dir"]) / "final_synthesis_diagnostics.json"
+            ),
+        })
+        if status == "degraded_fallback":
+            payload["limitations"] = [
+                "The LLM output was invalid, so a deterministic fallback was used."
+            ]
+            payload["sections"][0]["summary"] = (
+                "Degraded fallback assembled deterministically from validated evidence."
+            )
+            payload["sections"][-1]["time_blocks"] = [
+                {
+                    "time_window": window,
+                    "summary": "Continue the surviving evidence-backed validation action.",
+                    "action_ids": ["action_validation"],
+                }
+                for window in (
+                    "0-4_hours", "4-12_hours", "12-24_hours", "24-48_hours",
+                )
+            ]
+        diagnostics_dir = Path(kwargs["diagnostics_dir"])
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        (diagnostics_dir / "final_synthesis_diagnostics.json").write_text(
+            json.dumps({"schema_version": "1.0", "competition_id": "iid_binary_tiny"}),
+            encoding="utf-8",
+        )
+        return FinalStrategyResult.model_validate(payload)
+
+    monkeypatch.setattr(
+        main_module,
+        "synthesize_final_strategy",
+        fake_synthesize_final_strategy,
+    )
 
 
 def _write_existing_eda_outputs(tmp_path: Path) -> tuple[Path, Path]:

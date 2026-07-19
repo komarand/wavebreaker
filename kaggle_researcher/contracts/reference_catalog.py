@@ -65,6 +65,8 @@ class ReferenceCatalogEntry(FrozenCatalogModel):
     evidence_backed: bool = False
     support_kind: ReferenceSupportKind = "factual"
     summary: str | None = None
+    title: str | None = None
+    source_type: str | None = None
 
 
 class ReferenceResolution(FrozenCatalogModel):
@@ -185,13 +187,39 @@ def build_final_strategy_reference_catalog(
     *,
     research_hypotheses: ResearchHypotheses | None = None,
     source_claim_ids: Iterable[str] = (),
+    retrieved_documents: Iterable[Any] = (),
 ) -> ReferenceCatalog:
     """Build the immutable Final Strategy reference catalog without inference."""
 
     entries: list[ReferenceCatalogEntry] = []
     diagnostics: list[ReferenceCatalogDiagnostic] = []
     evidence_refs = set(generate_allowed_evidence_refs(eda_evidence_pack))
-    source_ids = {str(value) for value in source_claim_ids if str(value).strip()}
+    source_metadata: dict[str, tuple[str | None, str | None]] = {}
+    for document in retrieved_documents:
+        document_id = str(
+            document.get("id") if isinstance(document, Mapping) else getattr(document, "id", "")
+        ).strip()
+        if not document_id:
+            continue
+        title = (
+            document.get("title") if isinstance(document, Mapping) else getattr(document, "title", None)
+        )
+        source_type = (
+            document.get("source") if isinstance(document, Mapping) else getattr(document, "source", None)
+        )
+        metadata = (
+            str(title).strip() or None if title is not None else None,
+            str(source_type).strip() or None if source_type is not None else None,
+        )
+        if document_id in source_metadata:
+            diagnostics.append(_duplicate_diagnostic(
+                document_id, "source_claim", 2,
+            ))
+            continue
+        source_metadata[document_id] = metadata
+    source_ids = {
+        str(value).strip() for value in source_claim_ids if str(value).strip()
+    } | set(source_metadata)
     valid_backing_refs = evidence_refs | source_ids
 
     for evidence_ref in sorted(evidence_refs):
@@ -202,11 +230,14 @@ def build_final_strategy_reference_catalog(
             evidence_backed=True,
         ))
     for source_id in sorted(source_ids):
+        title, source_type = source_metadata.get(source_id, (None, None))
         entries.append(ReferenceCatalogEntry(
             ref_id=source_id,
             namespace="source_claim",
             canonical_ref=source_id,
             evidence_backed=True,
+            title=title,
+            source_type=source_type,
         ))
 
     validated_claims = eda_evidence_pack.source_claim_validation.get("validated_claims", [])

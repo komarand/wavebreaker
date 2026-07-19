@@ -20,12 +20,48 @@ def test_full_run_parser_accepts_required_flags() -> None:
     args = build_full_run_parser().parse_args([
         "--competition-id", "demo", "--no-download-dataset", "--enable-slice-diagnostics",
         "--force-rerun-stage", "experiment_planner", "--force-rerun-stage", "final_strategy",
+        "--require-valid-final-synthesis",
     ])
 
     assert args.competition_id == "demo"
     assert args.download_dataset is False
     assert args.enable_slice_diagnostics is True
     assert args.force_rerun_stage == ["experiment_planner", "final_strategy"]
+    assert args.require_valid_final_synthesis is True
+
+
+def test_full_run_result_semantics_distinguish_degraded_and_strict(tmp_path: Path) -> None:
+    final = tmp_path / "final"
+    final.mkdir()
+    (final / "final_synthesis_diagnostics.json").write_text("{}", encoding="utf-8")
+
+    degraded = full_run._build_full_run_result(
+        tmp_path,
+        tmp_path / "run_manifest.json",
+        final / "final_strategy.json",
+        final / "final_report.md",
+        "completed",
+        "degraded_fallback",
+        True,
+        require_valid_final_synthesis=False,
+    )
+    strict = full_run._build_full_run_result(
+        tmp_path,
+        tmp_path / "run_manifest.json",
+        final / "final_strategy.json",
+        final / "final_report.md",
+        "completed",
+        "degraded_fallback",
+        True,
+        require_valid_final_synthesis=True,
+    )
+
+    assert degraded.workflow_status == "completed_with_degradation"
+    assert degraded.final_synthesis_stage_status == "degraded_fallback"
+    assert degraded.degraded_stages == ["final_synthesis"]
+    assert strict.workflow_status == "failed"
+    assert strict.final_synthesis_stage_status == "failed"
+    assert strict.status == "failed"
 
 
 @pytest.mark.asyncio
@@ -38,6 +74,10 @@ async def test_full_run_tracks_canonical_stage_order_and_resume(monkeypatch, tmp
         if stage_id == "final_strategy":
             final = run_dir / "final"; final.mkdir(parents=True, exist_ok=True)
             (final / "final_strategy.json").write_text("{}", encoding="utf-8")
+            (final / "final_synthesis_diagnostics.json").write_text(
+                json.dumps({"schema_version": "1.0", "competition_id": "demo"}),
+                encoding="utf-8",
+            )
         if stage_id == "final_report":
             (run_dir / "final" / "final_report.md").write_text("# Report\n", encoding="utf-8")
 
@@ -51,6 +91,15 @@ async def test_full_run_tracks_canonical_stage_order_and_resume(monkeypatch, tmp
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert manifest["status"] == "completed"
     assert manifest["stages"]["experiment_planner"]["outputs"] == {}
+    assert (
+        manifest["stages"]["final_strategy"]["outputs"]["diagnostics"]
+        ["relative_path"]
+        == "final/final_synthesis_diagnostics.json"
+    )
+    assert (
+        manifest["final_outputs"]["final_synthesis_diagnostics"]["relative_path"]
+        == "final/final_synthesis_diagnostics.json"
+    )
     assert (result.run_dir / "run_summary.md").is_file()
 
     observed.clear()
@@ -67,6 +116,38 @@ async def test_full_run_rejects_unknown_forced_stage(tmp_path: Path) -> None:
         await run_full_research(FullRunConfig(
             competition_id="demo", output_root=tmp_path, force_rerun_stages={"not-a-stage"}, disable_progress=True,
         ))
+
+
+@pytest.mark.asyncio
+async def test_failed_strict_final_stage_preserves_diagnostics_pointer(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def fake_stage(stage_id: str, state) -> None:
+        if stage_id != "final_strategy":
+            return
+        final = state.run_dir / "final"
+        final.mkdir(parents=True, exist_ok=True)
+        (final / "final_synthesis_diagnostics.json").write_text(
+            json.dumps({"schema_version": "1.0", "competition_id": "demo"}),
+            encoding="utf-8",
+        )
+        raise RuntimeError("strict final validation failed")
+
+    monkeypatch.setattr(full_run, "_run_stage", fake_stage)
+
+    with pytest.raises(RuntimeError, match="strict final validation failed"):
+        await run_full_research(FullRunConfig(
+            competition_id="demo",
+            output_root=tmp_path,
+            disable_progress=True,
+        ))
+
+    run_dir = next(tmp_path.iterdir())
+    manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    diagnostics = manifest["stages"]["final_strategy"]["outputs"]["diagnostics"]
+    assert diagnostics["relative_path"] == "final/final_synthesis_diagnostics.json"
+    assert manifest["stages"]["final_strategy"]["status"] == "failed"
 
 
 @pytest.mark.contract

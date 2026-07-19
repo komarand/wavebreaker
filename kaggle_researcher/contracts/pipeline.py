@@ -8,7 +8,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from kaggle_researcher.contracts.eda_task_plan import load_eda_task_plan
-from kaggle_researcher.contracts.artifacts import load_experiment_plan
+from kaggle_researcher.contracts.artifacts import load_experiment_plan, load_final_strategy
 from kaggle_researcher.contracts.evidence import (
     ReferenceResolutionError,
     build_evidence_registry,
@@ -142,7 +142,11 @@ def validate_full_run_artifacts(run_dir: Path) -> None:
     if manifest_path.is_file():
         try:
             manifest = load_run_manifest(manifest_path, run_dir=run_dir).value
-            for name in ("final_strategy", "final_report"):
+            for name in (
+                "final_strategy",
+                "final_report",
+                "final_synthesis_diagnostics",
+            ):
                 pointer = getattr(manifest.final_outputs, name)
                 if pointer is None:
                     continue
@@ -239,9 +243,7 @@ def validate_full_run_artifacts(run_dir: Path) -> None:
         experiment_registry = None
 
     try:
-        strategy = FinalStrategyResult.model_validate_json(
-            (run_dir / "final" / "final_strategy.json").read_text(encoding="utf-8")
-        )
+        strategy = load_final_strategy(run_dir / "final" / "final_strategy.json")
     except (OSError, ValueError, ValidationError, json.JSONDecodeError) as exc:
         issues.append(ContractIssue("final_strategy", "final/final_strategy.json", str(exc)))
         strategy = None

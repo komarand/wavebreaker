@@ -26,6 +26,7 @@ from kaggle_researcher.contracts.evidence import (
     build_evidence_registry,
     generate_allowed_evidence_refs,
     generate_semantic_evidence_refs,
+    resolve_evidence_ref,
     resolve_evidence_path,
     resolve_evidence_reference,
 )
@@ -74,6 +75,6 @@ __all__ = [
     "resolve_composite_action_references", "resolve_final_strategy_composite_references",
     "UnsupportedFinalStrategyActionError", "compile_final_strategy_action_support",
     "enforce_action_evidence_support",
-    "generate_semantic_evidence_refs", "resolve_evidence_path",
+    "generate_semantic_evidence_refs", "resolve_evidence_ref", "resolve_evidence_path",
     "resolve_evidence_reference",
 ]

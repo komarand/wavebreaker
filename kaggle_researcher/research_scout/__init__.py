@@ -12,7 +12,10 @@ from kaggle_researcher.research_scout.schemas import (
     ScoutLimitation,
     ScoutStructuredFinding,
 )
-from kaggle_researcher.research_scout.scout import run_research_scout
+from kaggle_researcher.research_scout.scout import (
+    build_deterministic_research_scout_fallback,
+    run_research_scout,
+)
 
 
 def _load_legacy_research_scout() -> Any:
@@ -41,6 +44,7 @@ __all__ = [
     "ScoutHypothesis",
     "ScoutLimitation",
     "ScoutStructuredFinding",
+    "build_deterministic_research_scout_fallback",
     "run_research_scout",
     *[
         name

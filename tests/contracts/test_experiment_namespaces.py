@@ -47,6 +47,12 @@ def _review(*, approved=(), rejected=(), reviewed=()) -> ReviewResult:
 def _strategy(experiment_ids: list[str], hypothesis_ids: list[str]) -> FinalStrategyResult:
     return FinalStrategyResult.model_validate({
         "competition_id": "demo",
+        "synthesis_status": "llm_success",
+        "llm_output_valid": True,
+        "repair_attempted": False,
+        "repair_succeeded": False,
+        "fallback_used": False,
+        "synthesis_diagnostics_path": None,
         "actions": [{
             "priority": "P1",
             "action": "Run the reviewed encoding experiment.",

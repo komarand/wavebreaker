@@ -1,6 +1,12 @@
 {
   "schema_version": "1.0",
   "competition_id": "demo",
+  "synthesis_status": "llm_success",
+  "llm_output_valid": true,
+  "repair_attempted": false,
+  "repair_succeeded": false,
+  "fallback_used": false,
+  "synthesis_diagnostics_path": null,
   "task_type": "binary_classification",
   "recommended_validation": "stratified_kfold",
   "sections": [

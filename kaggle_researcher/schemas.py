@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 from kaggle_researcher.contracts.experiments import ExperimentItem
 from kaggle_researcher.contracts.review import ReviewResult
@@ -15,6 +15,7 @@ from kaggle_researcher.contracts.validation import (
     ValidationPolicy,
     ValidationResult,
 )
+from kaggle_researcher.workflow import FinalSynthesisStageStatus, WorkflowStatus
 
 
 SourceType = Literal[
@@ -63,10 +64,13 @@ class PlanData(BaseModel):
 
 class ResearchRunResult(BaseModel):
     competition_id: str
+    workflow_status: WorkflowStatus = "success"
+    degraded_stages: list[str] = Field(default_factory=list)
     report_path: str | None = None
     num_documents: int
     num_sources: dict[str, int] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
     duration_sec: float
     mode: str = "full"
     report_mode: str = "full"
@@ -81,3 +85,34 @@ class ResearchRunResult(BaseModel):
     eda_summary_path: str | None = None
     final_strategy_path: str | None = None
     final_strategy_summary_path: str | None = None
+    final_synthesis_diagnostics_path: str | None = None
+    final_synthesis_status: Literal[
+        "llm_success", "repaired_success", "degraded_fallback"
+    ] | None = None
+    final_synthesis_degraded: bool = False
+    final_synthesis_stage_status: FinalSynthesisStageStatus | None = None
+
+    @model_validator(mode="after")
+    def validate_workflow_synthesis_state(self) -> "ResearchRunResult":
+        is_degraded = self.final_synthesis_status == "degraded_fallback"
+        if self.final_synthesis_degraded != is_degraded:
+            raise ValueError(
+                "final_synthesis_degraded must match final_synthesis_status"
+            )
+        if is_degraded:
+            if self.workflow_status == "success":
+                raise ValueError(
+                    "degraded final synthesis cannot have workflow_status='success'"
+                )
+            if "final_synthesis" not in self.degraded_stages:
+                raise ValueError(
+                    "degraded final synthesis must list final_synthesis in degraded_stages"
+                )
+            expected_stage_status = (
+                "failed" if self.workflow_status == "failed" else "degraded_fallback"
+            )
+            if self.final_synthesis_stage_status != expected_stage_status:
+                raise ValueError(
+                    "final synthesis stage status contradicts workflow_status"
+                )
+        return self

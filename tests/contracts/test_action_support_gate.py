@@ -161,6 +161,12 @@ def test_compilation_drops_optional_copies_and_never_returns_empty_action() -> N
     }
     payload = {
         "competition_id": "demo",
+        "synthesis_status": "llm_success",
+        "llm_output_valid": True,
+        "repair_attempted": False,
+        "repair_succeeded": False,
+        "fallback_used": False,
+        "synthesis_diagnostics_path": None,
         "actions": [supported, unsupported],
         "sections": [{
             "section_id": "optional", "title": "Optional", "summary": "Optional ideas.",
@@ -222,4 +228,3 @@ def test_strict_action_validator_still_rejects_empty_evidence() -> None:
             reason="No evidence.", evidence_refs=[],
             related_hypothesis_ids=[HYPOTHESIS_ID],
         )
-

@@ -138,6 +138,7 @@ class ManifestConfigSnapshot(ContractModel):
 class FinalOutputManifest(ContractModel):
     final_strategy: ArtifactPointer | None = None
     final_report: ArtifactPointer | None = None
+    final_synthesis_diagnostics: ArtifactPointer | None = None
 
 
 class ManifestMigrationRecord(ContractModel):
@@ -333,6 +334,7 @@ def mark_stage_failed(
     finished_at: datetime,
     duration_sec: float | None = None,
     partial: bool = False,
+    outputs: dict[str, ArtifactPointer] | None = None,
 ) -> RunManifest:
     identifier = StageId(str(stage_id))
     entry = manifest.stages[identifier]
@@ -341,6 +343,7 @@ def mark_stage_failed(
         "finished_at": finished_at,
         "duration_sec": duration_sec,
         "error": error,
+        "outputs": outputs if outputs is not None else entry.outputs,
     })
     return _replace_stage(manifest, identifier, updated)
 
@@ -549,13 +552,24 @@ def _migrate_final_outputs(raw: Any, run_dir: Path, changes: list[str]) -> Final
         return FinalOutputManifest()
     if not isinstance(raw, Mapping):
         raise ContractMigrationError("final_outputs must be an object", contract="run_manifest")
-    aliases = {"strategy": "final_strategy", "report": "final_report", "final_strategy_path": "final_strategy", "final_report_path": "final_report"}
+    aliases = {
+        "strategy": "final_strategy",
+        "report": "final_report",
+        "diagnostics": "final_synthesis_diagnostics",
+        "final_strategy_path": "final_strategy",
+        "final_report_path": "final_report",
+        "final_synthesis_diagnostics_path": "final_synthesis_diagnostics",
+    }
     values: dict[str, ArtifactPointer] = {}
     for raw_name, value in raw.items():
         if value is None:
             continue
         name = aliases.get(str(raw_name), str(raw_name))
-        if name not in {"final_strategy", "final_report"}:
+        if name not in {
+            "final_strategy",
+            "final_report",
+            "final_synthesis_diagnostics",
+        }:
             raise ContractMigrationError(f"Unknown final output key: {raw_name!r}", contract="run_manifest")
         if name != raw_name:
             changes.append(f"mapped final output {raw_name!r} to {name!r}")

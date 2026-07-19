@@ -8,6 +8,9 @@ from typing import Any, Literal
 
 from pydantic import ConfigDict
 
+from kaggle_researcher.contracts.action_evidence_resolution import (
+    ActionEvidenceResolution,
+)
 from kaggle_researcher.contracts.base import ContractModel
 from kaggle_researcher.contracts.final_strategy_compilation import (
     FinalStrategyCompilationDiagnostics,
@@ -43,6 +46,8 @@ class ActionReferenceResolutionDiagnostics(FrozenSupportModel):
 class FinalStrategyCompilationContext(FrozenSupportModel):
     reference_catalog: ReferenceCatalog
     phase: str = ACTION_SUPPORT_PHASE
+    action_evidence_resolutions: tuple[ActionEvidenceResolution, ...] = ()
+    support_report_path: str | None = None
 
     def uncertainty_evidence_refs(self, hypothesis_ids: list[str]) -> tuple[str, ...]:
         refs: list[str] = []
@@ -57,6 +62,18 @@ class FinalStrategyCompilationContext(FrozenSupportModel):
                 if self.reference_catalog.is_valid_evidence_ref(reference):
                     _append_unique(refs, reference)
         return tuple(refs)
+
+    def action_evidence_resolution(
+        self, action_id: str
+    ) -> ActionEvidenceResolution | None:
+        return next(
+            (
+                resolution
+                for resolution in self.action_evidence_resolutions
+                if resolution.action_id == action_id
+            ),
+            None,
+        )
 
 
 class ActionSupportDecision(FrozenSupportModel):
@@ -84,6 +101,8 @@ class UnsupportedFinalStrategyActionError(FinalStrategyCompilationError):
         decision: ActionSupportDecision,
         *,
         compilation_report: FinalStrategyCompilationReport,
+        action_resolution: ActionEvidenceResolution | None = None,
+        support_report_path: str | None = None,
     ) -> None:
         self.action_id = decision.action_id
         self.priority = decision.priority
@@ -91,17 +110,41 @@ class UnsupportedFinalStrategyActionError(FinalStrategyCompilationError):
         self.unresolved_refs = decision.unresolved_refs
         self.decision_reason = decision.reason
         self.compilation_report = compilation_report
+        self.intent = action_resolution.intent if action_resolution else None
+        self.category = action_resolution.category if action_resolution else None
+        self.related_hypothesis_ids = (
+            action_resolution.related_hypothesis_ids if action_resolution else ()
+        )
+        self.candidate_refs = action_resolution.candidate_refs if action_resolution else ()
+        self.resolution_attempts = (
+            action_resolution.resolution_attempts if action_resolution else ()
+        )
+        self.support_report_path = support_report_path
         diagnostics = FinalStrategyCompilationDiagnostics(
             phase="action_support_gate",
             kept_actions=len(compilation_report.kept_actions),
             downgraded_actions=len(compilation_report.downgraded_actions),
             dropped_actions=len(compilation_report.dropped_actions),
         )
+        details = [
+            f"priority={self.priority}",
+            self.decision_reason,
+            f"original_refs={list(self.original_refs)}",
+            f"unresolved_refs={list(self.unresolved_refs)}",
+        ]
+        if self.intent:
+            details.extend([
+                f"intent={self.intent}",
+                f"related_hypothesis_ids={list(self.related_hypothesis_ids)}",
+                f"candidate_refs={list(self.candidate_refs)}",
+                f"resolution_attempts={list(self.resolution_attempts)}",
+            ])
+        if self.support_report_path:
+            details.append(f"support_report={self.support_report_path!r}")
         super().__init__(
             f"Unsupported Final Strategy action {self.action_id!r} at {decision.phase}: "
-            f"priority={self.priority}; {self.decision_reason}; "
-            f"original_refs={list(self.original_refs)}; "
-            f"unresolved_refs={list(self.unresolved_refs)}.",
+            + "; ".join(details)
+            + ".",
             phase="action_support_gate",
             diagnostics=diagnostics,
         )
@@ -246,6 +289,8 @@ def compile_final_strategy_action_support(
             raise UnsupportedFinalStrategyActionError(
                 decision,
                 compilation_report=report,
+                action_resolution=context.action_evidence_resolution(decision.action_id),
+                support_report_path=context.support_report_path,
             )
 
     for location in resolved_locations:
@@ -283,7 +328,12 @@ def compile_final_strategy_action_support(
                 kept_actions=tuple(kept), downgraded_actions=tuple(downgraded),
                 dropped_actions=tuple(dropped), failed_actions=tuple(failed),
             )
-            raise UnsupportedFinalStrategyActionError(decision, compilation_report=report)
+            raise UnsupportedFinalStrategyActionError(
+                decision,
+                compilation_report=report,
+                action_resolution=context.action_evidence_resolution(decision.action_id),
+                support_report_path=context.support_report_path,
+            )
 
     return compiled, FinalStrategyCompilationReport(
         kept_actions=tuple(kept),

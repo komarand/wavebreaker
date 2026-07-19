@@ -130,6 +130,12 @@ def _stage_bundle(*, shared_constraint_id: str = "safe-1"):
 def _strategy(*, safety_id: str = "safe-1") -> FinalStrategyResult:
     return FinalStrategyResult(
         competition_id="demo",
+        synthesis_status="llm_success",
+        llm_output_valid=True,
+        repair_attempted=False,
+        repair_succeeded=False,
+        fallback_used=False,
+        synthesis_diagnostics_path=None,
         actions=[FinalStrategyAction(
             action_id="action-1", priority="P0", action="Run the baseline.",
             reason="It is traceable.",

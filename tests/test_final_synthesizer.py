@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -17,12 +18,16 @@ from kaggle_researcher.contracts.final_strategy_compilation import (
     FinalStrategyCompilationError,
     FinalStrategySchemaValidationError,
 )
+from kaggle_researcher.contracts.final_synthesis_diagnostics import (
+    FinalSynthesisDiagnostics,
+)
 from kaggle_researcher.contracts.reference_catalog import (
     build_final_strategy_reference_catalog,
 )
 from kaggle_researcher.reasoning.final_synthesizer import (
     REQUIRED_SECTION_IDS,
     FinalStrategyResult,
+    build_deterministic_provenance_links,
     build_fallback_final_strategy,
     postprocess_final_strategy_result,
     repair_final_strategy_payload,
@@ -54,6 +59,13 @@ class SequentialFinalSynthesizerClient:
         return self.responses[len(self.calls) - 1]
 
 
+class InvalidJsonFinalSynthesizerClient:
+    async def chat_json(self, **kwargs: Any) -> dict[str, Any]:
+        raise ValueError(
+            "JSON parse failed; authorization=Bearer mocked-secret and sk-mockedsecret123"
+        )
+
+
 @pytest.mark.asyncio
 async def test_mock_llm_response_validates_into_final_strategy_result() -> None:
     client = FakeFinalSynthesizerClient(_strategy_payload())
@@ -78,6 +90,141 @@ async def test_mock_llm_response_validates_into_final_strategy_result() -> None:
     assert result.actions[0].related_hypothesis_ids == ["val_001"]
     assert result.actions[0].source_refs == ["retrieved-1"]
     assert result.models_used["final_synthesizer"] == "deepseek-v4-pro"
+    assert result.synthesis_status == "llm_success"
+    assert result.llm_output_valid is True
+    assert result.repair_attempted is False
+    assert result.repair_succeeded is False
+    assert result.fallback_used is False
+
+
+@pytest.mark.asyncio
+async def test_valid_initial_synthesis_writes_success_diagnostics(
+    tmp_path: Path,
+) -> None:
+    result = await synthesize_final_strategy(
+        competition_desc="Generic iid binary classification with ROC AUC.",
+        plan_data=_plan(),
+        retrieved_documents=[_doc()],
+        domain_patterns=[],
+        research_hypotheses=_research_hypotheses(),
+        eda_evidence_pack=_eda_pack(primary_method="stratified_kfold"),
+        reasoning_outputs={},
+        client=FakeFinalSynthesizerClient(_strategy_payload()),
+        model="deepseek-v4-pro",
+        diagnostics_dir=tmp_path,
+    )
+
+    diagnostics = _load_synthesis_diagnostics(tmp_path)
+    assert diagnostics.initial_output_valid is True
+    assert diagnostics.repair_attempted is False
+    assert diagnostics.fallback_required is False
+    assert result.synthesis_status == "llm_success"
+    assert result.llm_output_valid is True
+    assert result.repair_attempted is False
+    assert result.repair_succeeded is False
+    assert result.fallback_used is False
+    assert [attempt.attempt for attempt in diagnostics.attempts] == ["initial_llm"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_writes_sanitized_parse_diagnostic(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="JSON parse failed"):
+        await synthesize_final_strategy(
+            competition_desc="Generic iid binary classification with ROC AUC.",
+            plan_data=_plan(),
+            retrieved_documents=[_doc()],
+            domain_patterns=[],
+            research_hypotheses=_research_hypotheses(),
+            eda_evidence_pack=_eda_pack(primary_method="stratified_kfold"),
+            reasoning_outputs={},
+            client=InvalidJsonFinalSynthesizerClient(),
+            model="deepseek-v4-pro",
+            diagnostics_dir=tmp_path,
+        )
+
+    diagnostics_path = tmp_path / "final_synthesis_diagnostics.json"
+    diagnostics = _load_synthesis_diagnostics(tmp_path)
+    initial = diagnostics.attempts[0]
+    assert initial.output_received is True
+    assert initial.json_parse_succeeded is False
+    assert [issue.stage for issue in initial.issues] == ["llm_parse"]
+    serialized = diagnostics_path.read_text(encoding="utf-8")
+    assert "mocked-secret" not in serialized
+    assert "sk-mockedsecret123" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_missing_p0_refs_are_grounded_and_diagnostics_are_written(
+    tmp_path: Path,
+) -> None:
+    payload = _strategy_payload()
+    for action in [
+        *payload["actions"],
+        *[
+            action
+            for section in payload["sections"]
+            for action in section.get("actions", [])
+        ],
+    ]:
+        action["action_id"] = "action_val_001"
+        action["evidence_refs"] = []
+    client = FakeFinalSynthesizerClient(payload)
+
+    result = await synthesize_final_strategy(
+        competition_desc="Generic iid binary classification with ROC AUC.",
+        plan_data=_plan(),
+        retrieved_documents=[_doc()],
+        domain_patterns=[],
+        research_hypotheses=_research_hypotheses(),
+        eda_evidence_pack=_eda_pack(primary_method="stratified_kfold"),
+        reasoning_outputs={},
+        client=client,
+        model="deepseek-v4-pro",
+        diagnostics_dir=tmp_path,
+    )
+
+    action = next(item for item in result.actions if item.action_id == "action_val_001")
+    assert action.priority == "P0"
+    assert action.evidence_refs == ["validation_evidence.primary_validation"]
+    for name in (
+        "final_strategy_raw_payload.json",
+        "final_strategy_normalized_payload.json",
+        "final_strategy_action_support_report.json",
+        "final_strategy_validation_errors.json",
+        "final_synthesis_diagnostics.json",
+    ):
+        assert (tmp_path / name).is_file()
+    report = json.loads(
+        (tmp_path / "final_strategy_action_support_report.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    resolution = next(
+        item
+        for item in report["evidence_resolution"]["actions"]
+        if item["action_id"] == "action_val_001"
+    )
+    assert resolution["original_refs"] == []
+    assert resolution["added_refs"] == ["validation_evidence.primary_validation"]
+    assert resolution["unresolved_refs"] == []
+    assert report["strict_gate"]["failed_actions"] == []
+    diagnostics = _load_synthesis_diagnostics(tmp_path)
+    assert diagnostics.initial_output_valid is False
+    assert diagnostics.repair_attempted is True
+    assert diagnostics.repair_succeeded is True
+    assert diagnostics.fallback_required is False
+    assert result.synthesis_status == "repaired_success"
+    assert result.llm_output_valid is False
+    assert result.repair_attempted is True
+    assert result.repair_succeeded is True
+    assert result.fallback_used is False
+    assert any(
+        issue.issue_type == "missing_evidence_reference"
+        and "action_val_001" in (issue.field_path or "")
+        for issue in diagnostics.attempts[0].issues
+    )
 
 
 @pytest.mark.asyncio
@@ -290,8 +437,8 @@ async def test_final_synthesizer_repairs_invalid_context_evidence_once() -> None
 
     assert len(client.calls) == 2
     repaired = next(action for action in result.actions if action.action_id == "action_ablation")
-    assert repaired.evidence_refs == semantic_refs
-    assert repaired.eda_result_refs == semantic_refs
+    assert set(semantic_refs) <= set(repaired.evidence_refs)
+    assert set(semantic_refs) <= set(repaired.eda_result_refs)
     assert repaired.experiment_ids == ["exp_001"]
     assert all(
         "approved_experiments" not in [*action.evidence_refs, *action.eda_result_refs]
@@ -435,16 +582,25 @@ async def test_result_from_payload_repairs_llm_payload() -> None:
     )
 
     action_text = " ".join(action.action.lower() for action in _result_actions(result))
-    assert "stratifiedkfold" in action_text
+    assert "stratifiedkfold" in action_text.replace("_", "")
     assert "target encoding" in action_text
     assert all(action.related_hypothesis_ids for action in _result_actions(result))
 
 
 def test_fallback_strategy_validates() -> None:
+    eda = _repair_eda_payload()
+    eda["validation_requirements"] = [{
+        "validation_requirement_id": "validation_requirement_001",
+        "mandatory": True,
+    }]
+    eda["safety_constraints"] = [{
+        "safety_constraint_id": "safety_001",
+        "blocking": True,
+    }]
     fallback = build_fallback_final_strategy(
         competition_id="generic-binary",
         research_hypotheses=_repair_hypotheses(),
-        eda_evidence_pack=_repair_eda_payload(),
+        eda_evidence_pack=eda,
     )
 
     result = FinalStrategyResult.model_validate(fallback)
@@ -452,16 +608,178 @@ def test_fallback_strategy_validates() -> None:
     assert len(result.sections) >= 8
     assert all(action.related_hypothesis_ids for action in _result_actions(result))
     assert all(action.evidence_refs for action in _result_actions(result))
+    assert result.selected_validation_requirement_ids == ["validation_requirement_001"]
+    assert result.enforced_safety_constraint_ids == ["safety_001"]
+
+
+def test_degraded_fallback_contains_all_sections_once_in_canonical_order() -> None:
+    payload = build_fallback_final_strategy(
+        competition_id="generic-binary",
+        research_hypotheses=_repair_hypotheses(),
+        eda_evidence_pack=_repair_eda_payload(),
+        task_type="binary_classification",
+        metric_name="roc_auc",
+    )
+
+    result = FinalStrategyResult.model_validate(payload)
+    section_ids = [section.section_id for section in result.sections]
+
+    assert section_ids == REQUIRED_SECTION_IDS
+    assert len(section_ids) == len(set(section_ids)) == 11
+
+
+def test_fallback_missing_baseline_is_limitation_not_reproduction() -> None:
+    eda = _repair_eda_payload()
+    eda["baseline_evidence"] = {"status": "skipped", "reason": "disabled"}
+
+    result = FinalStrategyResult.model_validate(build_fallback_final_strategy(
+        competition_id="generic-binary",
+        research_hypotheses=_repair_hypotheses(),
+        eda_evidence_pack=eda,
+        task_type="binary_classification",
+        metric_name="roc_auc",
+    ))
+    section = next(item for item in result.sections if item.section_id == "baseline_findings")
+    section_actions = [
+        action for action in result.actions if action.action_id in section.action_ids
+    ]
+
+    assert section.availability == "not_available"
+    assert "status=skipped" in section.summary
+    assert section.limitations
+    assert not any("reproduce" in action.action.lower() for action in section_actions)
+
+
+def test_fallback_missing_drift_is_explicitly_not_available() -> None:
+    eda = _repair_eda_payload()
+    eda["drift_evidence"] = {}
+
+    result = FinalStrategyResult.model_validate(build_fallback_final_strategy(
+        competition_id="generic-binary",
+        research_hypotheses=_repair_hypotheses(),
+        eda_evidence_pack=eda,
+    ))
+    section = next(
+        item for item in result.sections
+        if item.section_id == "drift_and_leaderboard_risk"
+    )
+
+    assert section.availability == "not_available"
+    assert "not_available" in section.summary
+    assert "high drift" not in section.summary.lower()
+
+
+def test_fallback_first_48_hours_references_existing_actions_and_experiments() -> None:
+    result = FinalStrategyResult.model_validate(build_fallback_final_strategy(
+        competition_id="generic-binary",
+        research_hypotheses=_repair_hypotheses(),
+        eda_evidence_pack=_repair_eda_payload(),
+        task_type="binary_classification",
+        metric_name="roc_auc",
+    ))
+    section = next(item for item in result.sections if item.section_id == "first_48_hours")
+    action_ids = {action.action_id for action in result.actions}
+    experiment_ids = {
+        action.experiment_id for action in result.actions if action.experiment_id
+    }
+
+    assert [block.time_window for block in section.time_blocks] == [
+        "0-4_hours", "4-12_hours", "12-24_hours", "24-48_hours",
+    ]
+    assert all(block.action_ids or block.experiment_ids for block in section.time_blocks)
+    assert all(set(block.action_ids) <= action_ids for block in section.time_blocks)
+    assert all(set(block.experiment_ids) <= experiment_ids for block in section.time_blocks)
+
+
+def test_fallback_experiments_queue_contains_structured_experiments() -> None:
+    result = FinalStrategyResult.model_validate(build_fallback_final_strategy(
+        competition_id="generic-binary",
+        research_hypotheses=_repair_hypotheses(),
+        eda_evidence_pack=_repair_eda_payload(),
+        task_type="binary_classification",
+        metric_name="roc_auc",
+    ))
+    section = next(item for item in result.sections if item.section_id == "experiments_queue")
+    experiments = [
+        action for action in result.actions
+        if action.action_id in section.action_ids and action.experiment_id
+    ]
+
+    assert experiments
+    assert all(action.hypothesis for action in experiments)
+    assert all(action.exact_change for action in experiments)
+    assert all(action.validation_policy == "stratified_kfold" for action in experiments)
+    assert all(action.success_criterion for action in experiments)
+    assert all(action.risk for action in experiments)
+    assert not any(
+        action.action == "Run the evidence-backed P0 actions first."
+        for action in experiments
+    )
+
+
+def test_fallback_executive_summary_and_markdown_expose_complete_degradation() -> None:
+    result = FinalStrategyResult.model_validate(build_fallback_final_strategy(
+        competition_id="generic-binary",
+        research_hypotheses=_repair_hypotheses(),
+        eda_evidence_pack=_repair_eda_payload(),
+        task_type="binary_classification",
+        metric_name="roc_auc",
+    ))
+    executive = result.sections[0]
+    markdown = render_final_strategy(result)
+
+    assert "degraded fallback" in executive.summary.lower()
+    assert "binary_classification" in executive.summary
+    assert "roc_auc" in executive.summary
+    assert "stratified_kfold" in executive.summary
+    for section in result.sections:
+        assert f"## {section.title}" in markdown
+
+
+def test_sparse_fallback_does_not_invent_model_or_experiment_actions() -> None:
+    result = FinalStrategyResult.model_validate(build_fallback_final_strategy(
+        competition_id="sparse",
+        research_hypotheses=[{"hypothesis_id": "schema_001", "category": "schema"}],
+        eda_evidence_pack={},
+        task_type="unknown",
+        metric_name="unknown",
+    ))
+    modeling = next(item for item in result.sections if item.section_id == "modeling_plan")
+    experiments = next(item for item in result.sections if item.section_id == "experiments_queue")
+
+    assert modeling.availability == "not_available"
+    assert experiments.availability == "not_available"
+    assert not experiments.action_ids
+    assert not any(action.experiment_id for action in result.actions)
+    assert all(
+        action.action.startswith("Pause evidence-dependent modeling")
+        for action in result.actions
+    )
+
+
+def test_degraded_fallback_schema_rejects_missing_or_reordered_sections() -> None:
+    payload = build_fallback_final_strategy(
+        competition_id="generic-binary",
+        research_hypotheses=_repair_hypotheses(),
+        eda_evidence_pack=_repair_eda_payload(),
+    )
+    payload["sections"][0], payload["sections"][1] = (
+        payload["sections"][1], payload["sections"][0]
+    )
+
+    with pytest.raises(ValueError, match="canonical order"):
+        FinalStrategyResult.model_validate(payload)
 
 
 @pytest.mark.asyncio
-async def test_invalid_repair_uses_fallback_strategy(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = FakeFinalSynthesizerClient(
-        {
-            "competition_id": "generic-binary",
-            "sections": [{"section_id": "broken", "title": "Broken", "summary": "Empty"}],
-        }
-    )
+async def test_invalid_repair_uses_fallback_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    payload = _strategy_payload()
+    payload["actions"][0]["priority"] = "not-a-priority"
+    payload["actions"][0]["confidence"] = "not-a-confidence"
+    client = FakeFinalSynthesizerClient(payload)
     monkeypatch.setattr(
         final_synthesizer_module,
         "repair_final_strategy_payload",
@@ -478,14 +796,33 @@ async def test_invalid_repair_uses_fallback_strategy(monkeypatch: pytest.MonkeyP
         reasoning_outputs={},
         client=client,
         model="deepseek-v4-pro",
+        diagnostics_dir=tmp_path,
     )
 
     assert any("built from available Scout hypotheses" in item for item in result.limitations)
     assert all(action.related_hypothesis_ids for action in _result_actions(result))
+    diagnostics = _load_synthesis_diagnostics(tmp_path)
+    assert [attempt.attempt for attempt in diagnostics.attempts] == [
+        "initial_llm",
+        "deterministic_repair",
+    ]
+    assert diagnostics.repair_attempted is True
+    assert diagnostics.repair_succeeded is False
+    assert diagnostics.fallback_required is True
+    assert diagnostics.fallback_reason
+    assert len(diagnostics.attempts[0].issues) > 1
+    assert len(diagnostics.attempts[1].issues) > 1
+    assert result.synthesis_status == "degraded_fallback"
+    assert result.llm_output_valid is False
+    assert result.repair_attempted is True
+    assert result.repair_succeeded is False
+    assert result.fallback_used is True
 
 
 @pytest.mark.asyncio
-async def test_final_synthesis_uses_allowed_hypothesis_ids_only() -> None:
+async def test_final_synthesis_uses_allowed_hypothesis_ids_only(
+    tmp_path: Path,
+) -> None:
     payload = _repair_payload(
         action="Use StratifiedKFold for model validation.",
         evidence_refs=["validation_evidence.primary_validation"],
@@ -503,6 +840,7 @@ async def test_final_synthesis_uses_allowed_hypothesis_ids_only() -> None:
         reasoning_outputs={},
         client=client,
         model="deepseek-v4-pro",
+        diagnostics_dir=tmp_path,
     )
 
     allowed = {item["hypothesis_id"] for item in _repair_hypotheses()}
@@ -511,6 +849,164 @@ async def test_final_synthesis_uses_allowed_hypothesis_ids_only() -> None:
         for action in _result_actions(result)
         for hypothesis_id in action.related_hypothesis_ids
     } <= allowed
+    diagnostics = _load_synthesis_diagnostics(tmp_path)
+    initial_issues = diagnostics.attempts[0].issues
+    assert any(
+        issue.issue_type == "unknown_hypothesis_id"
+        and issue.invalid_reference == "invented_999"
+        and issue.field_path == "actions[0].related_hypothesis_ids"
+        for issue in initial_issues
+    )
+    assert diagnostics.repair_succeeded is True
+    assert diagnostics.fallback_required is False
+
+
+def test_two_hypothesis_source_refs_create_two_validated_links() -> None:
+    second_document = _doc().model_copy(update={
+        "id": "retrieved-2",
+        "title": "Validation paper",
+        "source": "arxiv",
+    })
+    hypotheses = _research_hypotheses().model_copy(deep=True)
+    hypotheses.hypotheses[0].source_refs = [
+        "retrieved-1", "retrieved-2", "retrieved-1",
+    ]
+    pack = _eda_pack(primary_method="stratified_kfold")
+    pack.hypothesis_results[0].evidence_refs = [
+        "validation_evidence.primary_validation",
+        "validation_evidence.primary_validation",
+    ]
+    catalog = build_final_strategy_reference_catalog(
+        pack,
+        research_hypotheses=hypotheses,
+        retrieved_documents=[_doc(), second_document],
+    )
+
+    source_links, eda_links, repairs = build_deterministic_provenance_links(
+        research_hypotheses=hypotheses,
+        eda_evidence_pack=pack,
+        reference_catalog=catalog,
+    )
+
+    assert [str(link.source_ref) for link in source_links] == [
+        "retrieved-1", "retrieved-2",
+    ]
+    assert all(link.hypothesis_id == "val_001" for link in source_links)
+    assert len(eda_links) == 1
+    assert repairs == []
+    second_entry = catalog.resolve("retrieved-2", "source_claim").entry
+    assert second_entry is not None
+    assert second_entry.title == "Validation paper"
+    assert second_entry.source_type == "arxiv"
+
+
+@pytest.mark.parametrize("status", ["confirmed", "rejected"])
+def test_hypothesis_result_status_is_preserved_in_eda_link(status: str) -> None:
+    pack = _eda_pack(primary_method="stratified_kfold").model_copy(deep=True)
+    pack.hypothesis_results[0].status = status
+    hypotheses = _research_hypotheses()
+    catalog = build_final_strategy_reference_catalog(
+        pack,
+        research_hypotheses=hypotheses,
+        retrieved_documents=[_doc()],
+    )
+
+    _, links, _ = build_deterministic_provenance_links(
+        research_hypotheses=hypotheses,
+        eda_evidence_pack=pack,
+        reference_catalog=catalog,
+    )
+
+    assert len(links) == 1
+    assert links[0].eda_result_ref == "validation_evidence.primary_validation"
+    assert links[0].result_status == status
+    assert links[0].finding_summary == pack.hypothesis_results[0].finding
+
+
+def test_fallback_strategy_preserves_structured_provenance_links() -> None:
+    hypotheses = _research_hypotheses()
+    pack = _eda_pack(primary_method="stratified_kfold")
+
+    payload = build_fallback_final_strategy(
+        competition_id="generic-binary",
+        research_hypotheses=[
+            item.model_dump(mode="json") for item in hypotheses.hypotheses
+        ],
+        eda_evidence_pack=pack.model_dump(mode="json"),
+    )
+    result = FinalStrategyResult.model_validate(payload)
+
+    assert result.source_to_hypothesis_links
+    assert result.hypothesis_to_eda_links
+    assert result.action_provenance
+    assert result.hypothesis_to_eda_links[0].result_status == "confirmed"
+
+
+def test_unknown_source_ref_is_removed_with_recorded_repair() -> None:
+    hypotheses = _research_hypotheses().model_copy(deep=True)
+    hypotheses.hypotheses[0].source_refs = ["retrieved-1", "invented-source"]
+    pack = _eda_pack(primary_method="stratified_kfold")
+    catalog = build_final_strategy_reference_catalog(
+        pack,
+        research_hypotheses=hypotheses,
+        retrieved_documents=[_doc()],
+    )
+
+    links, _, repairs = build_deterministic_provenance_links(
+        research_hypotheses=hypotheses,
+        eda_evidence_pack=pack,
+        reference_catalog=catalog,
+    )
+
+    assert [str(link.source_ref) for link in links] == ["retrieved-1"]
+    assert {
+        (repair["field_path"], repair["original_id"], repair["replacement_id"])
+        for repair in repairs
+    } == {(
+        "research_hypotheses.val_001.source_refs",
+        "invented-source",
+        "",
+    )}
+
+
+def test_eda_only_safety_action_does_not_require_fake_source() -> None:
+    payload = _strategy_payload()
+    action = payload["actions"][0]
+    action["source_refs"] = []
+    action["source_claim"] = None
+    action["evidence_origin"] = "Safety-warning"
+    action["safety_constraint_ids"] = ["safety_001"]
+    payload["source_to_hypothesis_links"] = []
+
+    result = FinalStrategyResult.model_validate(payload)
+
+    assert result.actions[0].source_refs == []
+    assert result.actions[0].safety_constraint_ids == ["safety_001"]
+    assert result.actions[0].eda_result_refs == [
+        "validation_evidence.primary_validation"
+    ]
+
+
+def test_section_provenance_contains_only_its_action_links() -> None:
+    result = FinalStrategyResult.model_validate(_strategy_payload())
+    action = result.actions[0]
+    section = next(
+        section for section in result.sections
+        if action.action_id in section.action_ids
+    )
+
+    assert section.related_hypothesis_ids == action.hypothesis_ids
+    assert section.source_refs == action.source_refs
+    assert section.eda_result_refs == action.eda_result_refs
+    assert result.action_provenance[0].action_id == action.action_id
+
+
+def test_duplicate_structured_links_are_rejected() -> None:
+    payload = _strategy_payload()
+    payload["source_to_hypothesis_links"] *= 2
+
+    with pytest.raises(ValueError, match="duplicate links"):
+        FinalStrategyResult.model_validate(payload)
 
 
 def test_postprocessor_deduplicates_validation_actions() -> None:
@@ -714,6 +1210,65 @@ def test_summary_is_short_and_clean_strategy_has_no_quality_warnings() -> None:
     ) == []
 
 
+def test_markdown_synthesis_status_banner_is_status_driven() -> None:
+    llm_result = FinalStrategyResult.model_validate(_strategy_payload())
+    llm_markdown = render_final_strategy(llm_result)
+    assert "## Synthesis Status" not in llm_markdown
+    assert "required deterministic contract repair" not in llm_markdown
+
+    repaired_payload = llm_result.model_dump(mode="json")
+    repaired_payload.update({
+        "synthesis_status": "repaired_success",
+        "llm_output_valid": False,
+        "repair_attempted": True,
+        "repair_succeeded": True,
+        "fallback_used": False,
+    })
+    repaired_markdown = render_final_strategy(
+        FinalStrategyResult.model_validate(repaired_payload)
+    )
+    assert (
+        "The model-generated strategy required deterministic contract repair."
+        in repaired_markdown
+    )
+    assert "## Synthesis Status" not in repaired_markdown
+
+    fallback_payload = llm_result.model_dump(mode="json")
+    fallback_payload.update({
+        "synthesis_status": "degraded_fallback",
+        "llm_output_valid": False,
+        "repair_attempted": True,
+        "repair_succeeded": False,
+        "fallback_used": True,
+        "limitations": [
+            "The LLM output was invalid, so a deterministic fallback was used."
+        ],
+    })
+    fallback_payload["sections"][0]["summary"] = (
+        "Degraded fallback strategy assembled from validated evidence."
+    )
+    fallback_payload["sections"][-1]["time_blocks"] = [
+        {
+            "time_window": window,
+            "summary": "Continue the evidence-backed validation action.",
+            "action_ids": ["action_validation"],
+        }
+        for window in (
+            "0-4_hours", "4-12_hours", "12-24_hours", "24-48_hours",
+        )
+    ]
+    fallback_markdown = render_final_strategy(
+        FinalStrategyResult.model_validate(fallback_payload)
+    )
+    assert "## Synthesis Status" in fallback_markdown
+    assert "- Status: degraded fallback" in fallback_markdown
+    assert (
+        "The LLM-generated strategy did not satisfy the final strategy contract."
+        in fallback_markdown
+    )
+    assert "assembled deterministically from validated EDA and Scout evidence" in fallback_markdown
+
+
 def _quality_action(
     action: str,
     evidence_refs: list[str],
@@ -751,6 +1306,12 @@ def _quality_result(
     return FinalStrategyResult.model_validate(
         {
             "competition_id": "generic-tabular",
+            "synthesis_status": "llm_success",
+            "llm_output_valid": True,
+            "repair_attempted": False,
+            "repair_succeeded": False,
+            "fallback_used": False,
+            "synthesis_diagnostics_path": None,
             "task_type": "binary_classification",
             "metric": {"name": "roc_auc"},
             "recommended_validation": validation,
@@ -767,6 +1328,7 @@ def _quality_eda() -> dict[str, Any]:
             "target_available": True,
             "time_columns": [],
             "group_columns": [],
+            "diagnostic_validations": [],
         }
     )
     eda["notebook_static_analysis"] = {"status": "completed"}
@@ -782,6 +1344,12 @@ REPAIR_NOTE = (
 def _repair_payload(*, action: str, evidence_refs: list[str]) -> dict[str, Any]:
     return {
         "competition_id": "generic-binary",
+        "synthesis_status": "llm_success",
+        "llm_output_valid": True,
+        "repair_attempted": False,
+        "repair_succeeded": False,
+        "fallback_used": False,
+        "synthesis_diagnostics_path": None,
         "actions": [
             {
                 "priority": "P0",
@@ -993,7 +1561,7 @@ async def test_cross_namespace_error_contains_only_post_resolution_issues() -> N
     initial["actions"].append(extra_action)
     client = SequentialFinalSynthesizerClient([initial, deepcopy(initial)])
 
-    with pytest.raises(CrossNamespaceReferenceError) as caught:
+    with pytest.raises(FinalStrategySchemaValidationError) as caught:
         await synthesize_final_strategy(
             competition_desc="Generic iid binary classification with ROC AUC.",
             plan_data=_plan(),
@@ -1006,11 +1574,8 @@ async def test_cross_namespace_error_contains_only_post_resolution_issues() -> N
             model="deepseek-v4-pro",
         )
 
-    assert caught.value.phase == "reference_resolution"
-    assert caught.value.diagnostics.unresolved_references == len(caught.value.issues)
-    assert {issue.invalid_value for issue in caught.value.issues} == {
-        "approved_experiments"
-    }
+    assert caught.value.phase == "post_resolution_schema_validation"
+    assert caught.value.diagnostics.schema_validation_errors
 
 
 @pytest.mark.asyncio
@@ -1083,6 +1648,12 @@ def _strategy_payload(
         sections.append(section)
     return {
         "competition_id": "generic-binary",
+        "synthesis_status": "llm_success",
+        "llm_output_valid": True,
+        "repair_attempted": False,
+        "repair_succeeded": False,
+        "fallback_used": False,
+        "synthesis_diagnostics_path": None,
         "task_type": "binary_classification",
         "metric": {"name": "roc_auc"},
         "recommended_validation": recommended_validation,
@@ -1122,6 +1693,12 @@ def _doc() -> RetrievedDocument:
         content="Uses iid binary classification with stratified folds.",
         score=0.9,
         rrf_score=0.2,
+    )
+
+
+def _load_synthesis_diagnostics(path: Path) -> FinalSynthesisDiagnostics:
+    return FinalSynthesisDiagnostics.model_validate_json(
+        (path / "final_synthesis_diagnostics.json").read_text(encoding="utf-8")
     )
 
 

@@ -12,6 +12,12 @@ Rules:
 - Every hypothesis must include stable category-prefixed IDs such as schema_001,
   metric_001, val_001, leak_001, and drift_001.
 - Every hypothesis must name expected EDA checks.
+- For every hypothesis, category must be canonical and every expected EDA check
+  must begin with a module allowed for that category.
+- Do not mix modules from different categories in one hypothesis. Split a claim
+  into separate hypotheses when it spans categories.
+- Use canonical EDA module names only and do not duplicate task modules.
+- Return task priorities and modules; blocking flags are recalculated by the application.
 - Temporal validation is a hypothesis only when source, metric, task description, or
   holdout evidence supports it.
 - Group validation is a hypothesis only when entity/query/group risk is plausible.

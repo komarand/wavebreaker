@@ -107,6 +107,12 @@ def test_context_and_cross_namespace_values_are_not_evidence() -> None:
     registry = build_experiment_registry([experiment], review)
     strategy = FinalStrategyResult.model_validate({
         "competition_id": "demo",
+        "synthesis_status": "llm_success",
+        "llm_output_valid": True,
+        "repair_attempted": False,
+        "repair_succeeded": False,
+        "fallback_used": False,
+        "synthesis_diagnostics_path": None,
         "actions": [{
             "priority": "P1", "action": "Run approved test.",
             "reason": "It has review approval.",
@@ -138,6 +144,12 @@ def test_context_and_cross_namespace_values_are_not_evidence() -> None:
 def test_eda_result_refs_are_derived_only_from_resolvable_eda_refs() -> None:
     strategy = FinalStrategyResult.model_validate({
         "competition_id": "demo",
+        "synthesis_status": "llm_success",
+        "llm_output_valid": True,
+        "repair_attempted": False,
+        "repair_succeeded": False,
+        "fallback_used": False,
+        "synthesis_diagnostics_path": None,
         "actions": [{
             "priority": "P1", "action": "Compare the ablation.",
             "reason": "The source and EDA finding agree.",

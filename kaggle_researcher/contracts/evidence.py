@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -14,7 +15,9 @@ EvidenceNamespace = Literal[
     "hypothesis",
     "synthetic_inference",
 ]
-ResolutionKind = Literal["top_level", "dict_path", "semantic_collection_item"]
+ResolutionKind = Literal[
+    "top_level", "dict_path", "list_index", "semantic_collection_item"
+]
 
 
 @dataclass(frozen=True)
@@ -31,6 +34,7 @@ SEMANTIC_COLLECTION_PATHS: dict[str, SemanticCollectionSpec] = {
     "feature_probe_evidence": SemanticCollectionSpec("feature_family"),
     "hypothesis_results": SemanticCollectionSpec("hypothesis_id"),
     "interaction_diagnostics.interaction_hypotheses": SemanticCollectionSpec("interaction_id"),
+    "leakage_evidence": SemanticCollectionSpec("check_id"),
     "slice_diagnostics.slices": SemanticCollectionSpec("slice_id"),
     "source_claim_validation.validated_claims": SemanticCollectionSpec("claim_id"),
     "testable_hypotheses": SemanticCollectionSpec("hypothesis_id"),
@@ -161,41 +165,66 @@ def resolve_evidence_path(
         if isinstance(evidence_pack, BaseModel)
         else evidence_pack
     )
-    parts = reference.split(".")
+    parts = _evidence_path_parts(reference)
     if not parts or parts[0] not in payload:
         raise EvidencePathResolutionError(reference)
     if len(parts) == 1:
         return ResolvedEvidencePath(reference, parts[0], payload[parts[0]], "top_level")
 
     current: Any = payload
-    exact = True
+    traversed: list[str] = []
+    resolution_kind: ResolutionKind = "dict_path"
     for part in parts:
-        if not isinstance(current, Mapping) or part not in current:
-            exact = False
-            break
-        current = current[part]
-    if exact:
-        return ResolvedEvidencePath(reference, parts[0], current, "dict_path")
+        if isinstance(current, Mapping):
+            if part not in current:
+                raise EvidencePathResolutionError(reference, f"missing_component:{part}")
+            current = current[part]
+            traversed.append(part)
+            continue
+        if isinstance(current, list):
+            if part.isdigit():
+                index = int(part)
+                if index < 0 or index >= len(current):
+                    raise EvidencePathResolutionError(reference, "list_index_out_of_range")
+                current = current[index]
+                traversed.append(part)
+                resolution_kind = "list_index"
+                continue
+            collection_path = ".".join(traversed)
+            spec = semantic_collections.get(collection_path)
+            if spec is None:
+                raise EvidencePathResolutionError(
+                    reference, f"list_component_requires_index:{part}"
+                )
+            matches = [
+                item for item in current
+                if isinstance(item, Mapping)
+                and str(item.get(spec.identity_field, "")) == part
+            ]
+            if not matches:
+                raise EvidencePathResolutionError(reference)
+            if len(matches) > 1:
+                raise AmbiguousEvidencePathError(reference, len(matches))
+            current = matches[0]
+            traversed.append(part)
+            resolution_kind = "semantic_collection_item"
+            continue
+        raise EvidencePathResolutionError(reference, f"cannot_traverse_scalar:{part}")
+    return ResolvedEvidencePath(reference, parts[0], current, resolution_kind)
 
-    collection_path = ".".join(parts[:-1])
-    spec = semantic_collections.get(collection_path)
-    if spec is None:
-        raise EvidencePathResolutionError(reference)
-    collection = _resolve_dictionary_path(payload, collection_path)
-    if not isinstance(collection, list):
-        raise EvidencePathResolutionError(reference, "semantic_collection_not_list")
-    identity = parts[-1]
-    matches = [
-        item for item in collection
-        if isinstance(item, Mapping) and str(item.get(spec.identity_field, "")) == identity
-    ]
-    if not matches:
-        raise EvidencePathResolutionError(reference)
-    if len(matches) > 1:
-        raise AmbiguousEvidencePathError(reference, len(matches))
-    return ResolvedEvidencePath(
-        reference, parts[0], matches[0], "semantic_collection_item"
-    )
+
+def resolve_evidence_ref(
+    evidence_pack: Mapping[str, Any] | BaseModel,
+    path: str,
+) -> Any:
+    """Resolve one canonical EDA evidence reference to its concrete value.
+
+    This value-returning API is the authoritative resolver used by strategy
+    consistency checks. ``resolve_evidence_path`` remains available to callers
+    that also need resolution metadata.
+    """
+
+    return resolve_evidence_path(path, evidence_pack).value
 
 
 def generate_allowed_evidence_refs(
@@ -247,9 +276,40 @@ def _resolve_dictionary_path(value: Mapping[str, Any], path: str) -> Any:
     return current
 
 
+_PATH_TOKEN_RE = re.compile(r"([^.\[\]]+)|\[(\d+)\]")
+
+
+def _evidence_path_parts(reference: str) -> list[str]:
+    reference = str(reference or "").strip()
+    if not reference:
+        raise EvidencePathResolutionError(reference, "empty_path")
+    parts = [match.group(1) or match.group(2) for match in _PATH_TOKEN_RE.finditer(reference)]
+    reconstructed = ""
+    for part in parts:
+        if part.isdigit() and f"[{part}]" in reference:
+            reconstructed += f"[{part}]"
+        else:
+            reconstructed += ("." if reconstructed else "") + part
+    if not parts or reconstructed != reference:
+        raise EvidencePathResolutionError(reference, "invalid_path_syntax")
+    return parts
+
+
 def _iter_dictionary_paths(value: Mapping[str, Any], prefix: str = "") -> Iterable[tuple[str, Any]]:
     for key, child in value.items():
         path = f"{prefix}.{key}" if prefix else str(key)
         yield path, child
         if isinstance(child, Mapping):
             yield from _iter_dictionary_paths(child, path)
+        elif isinstance(child, list):
+            yield from _iter_list_paths(child, path)
+
+
+def _iter_list_paths(value: list[Any], prefix: str) -> Iterable[tuple[str, Any]]:
+    for index, child in enumerate(value):
+        path = f"{prefix}[{index}]"
+        yield path, child
+        if isinstance(child, Mapping):
+            yield from _iter_dictionary_paths(child, path)
+        elif isinstance(child, list):
+            yield from _iter_list_paths(child, path)

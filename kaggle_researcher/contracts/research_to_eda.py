@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from types import MappingProxyType
 from typing import Any, Literal, Mapping
 
@@ -27,6 +28,15 @@ class ContractIssue(ContractModel):
     path: str = Field(min_length=1)
     message: str = Field(min_length=1)
     related_ids: list[str] = Field(default_factory=list)
+    hypothesis_id: str | None = None
+    category: str | None = None
+    check_ref: str | None = None
+    check_module: str | None = None
+    allowed_modules: list[str] = Field(default_factory=list)
+    task_id: str | None = None
+    module: str | None = None
+    task_blocking: bool | None = None
+    listed_in_blocking_tasks: bool | None = None
 
     @field_validator("path", "message", mode="before")
     @classmethod
@@ -48,7 +58,15 @@ class ResearchToEdaContractValidationResult(ContractModel):
 class ResearchToEdaContractError(ContractError):
     def __init__(self, result: ResearchToEdaContractValidationResult) -> None:
         self.result = result
-        codes = ", ".join(issue.code for issue in result.errors[:8])
+        codes = ", ".join(
+            issue.code
+            + (
+                f"[{issue.hypothesis_id or issue.task_id}]"
+                if issue.hypothesis_id or issue.task_id
+                else ""
+            )
+            for issue in result.errors[:8]
+        )
         suffix = f": {codes}" if codes else ""
         super().__init__(
             f"Research-to-EDA contract validation failed{suffix}",
@@ -166,18 +184,45 @@ CATEGORY_PREFIXES: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "data_quality": ("data_quality_", "dq_"),
 })
 
-CATEGORY_CHECK_MODULES: Mapping[str, frozenset[str]] = MappingProxyType({
+CATEGORY_ALLOWED_MODULES: Mapping[str, frozenset[str]] = MappingProxyType({
     "schema": frozenset({"file_inventory", "schema_inferer", "table_profiler"}),
     "metric": frozenset({"metric_analyzer"}),
-    "validation": frozenset({"validation_analyzer", "leakage_checker"}),
-    "leakage": frozenset({"leakage_checker", "validation_analyzer"}),
-    "relationship": frozenset({"relationship_inferer", "schema_inferer"}),
+    "validation": frozenset({"validation_analyzer"}),
+    "leakage": frozenset({"leakage_checker"}),
+    "relationship": frozenset({"relationship_inferer"}),
     "drift": frozenset({"drift_analyzer"}),
     "baseline": frozenset({"baseline_runner"}),
     "feature": frozenset({"feature_probe"}),
     "notebook": frozenset({"notebook_static_analysis"}),
-    "leaderboard": frozenset({"drift_analyzer", "validation_analyzer"}),
-    "data_quality": frozenset({"file_inventory", "schema_inferer", "table_profiler"}),
+    "leaderboard": frozenset({"drift_analyzer"}),
+    "data_quality": frozenset({
+        "file_inventory", "schema_inferer", "table_profiler", "leakage_checker",
+    }),
+})
+
+# Backwards-compatible name for callers that imported the original registry.
+CATEGORY_CHECK_MODULES = CATEGORY_ALLOWED_MODULES
+
+CATEGORY_ALIASES: Mapping[str, str] = MappingProxyType({
+    "dataset_schema": "schema",
+    "relationships": "relationship",
+    "feature_engineering": "feature",
+    "notebook_reverse_engineering": "notebook",
+    "leaderboard_risk": "leaderboard",
+})
+
+MODULE_ALIASES: Mapping[str, str] = MappingProxyType({
+    "notebook_reverse_engineering": "notebook_static_analysis",
+    "relationship_analyzer": "relationship_inferer",
+})
+
+CANONICAL_BLOCKING_MODULES = frozenset({
+    "file_inventory",
+    "schema_inferer",
+    "table_profiler",
+    "metric_analyzer",
+    "validation_analyzer",
+    "leakage_checker",
 })
 
 REQUIRED_P0_CATEGORIES = frozenset({"schema", "metric", "validation", "leakage"})
@@ -233,6 +278,232 @@ _REFERENCE_DRIVEN_MODULES = frozenset({
 })
 
 
+class ResearchToEdaCanonicalizationRepair(ContractModel):
+    code: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    original: Any = None
+    canonical: Any = None
+
+
+class ResearchToEdaCanonicalizationResult(ContractModel):
+    research_hypotheses: ResearchHypotheses
+    eda_task_plan: EdaTaskPlan
+    repairs: list[ResearchToEdaCanonicalizationRepair] = Field(default_factory=list)
+
+
+def extract_check_module(check_ref: str) -> str:
+    """Return the normalized module component without changing check semantics."""
+
+    text = str(check_ref or "").strip()
+    if not text:
+        return ""
+    return normalize_module_name(text.split(".", maxsplit=1)[0])
+
+
+def normalize_module_name(value: Any) -> str:
+    name = str(value or "").strip().lower()
+    return MODULE_ALIASES.get(name, name)
+
+
+def normalize_check_reference(check_ref: Any) -> str:
+    text = str(check_ref or "").strip()
+    if not text:
+        return ""
+    module, separator, check_name = text.partition(".")
+    normalized_module = normalize_module_name(module)
+    if not separator:
+        return normalized_module
+    return f"{normalized_module}.{check_name.strip()}"
+
+
+def normalize_hypothesis_category(
+    value: Any,
+    expected_eda_checks: list[str] | tuple[str, ...] = (),
+) -> str:
+    """Normalize explicit aliases; infer only an unambiguous non-canonical category."""
+
+    category = str(value or "").strip().lower()
+    normalized = CATEGORY_ALIASES.get(category, category)
+    if normalized in CATEGORY_ALLOWED_MODULES:
+        return normalized
+    modules = {extract_check_module(check) for check in expected_eda_checks}
+    modules.discard("")
+    candidates = [
+        candidate
+        for candidate, allowed in CATEGORY_ALLOWED_MODULES.items()
+        if modules and modules <= allowed
+    ]
+    return candidates[0] if len(candidates) == 1 else normalized
+
+
+def is_module_blocking(module: Any) -> bool:
+    return normalize_module_name(module) in CANONICAL_BLOCKING_MODULES
+
+
+def synchronize_hypothesis_index(tasks: list[Mapping[str, Any]]) -> dict[str, list[str]]:
+    index: dict[str, list[str]] = {}
+    for task in tasks:
+        task_id = str(task.get("task_id") or "").strip()
+        if not task_id:
+            continue
+        for hypothesis_id in _unique_text(task.get("related_hypothesis_ids")):
+            index.setdefault(hypothesis_id, []).append(task_id)
+    return index
+
+
+def synchronize_blocking_tasks(tasks: list[Mapping[str, Any]]) -> list[str]:
+    return _unique_text(
+        task.get("module") for task in tasks if bool(task.get("blocking"))
+    )
+
+
+def synchronize_recommended_module_sequence(
+    values: Any,
+    tasks: list[Mapping[str, Any]],
+) -> list[str]:
+    requested = _unique_text(
+        normalize_module_name(value) for value in (values if isinstance(values, list) else [])
+    )
+    for task in tasks:
+        module = str(task.get("module") or "")
+        if task.get("priority") == "P0" and module not in requested:
+            requested.append(module)
+
+    requested_set = set(requested)
+    ordered: list[str] = []
+    visiting: set[str] = set()
+
+    def visit(module: str) -> None:
+        if module in ordered or module in visiting:
+            return
+        visiting.add(module)
+        for dependency in MODULE_DEPENDENCIES.get(module, ()):
+            if dependency in requested_set:
+                visit(dependency)
+        visiting.remove(module)
+        ordered.append(module)
+
+    for module in requested:
+        visit(module)
+    return ordered
+
+
+def canonicalize_research_to_eda_contract(
+    hypotheses: Mapping[str, Any] | ResearchHypotheses,
+    task_plan: Mapping[str, Any] | EdaTaskPlan,
+) -> ResearchToEdaCanonicalizationResult:
+    """Repair structural Scout aliases and dependent fields before strict validation."""
+
+    research_payload = deepcopy(
+        hypotheses.model_dump(mode="json")
+        if isinstance(hypotheses, ResearchHypotheses)
+        else dict(hypotheses)
+    )
+    plan_payload = deepcopy(
+        task_plan.model_dump(mode="json")
+        if isinstance(task_plan, EdaTaskPlan)
+        else dict(task_plan)
+    )
+    repairs: list[ResearchToEdaCanonicalizationRepair] = []
+
+    normalized_hypotheses: list[dict[str, Any]] = []
+    for index, raw in enumerate(research_payload.get("hypotheses") or []):
+        if not isinstance(raw, Mapping):
+            continue
+        item = dict(raw)
+        raw_checks = item.get("expected_eda_checks") or []
+        checks = _unique_text(normalize_check_reference(value) for value in raw_checks)
+        category = normalize_hypothesis_category(item.get("category"), checks)
+        if category != item.get("category"):
+            repairs.append(ResearchToEdaCanonicalizationRepair(
+                code="hypothesis_category_alias_normalized",
+                path=f"research_hypotheses.hypotheses[{index}].category",
+                original=item.get("category"),
+                canonical=category,
+            ))
+        if checks != list(raw_checks):
+            repairs.append(ResearchToEdaCanonicalizationRepair(
+                code="hypothesis_checks_normalized",
+                path=f"research_hypotheses.hypotheses[{index}].expected_eda_checks",
+                original=list(raw_checks),
+                canonical=checks,
+            ))
+        item["category"] = category
+        item["expected_eda_checks"] = checks
+        normalized_hypotheses.append(item)
+    research_payload["hypotheses"] = normalized_hypotheses
+    known_hypotheses = {
+        str(item.get("hypothesis_id") or "") for item in normalized_hypotheses
+    }
+
+    normalized_tasks: list[dict[str, Any]] = []
+    task_by_module: dict[str, dict[str, Any]] = {}
+    task_id_remap: dict[str, str] = {}
+    for index, raw in enumerate(plan_payload.get("eda_tasks") or []):
+        if not isinstance(raw, Mapping):
+            continue
+        item = dict(raw)
+        original_module = item.get("module")
+        module = normalize_module_name(original_module)
+        item["module"] = module
+        task_id = str(item.get("task_id") or "").strip()
+        item["related_hypothesis_ids"] = [
+            value for value in _unique_text(item.get("related_hypothesis_ids"))
+            if value in known_hypotheses
+        ]
+        item["blocking"] = is_module_blocking(module)
+        if module != original_module:
+            repairs.append(ResearchToEdaCanonicalizationRepair(
+                code="task_module_alias_normalized",
+                path=f"eda_task_plan.eda_tasks[{index}].module",
+                original=original_module,
+                canonical=module,
+            ))
+        existing = task_by_module.get(module)
+        if existing is not None:
+            existing["related_hypothesis_ids"] = _unique_text([
+                *existing.get("related_hypothesis_ids", []),
+                *item.get("related_hypothesis_ids", []),
+            ])
+            task_id_remap[task_id] = str(existing.get("task_id") or "")
+            repairs.append(ResearchToEdaCanonicalizationRepair(
+                code="duplicate_module_task_merged",
+                path=f"eda_task_plan.eda_tasks[{index}]",
+                original=task_id,
+                canonical=existing.get("task_id"),
+            ))
+            continue
+        task_by_module[module] = item
+        task_id_remap[task_id] = task_id
+        normalized_tasks.append(item)
+
+    known_task_ids = {str(item.get("task_id") or "") for item in normalized_tasks}
+    for item in normalized_tasks:
+        task_id = str(item.get("task_id") or "")
+        item["dependencies"] = [
+            dependency
+            for dependency in _unique_text(
+                task_id_remap.get(value, value)
+                for value in (item.get("dependencies") or [])
+            )
+            if dependency in known_task_ids and dependency != task_id
+        ]
+
+    plan_payload["eda_tasks"] = normalized_tasks
+    plan_payload["hypothesis_index"] = synchronize_hypothesis_index(normalized_tasks)
+    plan_payload["recommended_module_sequence"] = synchronize_recommended_module_sequence(
+        plan_payload.get("recommended_module_sequence"), normalized_tasks,
+    )
+    plan_payload["blocking_tasks"] = synchronize_blocking_tasks(normalized_tasks)
+    research_payload["eda_tasks"] = deepcopy(normalized_tasks)
+
+    return ResearchToEdaCanonicalizationResult(
+        research_hypotheses=ResearchHypotheses.model_validate(research_payload),
+        eda_task_plan=EdaTaskPlan.model_validate(plan_payload),
+        repairs=repairs,
+    )
+
+
 def validate_research_to_eda_contract(
     hypotheses: ResearchHypotheses,
     task_plan: EdaTaskPlan,
@@ -249,6 +520,15 @@ def validate_research_to_eda_contract(
         *,
         severity: IssueSeverity = "error",
         related_ids: list[str] | None = None,
+        hypothesis_id: str | None = None,
+        category: str | None = None,
+        check_ref: str | None = None,
+        check_module: str | None = None,
+        allowed_modules: list[str] | None = None,
+        task_id: str | None = None,
+        module: str | None = None,
+        task_blocking: bool | None = None,
+        listed_in_blocking_tasks: bool | None = None,
     ) -> None:
         target = errors if severity == "error" else warnings
         target.append(ContractIssue(
@@ -257,6 +537,15 @@ def validate_research_to_eda_contract(
             path=path,
             message=_sanitize_text(message),
             related_ids=[_sanitize_text(value) for value in (related_ids or [])][:16],
+            hypothesis_id=hypothesis_id,
+            category=category,
+            check_ref=check_ref,
+            check_module=check_module,
+            allowed_modules=allowed_modules or [],
+            task_id=task_id,
+            module=module,
+            task_blocking=task_blocking,
+            listed_in_blocking_tasks=listed_in_blocking_tasks,
         ))
 
     if hypotheses.competition_id != task_plan.competition_id:
@@ -310,27 +599,62 @@ def validate_research_to_eda_contract(
                 "Each hypothesis requires at least one executable EDA check.",
                 related_ids=[identifier],
             )
-        check_modules: set[str] = set()
+        valid_check_modules: set[str] = set()
+        allowed_modules = CATEGORY_ALLOWED_MODULES[hypothesis.category]
+        reported_category_mismatch = False
         for check_index, check in enumerate(checks):
-            check_path = f"{path}.expected_eda_checks[{check_index}]"
-            module, separator, check_name = check.partition(".")
+            check_path = (
+                f"research_hypotheses.{path}.expected_eda_checks[{check_index}]"
+            )
+            module = extract_check_module(check)
+            _, separator, check_name = check.partition(".")
             if not separator or not check_name or check_name not in EDA_CHECK_REGISTRY.get(module, ()):
                 add(
                     "unknown_eda_check",
                     check_path,
                     "Expected EDA check is not present in the deterministic check registry.",
                     related_ids=[identifier],
+                    hypothesis_id=identifier,
+                    category=hypothesis.category,
+                    check_ref=check,
+                    check_module=module,
+                    allowed_modules=sorted(allowed_modules),
                 )
-                continue
-            check_modules.add(module)
-        if checks and not (check_modules & CATEGORY_CHECK_MODULES[hypothesis.category]):
+            else:
+                valid_check_modules.add(module)
+            if module and module not in allowed_modules:
+                reported_category_mismatch = True
+                add(
+                    "hypothesis_check_category_mismatch",
+                    check_path,
+                    f"{hypothesis.category.replace('_', ' ').title()} hypothesis references "
+                    f"module {module!r}, which is not allowed for its category.",
+                    related_ids=[identifier],
+                    hypothesis_id=identifier,
+                    category=hypothesis.category,
+                    check_ref=check,
+                    check_module=module,
+                    allowed_modules=sorted(allowed_modules),
+                )
+        if checks and not reported_category_mismatch and not (
+            valid_check_modules & allowed_modules
+        ):
+            first_check = checks[0]
             add(
                 "hypothesis_check_category_mismatch",
-                f"{path}.expected_eda_checks",
-                "Expected checks do not include a module suitable for the hypothesis category.",
+                f"research_hypotheses.{path}.expected_eda_checks",
+                "Expected checks do not include a registered module suitable for the "
+                "hypothesis category.",
                 related_ids=[identifier],
+                hypothesis_id=identifier,
+                category=hypothesis.category,
+                check_ref=first_check,
+                check_module=extract_check_module(first_check),
+                allowed_modules=sorted(allowed_modules),
             )
-        if hypothesis.priority == "P0" and check_modules and not (check_modules & CORE_EDA_MODULES):
+        if hypothesis.priority == "P0" and valid_check_modules and not (
+            valid_check_modules & CORE_EDA_MODULES
+        ):
             add(
                 "p0_depends_only_on_optional_module",
                 f"{path}.expected_eda_checks",
@@ -442,9 +766,13 @@ def validate_research_to_eda_contract(
         if listed != task.blocking:
             add(
                 "blocking_task_conflict",
-                f"eda_tasks[{index}].blocking",
+                f"eda_task_plan.eda_tasks[{index}].blocking",
                 "Task blocking flag conflicts with the plan-level blocking module list.",
                 related_ids=[str(task.task_id)],
+                task_id=str(task.task_id),
+                module=task.module,
+                task_blocking=task.blocking,
+                listed_in_blocking_tasks=listed,
             )
 
     sequence = list(task_plan.recommended_module_sequence)
@@ -707,6 +1035,15 @@ def _check_dataset_secrets(dataset: dict[str, Any], add: Any) -> None:
     walk(dataset, "dataset")
 
 
+def _unique_text(values: Any) -> list[str]:
+    result: list[str] = []
+    for value in values or []:
+        text = str(value or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
 def _sanitize_text(value: Any) -> str:
     text = str(value)
     for pattern in _SECRET_PATTERNS:
@@ -721,12 +1058,19 @@ def _sanitize_text(value: Any) -> str:
 
 
 __all__ = [
+    "CANONICAL_BLOCKING_MODULES",
+    "CATEGORY_ALIASES",
+    "CATEGORY_ALLOWED_MODULES",
+    "CATEGORY_CHECK_MODULES",
     "CATEGORY_PREFIXES",
     "CORE_EDA_MODULES",
     "ContractIssue",
     "EDA_CHECK_REGISTRY",
     "KNOWN_EDA_MODULES",
+    "MODULE_ALIASES",
     "MODULE_DEPENDENCIES",
+    "ResearchToEdaCanonicalizationRepair",
+    "ResearchToEdaCanonicalizationResult",
     "ResearchEdaCompetitionMismatchError",
     "ResearchEdaMetricTaskMismatchError",
     "ResearchEdaModulePlanError",
@@ -736,6 +1080,15 @@ __all__ = [
     "ResearchToEdaContractError",
     "ResearchToEdaContractValidationResult",
     "STABLE_ERROR_CODES",
+    "canonicalize_research_to_eda_contract",
+    "extract_check_module",
+    "is_module_blocking",
+    "normalize_check_reference",
+    "normalize_hypothesis_category",
+    "normalize_module_name",
     "require_valid_research_to_eda_contract",
+    "synchronize_blocking_tasks",
+    "synchronize_hypothesis_index",
+    "synchronize_recommended_module_sequence",
     "validate_research_to_eda_contract",
 ]

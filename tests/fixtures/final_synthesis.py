@@ -34,6 +34,7 @@ async def synthesize_for_test(
     client: Any,
     model: str,
     eda_summary_text: str | None = None,
+    diagnostics_dir: Path | None = None,
 ):
     primary = (eda_evidence_pack.validation_evidence.get("primary_validation") or {}).get("method") or "stratified_kfold"
     metric = MetricResult(
@@ -90,6 +91,9 @@ async def synthesize_for_test(
         eda_summary_text=eda_summary_text,
     )
     return await synthesize_final_strategy(
-        context=context, registries=registries, client=client, model=model
+        context=context,
+        registries=registries,
+        client=client,
+        model=model,
+        diagnostics_dir=diagnostics_dir,
     )
-

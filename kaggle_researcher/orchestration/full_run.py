@@ -4,10 +4,10 @@ import json
 import logging
 import shutil
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from tqdm.auto import tqdm
 
@@ -89,6 +89,11 @@ from kaggle_researcher.schemas import (
     RetrievedDocument,
     ValidationResult,
 )
+from kaggle_researcher.workflow import (
+    FinalSynthesisDegradedError,
+    FinalSynthesisStageStatus,
+    WorkflowStatus,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -123,6 +128,39 @@ class FullRunResult:
     final_strategy_path: Path
     final_report_path: Path
     status: str
+    final_synthesis_status: Literal[
+        "llm_success", "repaired_success", "degraded_fallback"
+    ] | None = None
+    final_synthesis_degraded: bool = False
+    workflow_status: WorkflowStatus = "success"
+    degraded_stages: list[str] = field(default_factory=list)
+    final_synthesis_stage_status: FinalSynthesisStageStatus | None = None
+    final_synthesis_diagnostics_path: Path | None = None
+    warnings: list[str] = field(default_factory=list)
+    limitations: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        is_degraded = self.final_synthesis_status == "degraded_fallback"
+        if self.final_synthesis_degraded != is_degraded:
+            raise ValueError(
+                "final_synthesis_degraded must match final_synthesis_status"
+            )
+        if is_degraded:
+            if self.workflow_status == "success":
+                raise ValueError(
+                    "degraded final synthesis cannot have workflow_status='success'"
+                )
+            if "final_synthesis" not in self.degraded_stages:
+                raise ValueError(
+                    "degraded final synthesis must list final_synthesis in degraded_stages"
+                )
+            expected_stage_status = (
+                "failed" if self.workflow_status == "failed" else "degraded_fallback"
+            )
+            if self.final_synthesis_stage_status != expected_stage_status:
+                raise ValueError(
+                    "final synthesis stage status contradicts workflow_status"
+                )
 
 
 def stage_registry(config: FullRunConfig) -> tuple[StageDefinition, ...]:
@@ -157,13 +195,26 @@ async def run_full_research(config: FullRunConfig) -> FullRunResult:
             f"Manifest competition_id {manifest.competition_id!r} does not match {config.competition_id!r}"
         )
     if _can_reuse(manifest, config, run_dir):
-        return FullRunResult(
+        reused_status, reused_degraded = _read_final_synthesis_status(
+            run_dir / "final" / "final_strategy.json"
+        )
+        result = _build_full_run_result(
             run_dir,
             manifest_path,
             run_dir / "final" / "final_strategy.json",
             run_dir / "final" / "final_report.md",
             "reused",
+            reused_status,
+            reused_degraded,
+            require_valid_final_synthesis=config.require_valid_final_synthesis,
         )
+        if result.workflow_status == "failed":
+            raise FinalSynthesisDegradedError(
+                result.final_synthesis_diagnostics_path
+                or run_dir / "final" / "final_synthesis_diagnostics.json",
+                result=result,
+            )
+        return result
 
     services = _runtime_services(config)
     state = FullRunState(run_dir=run_dir, config=config, services=services, manifest=manifest)
@@ -228,6 +279,7 @@ async def run_full_research(config: FullRunConfig) -> FullRunResult:
                     finished_at=_utcnow(),
                     duration_sec=duration,
                     partial=not stage.required and not config.fail_fast,
+                    outputs=_stage_output_pointers(stage.stage_id, run_dir),
                 )
                 _persist_state(state, manifest_path)
                 if stage.required or config.fail_fast:
@@ -257,8 +309,28 @@ async def run_full_research(config: FullRunConfig) -> FullRunResult:
 
     final_strategy_path = run_dir / "final" / "final_strategy.json"
     final_report_path = run_dir / "final" / "final_report.md"
+    final_synthesis_diagnostics_path = (
+        run_dir / "final" / "final_synthesis_diagnostics.json"
+    )
+    final_synthesis_status, final_synthesis_degraded = _read_final_synthesis_status(
+        final_strategy_path
+    )
+    result = _build_full_run_result(
+        run_dir,
+        manifest_path,
+        final_strategy_path,
+        final_report_path,
+        "completed",
+        final_synthesis_status,
+        final_synthesis_degraded,
+        require_valid_final_synthesis=config.require_valid_final_synthesis,
+    )
     state.manifest = state.manifest.model_copy(update={
-        "status": RunStatus.COMPLETED,
+        "status": (
+            RunStatus.FAILED
+            if result.workflow_status == "failed"
+            else RunStatus.COMPLETED
+        ),
         "finished_at": _utcnow(),
         "final_outputs": FinalOutputManifest(
             final_strategy=artifact_pointer(
@@ -268,13 +340,89 @@ async def run_full_research(config: FullRunConfig) -> FullRunResult:
                 schema_version="1.0",
             ),
             final_report=artifact_pointer(final_report_path, run_dir=run_dir),
+            final_synthesis_diagnostics=artifact_pointer(
+                final_synthesis_diagnostics_path,
+                run_dir=run_dir,
+            ),
         ),
     })
     _persist_state(state, manifest_path)
     _write_summary(run_dir, state.manifest)
+    if result.workflow_status == "failed":
+        raise FinalSynthesisDegradedError(
+            result.final_synthesis_diagnostics_path
+            or final_synthesis_diagnostics_path,
+            result=result,
+        )
+    return result
+
+
+def _build_full_run_result(
+    run_dir: Path,
+    manifest_path: Path,
+    final_strategy_path: Path,
+    final_report_path: Path,
+    status: str,
+    final_synthesis_status: str | None,
+    final_synthesis_degraded: bool,
+    *,
+    require_valid_final_synthesis: bool,
+) -> FullRunResult:
+    diagnostics_path = run_dir / "final" / "final_synthesis_diagnostics.json"
+    workflow_status: WorkflowStatus = "success"
+    stage_status: FinalSynthesisStageStatus | None = None
+    degraded_stages: list[str] = []
+    warnings: list[str] = []
+    limitations: list[str] = []
+    if final_synthesis_status == "llm_success":
+        stage_status = "success"
+    elif final_synthesis_status == "repaired_success":
+        stage_status = "repaired_success"
+        warnings.append(
+            "Final synthesis required deterministic contract repair and then passed validation."
+        )
+    elif final_synthesis_status == "degraded_fallback":
+        degraded_stages.append("final_synthesis")
+        warnings.append(
+            "Final synthesis completed with a deterministic degraded fallback; "
+            "this is not a successful LLM synthesis."
+        )
+        limitations.append(
+            "The final strategy was assembled deterministically because the LLM "
+            "output did not satisfy the final strategy contract."
+        )
+        if require_valid_final_synthesis:
+            workflow_status = "failed"
+            stage_status = "failed"
+            status = "failed"
+        else:
+            workflow_status = "completed_with_degradation"
+            stage_status = "degraded_fallback"
     return FullRunResult(
-        run_dir, manifest_path, final_strategy_path, final_report_path, "completed"
+        run_dir=run_dir,
+        manifest_path=manifest_path,
+        final_strategy_path=final_strategy_path,
+        final_report_path=final_report_path,
+        status=status,
+        final_synthesis_status=final_synthesis_status,
+        final_synthesis_degraded=final_synthesis_degraded,
+        workflow_status=workflow_status,
+        degraded_stages=degraded_stages,
+        final_synthesis_stage_status=stage_status,
+        final_synthesis_diagnostics_path=(
+            diagnostics_path if diagnostics_path.is_file() else None
+        ),
+        warnings=warnings,
+        limitations=limitations,
     )
+
+
+def _read_final_synthesis_status(path: Path) -> tuple[str | None, bool]:
+    try:
+        strategy = load_final_strategy(path)
+    except (OSError, ValueError):
+        return None, False
+    return strategy.synthesis_status, strategy.fallback_used
 
 
 async def _run_stage(stage_id: str, state: FullRunState) -> None:
@@ -465,14 +613,15 @@ async def _synthesize_strategy(state: FullRunState) -> None:
         eda_summary_text=eda.summary_path.read_text(encoding="utf-8"),
         optional_stage_failures=state.optional_stage_failures,
     )
+    final = state.run_dir / "final"
+    final.mkdir(parents=True, exist_ok=True)
     result = await synthesize_final_strategy(
         context=context,
         registries=registries,
         client=state.services.reasoning_client,
         model=state.services.reasoning_model,
+        diagnostics_dir=final,
     )
-    final = state.run_dir / "final"
-    final.mkdir(parents=True, exist_ok=True)
     strategy_path = final / "final_strategy.json"
     report_path = final / "final_report.md"
     write_final_strategy(strategy_path, result)
@@ -653,7 +802,7 @@ def _expected_output_names(stage_id: str) -> set[str]:
         "reasoning_context": {"validation", "metric", "leakage", "leaderboard"},
         "experiment_planner": {"experiment_plan"},
         "skeptical_reviewer": {"review"},
-        "final_strategy": {"strategy"},
+        "final_strategy": {"strategy", "diagnostics"},
         "final_report": {"report"},
     }.get(stage_id, set())
 
@@ -684,6 +833,7 @@ def _stage_output_pointers(stage_id: str, run_dir: Path) -> dict[str, ArtifactPo
         },
         "final_strategy": {
             "strategy": ("final/final_strategy.json", "final_strategy"),
+            "diagnostics": ("final/final_synthesis_diagnostics.json", None),
         },
         "final_report": {"report": ("final/final_report.md", None)},
     }.get(stage_id, {})
@@ -890,7 +1040,11 @@ def _write_summary(run_dir: Path, manifest: RunManifest) -> None:
     ]
     lines.extend(f"- {stage}: {entry.status.value}" for stage, entry in manifest.stages.items())
     lines.extend(["", "## Final Outputs", ""])
-    for name in ("final_strategy", "final_report"):
+    for name in (
+        "final_strategy",
+        "final_report",
+        "final_synthesis_diagnostics",
+    ):
         pointer = getattr(manifest.final_outputs, name)
         if pointer:
             lines.append(f"- {name}: `{pointer.relative_path}`")

@@ -11,6 +11,14 @@ from kaggle_researcher.contracts.research_hypotheses import (
     ResearchHypotheses,
 )
 from kaggle_researcher.contracts.eda_task_plan import EdaTaskPlan
+from kaggle_researcher.contracts.research_to_eda import (
+    CATEGORY_ALLOWED_MODULES,
+    is_module_blocking,
+    normalize_check_reference,
+    normalize_hypothesis_category,
+    normalize_module_name,
+    synchronize_recommended_module_sequence,
+)
 from kaggle_researcher.research_scout.prompts import (
     RESEARCH_SCOUT_OUTPUT_INSTRUCTIONS,
     RESEARCH_SCOUT_SYSTEM_PROMPT,
@@ -35,9 +43,7 @@ CORE_MODULE_SEQUENCE = [
     "validation_analyzer",
     "leakage_checker",
 ]
-CORE_BLOCKING_MODULES = [
-    "file_inventory", "schema_inferer", "validation_analyzer", "leakage_checker"
-]
+CORE_BLOCKING_MODULES = list(CORE_MODULE_SEQUENCE)
 
 
 async def run_research_scout(
@@ -127,11 +133,17 @@ async def _repair_scout_payload_once(
             "Correct the existing Research Scout payload to the canonical research-to-EDA "
             "artifact schema. Do not add hypotheses or invent hypothesis IDs. Preserve task "
             "intent. Use hypothesis_id and task_id, never id. Every hypothesis_index value "
-            "must be an array of task IDs. Return JSON only."
+            "must be an array of task IDs. Use only canonical categories and module names. "
+            "Every check module must be allowed for its hypothesis category; do not mix "
+            "categories in one hypothesis. Return JSON only."
         ),
         user_prompt=json.dumps({
-            "validation_errors": [str(validation_error)[:2000]],
+            "validation_errors": _compact_validation_errors(validation_error),
             "allowed_categories": ALLOWED_HYPOTHESIS_CATEGORIES,
+            "category_allowed_modules": {
+                category: sorted(modules)
+                for category, modules in CATEGORY_ALLOWED_MODULES.items()
+            },
             "canonical_task_schema": EdaTaskPlan.model_json_schema(),
             "invalid_payload": invalid_payload,
         }, ensure_ascii=False),
@@ -139,6 +151,22 @@ async def _repair_scout_payload_once(
     if not isinstance(response, dict):
         raise ValueError("Scout repair response must be a JSON object.")
     return response
+
+
+def _compact_validation_errors(error: Exception) -> list[dict[str, Any]]:
+    result = getattr(error, "result", None)
+    issues = getattr(result, "errors", None)
+    if issues:
+        return [
+            {
+                "code": issue.code,
+                "path": issue.path,
+                "message": issue.message,
+                "related_ids": issue.related_ids,
+            }
+            for issue in issues[:20]
+        ]
+    return [{"code": type(error).__name__, "message": str(error)[:2000]}]
 
 
 def _build_user_prompt(
@@ -164,6 +192,10 @@ def _build_user_prompt(
                 "hypothesis_id", "category", "claim", "confidence_before_eda",
             ],
             "allowed_categories": ALLOWED_HYPOTHESIS_CATEGORIES,
+            "category_allowed_modules": {
+                category: sorted(modules)
+                for category, modules in CATEGORY_ALLOWED_MODULES.items()
+            },
         },
         "canonical_task_plan_contract": {
             "task_fields": list(EdaTaskPlan.model_json_schema()["$defs"]["EdaTask"]["properties"]),
@@ -173,6 +205,9 @@ def _build_user_prompt(
             "Separate source facts from dataset-dependent hypotheses.",
             "Do not say EDA has already run.",
             "Every hypothesis must include expected_eda_checks.",
+            "Every expected_eda_checks entry must begin with a module allowed for its category.",
+            "Do not mix modules from different categories in one hypothesis; split the claim instead.",
+            "Use canonical module names only.",
             "P0 blocking checks must cover schema, metric, validation, and leakage.",
             "Do not force temporal validation for ordinary tabular classification or regression.",
             "Only create temporal validation hypotheses when metric/source/description supports them.",
@@ -180,6 +215,8 @@ def _build_user_prompt(
             "Use hypothesis_id, never id, and always provide confidence_before_eda.",
             "Use relationship, feature, schema, and notebook; do not invent category aliases.",
             "Use task_id, never id; every hypothesis_index value must be a JSON array of task IDs.",
+            "Do not infer blocking flags independently; the application canonicalizes them.",
+            "Do not duplicate task modules.",
         ],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
@@ -237,7 +274,25 @@ def _fallback_output(
     reason: str,
 ) -> ResearchScoutOutput:
     hypotheses = _ensure_core_hypotheses([], plan_data=plan_data)
+    hypotheses.append(ScoutHypothesis(
+        hypothesis_id="baseline_001",
+        category="baseline",
+        claim="Measure an honest baseline as a diagnostic sanity floor.",
+        rationale="A simple baseline can reveal schema or validation failures without "
+        "being treated as the final solution.",
+        expected_eda_checks=["baseline_runner.honest_baseline"],
+        priority="P1",
+        confidence_before_eda="low",
+        source_refs=[],
+    ))
     tasks = _ensure_core_tasks([], hypotheses=hypotheses)
+    tasks.append(ScoutEdaTask(
+        task_id="baseline_001",
+        module="baseline_runner",
+        priority="P1",
+        blocking=False,
+        related_hypothesis_ids=["baseline_001"],
+    ))
     task_plan = EdaTaskPlanDraft(
         competition_id=competition_id,
         task_type=_task_type(plan_data),
@@ -281,6 +336,27 @@ def _fallback_output(
         structured_findings=findings,
         scout_limitations=limitations,
         models_used={"research_scout": model, "fallback": True},
+    )
+
+
+def build_deterministic_research_scout_fallback(
+    *,
+    competition_id: str,
+    competition_url: str,
+    competition_desc: str,
+    plan_data: PlanData,
+    retrieved_documents: list[RetrievedDocument],
+    model: str = DEFAULT_MODEL,
+    reason: str = "Research Scout output did not satisfy the publication contract.",
+) -> ResearchScoutOutput:
+    return _fallback_output(
+        competition_id=competition_id,
+        competition_url=competition_url,
+        competition_desc=competition_desc,
+        plan_data=plan_data,
+        retrieved_documents=retrieved_documents,
+        model=model,
+        reason=reason,
     )
 
 
@@ -369,14 +445,16 @@ def _normalise_hypotheses(
     for index, item in enumerate(raw_hypotheses, start=1):
         if not isinstance(item, dict):
             continue
-        category = _normalise_category(item.get("category"))
+        raw_checks = item.get("expected_eda_checks") or item.get("how_to_verify") or []
+        checks = [normalize_check_reference(value) for value in raw_checks]
+        category = normalize_hypothesis_category(item.get("category"), checks)
         hypothesis_id = str(item.get("hypothesis_id") or item.get("id") or _generated_id(category, index))
         data = {
             "hypothesis_id": hypothesis_id,
             "category": category,
             "claim": item.get("claim") or _default_claim(category, plan_data),
             "rationale": item.get("rationale") or item.get("why_it_matters") or "This must be verified by EDA before strategy decisions.",
-            "expected_eda_checks": item.get("expected_eda_checks") or item.get("how_to_verify") or [_default_check(category)],
+            "expected_eda_checks": checks or [_default_check(category)],
             "priority": item.get("priority") or ("P0" if category in {"schema", "metric", "validation", "leakage"} else "P1"),
             "confidence_before_eda": item.get("confidence_before_eda") or item.get("confidence") or "medium",
             "source_refs": item.get("source_refs") or item.get("supporting_source_ids") or [],
@@ -411,7 +489,7 @@ def _normalise_tasks(
                     task_id=str(item.get("task_id") or item.get("id") or f"{module}_{index:03d}"),
                     module=module,
                     priority=item.get("priority") or "P0",
-                    blocking=bool(item.get("blocking", False)),
+                    blocking=is_module_blocking(module),
                     related_hypothesis_ids=related,
                     params=item.get("params") or {},
                 )
@@ -431,7 +509,8 @@ def _ensure_core_tasks(
     for task in [
         ScoutEdaTask(task_id="file_inventory_001", module="file_inventory", priority="P0", blocking=True, related_hypothesis_ids=["schema_001"]),
         ScoutEdaTask(task_id="schema_001", module="schema_inferer", priority="P0", blocking=True, related_hypothesis_ids=["schema_001"]),
-        ScoutEdaTask(task_id="metric_001", module="metric_analyzer", priority="P0", blocking=False, related_hypothesis_ids=["metric_001"]),
+        ScoutEdaTask(task_id="table_profiler_001", module="table_profiler", priority="P0", blocking=True, related_hypothesis_ids=["schema_001"]),
+        ScoutEdaTask(task_id="metric_001", module="metric_analyzer", priority="P0", blocking=True, related_hypothesis_ids=["metric_001"]),
         ScoutEdaTask(task_id="validation_001", module="validation_analyzer", priority="P0", blocking=True, related_hypothesis_ids=["val_001"]),
         ScoutEdaTask(task_id="leakage_001", module="leakage_checker", priority="P0", blocking=True, related_hypothesis_ids=["leak_001"]),
         ScoutEdaTask(task_id="drift_001", module="drift_analyzer", priority="P1", blocking=False, related_hypothesis_ids=["drift_001"]),
@@ -454,7 +533,10 @@ def _task_plan_from_payload(
     if not isinstance(raw_plan, dict):
         raw_plan = {}
     sequence = raw_plan.get("recommended_module_sequence") or payload.get("recommended_module_sequence") or CORE_MODULE_SEQUENCE
-    blocking = raw_plan.get("blocking_tasks") or CORE_BLOCKING_MODULES
+    sequence = synchronize_recommended_module_sequence(
+        sequence,
+        [task.model_dump(mode="json") for task in tasks],
+    )
     return EdaTaskPlanDraft(
         competition_id=competition_id,
         task_type=raw_plan.get("task_type") or _task_type(plan_data),
@@ -466,7 +548,7 @@ def _task_plan_from_payload(
         recommended_human_checklist=raw_plan.get("recommended_human_checklist") or [
             "Confirm official metric, target column, and submission format before modeling."
         ],
-        blocking_tasks=_normalise_blocking_tasks(blocking),
+        blocking_tasks=[task.module for task in tasks if task.blocking],
     )
 
 
@@ -559,34 +641,12 @@ def _normalise_module_sequence(values: Any) -> list[str]:
     return modules
 
 
-def _normalise_blocking_tasks(values: Any) -> list[str]:
-    modules = []
-    for value in values if isinstance(values, list) else CORE_BLOCKING_MODULES:
-        module = _normalise_module(value)
-        if module not in modules:
-            modules.append(module)
-    return modules
-
-
 def _normalise_category(value: Any) -> str:
-    normalized = str(value or "schema").strip().lower()
-    aliases = {
-        "dataset_schema": "schema",
-        "relationships": "relationship",
-        "feature_engineering": "feature",
-        "notebook_reverse_engineering": "notebook",
-        "leaderboard_risk": "leaderboard",
-    }
-    return aliases.get(normalized, normalized)
+    return normalize_hypothesis_category(value or "schema")
 
 
 def _normalise_module(value: Any) -> str:
-    normalized = str(value or "schema_inferer").strip().lower()
-    aliases = {
-        "notebook_reverse_engineering": "notebook_static_analysis",
-        "relationship_analyzer": "relationship_inferer",
-    }
-    return aliases.get(normalized, normalized)
+    return normalize_module_name(value or "schema_inferer")
 
 
 def _generated_id(category: str, index: int) -> str:
@@ -616,13 +676,13 @@ def _default_check(category: str) -> str:
         "metric": "metric_analyzer.registry",
         "validation": "validation_analyzer.primary_policy",
         "leakage": "leakage_checker.basic",
-        "relationship": "relationship_inferer.generic",
+        "relationship": "relationship_inferer.relationships",
         "drift": "drift_analyzer.generic",
         "baseline": "baseline_runner.honest_baseline",
-        "feature": "feature_probe.families",
-        "notebook": "notebook_static_analysis.patterns",
-        "leaderboard": "notebook_static_analysis.leaderboard_risk",
-        "data_quality": "table_profiler.quality",
+        "feature": "feature_probe.feature_family_probe",
+        "notebook": "notebook_static_analysis.static_patterns",
+        "leaderboard": "drift_analyzer.train_test_shift",
+        "data_quality": "table_profiler.profile_tables",
     }
     return checks.get(category, "schema_inferer.roles")
 
@@ -649,12 +709,17 @@ def _dedupe_hypotheses(hypotheses: list[ScoutHypothesis]) -> list[ScoutHypothesi
 
 
 def _dedupe_tasks(tasks: list[ScoutEdaTask]) -> list[ScoutEdaTask]:
-    seen = set()
-    result = []
+    by_module: dict[str, ScoutEdaTask] = {}
+    result: list[ScoutEdaTask] = []
     for task in tasks:
-        if task.task_id in seen:
+        existing = by_module.get(task.module)
+        if existing is not None:
+            existing.related_hypothesis_ids = list(dict.fromkeys([
+                *existing.related_hypothesis_ids,
+                *task.related_hypothesis_ids,
+            ]))
             continue
-        seen.add(task.task_id)
+        by_module[task.module] = task
         result.append(task)
     return result
 
@@ -672,4 +737,4 @@ def _metric_name(plan_data: PlanData) -> str:
     return str(plan_data.metric or "unknown").strip().lower().replace(" ", "_").replace("-", "_")
 
 
-__all__ = ["run_research_scout"]
+__all__ = ["build_deterministic_research_scout_fallback", "run_research_scout"]

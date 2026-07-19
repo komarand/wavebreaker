@@ -40,6 +40,7 @@ class FullRunConfig:
     enable_source_claim_validation: bool = False
     enable_visual_diagnostics: bool = False
     fail_fast: bool = False
+    require_valid_final_synthesis: bool = False
     resume_run_dir: Path | None = None
     force_rerun_stages: set[str] = field(default_factory=set)
     disable_progress: bool = False

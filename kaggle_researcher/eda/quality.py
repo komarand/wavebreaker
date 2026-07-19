@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from typing import Any
-
+from kaggle_researcher.contracts.evidence import (
+    EvidencePathResolutionError,
+    resolve_evidence_ref,
+)
 from kaggle_researcher.eda.schemas import EdaEvidencePack, ResearchHypotheses
 
 
@@ -98,46 +100,9 @@ def validate_no_unsupported_summary_claims(
 
 
 def _evidence_ref_exists(pack: EdaEvidencePack, ref: str) -> bool:
-    if not ref or not ref.strip():
-        return False
-    parts = [part for part in ref.split(".") if part]
-    if not parts:
-        return False
-    current: Any = pack.model_dump(mode="json")
-    for part in parts:
-        if isinstance(current, dict):
-            if part not in current:
-                return False
-            current = current[part]
-            continue
-        if isinstance(current, list):
-            if part.isdigit():
-                index = int(part)
-                if index >= len(current):
-                    return False
-                current = current[index]
-                continue
-            match = next(
-                (
-                    item
-                    for item in current
-                    if isinstance(item, dict)
-                    and (
-                        item.get("risk_id") == part
-                        or item.get("id") == part
-                          or item.get("ablation_id") == part
-                          or item.get("feature_block") == part
-                          or item.get("configuration") == part
-                          or item.get("interaction_id") == part
-                          or item.get("claim_id") == part
-                    )
-                ),
-                None,
-            )
-            if match is None:
-                return False
-            current = match
-            continue
+    try:
+        resolve_evidence_ref(pack, ref)
+    except EvidencePathResolutionError:
         return False
     return True
 

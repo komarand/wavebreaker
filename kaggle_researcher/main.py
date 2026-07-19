@@ -57,10 +57,14 @@ from kaggle_researcher.contracts.experiments import ExperimentPlan
 from kaggle_researcher.config import load_config
 from kaggle_researcher.eda import orchestrator as eda_orchestrator
 from kaggle_researcher.eda.schemas import EdaEvidencePack, EdaRunConfig, ResearchHypotheses
-from kaggle_researcher.contracts.research_to_eda import require_valid_research_to_eda_contract
+from kaggle_researcher.contracts.research_to_eda import (
+    canonicalize_research_to_eda_contract,
+    require_valid_research_to_eda_contract,
+)
 from kaggle_researcher.embedder import embed_texts
 from kaggle_researcher.planner import fallback_plan, plan
 from kaggle_researcher.research_scout import (
+    build_deterministic_research_scout_fallback,
     build_research_hypotheses,
     build_research_scout_summary,
     run_research_scout,
@@ -98,6 +102,11 @@ from kaggle_researcher.schemas import (
 )
 from kaggle_researcher.store.domain_memory import DomainMemory
 from kaggle_researcher.store.pg_store import PgStore
+from kaggle_researcher.workflow import (
+    FinalSynthesisDegradedError,
+    FinalSynthesisStageStatus,
+    WorkflowStatus,
+)
 
 
 FAST_MAX_NOTEBOOKS = 3
@@ -260,6 +269,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory for final strategy outputs. Defaults to the research run artifact directory.",
     )
     parser.add_argument(
+        "--require-valid-final-synthesis",
+        action="store_true",
+        help=(
+            "Fail after writing artifacts when final synthesis can only produce a "
+            "deterministic degraded fallback."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable verbose debug logging.",
@@ -291,6 +308,11 @@ def build_full_run_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-rerun-stage", action="append", default=[], help="Stage ID to rerun; may be repeated")
     parser.add_argument("--profile", choices=("minimal", "standard", "full"), default="standard", help="Execution profile")
     parser.add_argument("--fail-fast", action="store_true", help="Stop after an optional-stage failure")
+    parser.add_argument(
+        "--require-valid-final-synthesis",
+        action="store_true",
+        help="Fail after preserving artifacts when final synthesis is degraded.",
+    )
     parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress output")
     parser.add_argument("--download-dataset", dest="download_dataset", action="store_true", default=True, help="Allow dataset download when local data is absent")
     parser.add_argument("--no-download-dataset", dest="download_dataset", action="store_false", help="Disable dataset download")
@@ -340,6 +362,7 @@ async def run_research(
     eda_summary_path: str | Path | None = None,
     final_synthesis: bool = False,
     final_output_dir: str | Path | None = None,
+    require_valid_final_synthesis: bool = False,
     debug: bool = False,
     no_github: bool = False,
     fast: bool = False,
@@ -522,7 +545,8 @@ async def run_research(
                 list(scout_payload.get("hypotheses") or [])
             )
             migration = migrate_research_hypotheses_payload(research_boundary_payload)
-            canonical_hypotheses = ResearchHypotheses.model_validate(migration.canonical_payload)
+            canonical_hypotheses_payload = migration.canonical_payload
+            scout_summary_override: str | None = None
             if migration.migrated:
                 warnings.extend(migration.warnings)
                 _write_json_artifact(
@@ -560,10 +584,56 @@ async def run_research(
                 task["module"] for task in adapted_tasks if task.get("blocking")
             ))
             task_plan_migration = migrate_eda_task_plan_payload(task_plan_boundary_payload)
-            canonical_task_plan = EdaTaskPlan.model_validate(task_plan_migration.canonical_payload)
-            validate_research_artifact_bundle(canonical_hypotheses, canonical_task_plan)
-            require_valid_research_to_eda_contract(canonical_hypotheses, canonical_task_plan)
-            scout_summary = build_research_scout_summary(scout_payload)
+            canonical_task_plan_payload = task_plan_migration.canonical_payload
+            try:
+                canonicalization = canonicalize_research_to_eda_contract(
+                    canonical_hypotheses_payload,
+                    canonical_task_plan_payload,
+                )
+                canonical_hypotheses = canonicalization.research_hypotheses
+                canonical_task_plan = canonicalization.eda_task_plan
+                validate_research_artifact_bundle(canonical_hypotheses, canonical_task_plan)
+                require_valid_research_to_eda_contract(canonical_hypotheses, canonical_task_plan)
+            except ValueError as exc:
+                canonical_debug = {
+                    "research_hypotheses": canonical_hypotheses_payload,
+                    "eda_task_plan": canonical_task_plan_payload,
+                }
+                error_payload = (
+                    exc.as_manifest_error()
+                    if hasattr(exc, "as_manifest_error")
+                    else {"error_type": type(exc).__name__, "message": str(exc)[:2000]}
+                )
+                _write_json_artifact(run_dir, "research_scout_raw_output.json", scout_raw_payload)
+                _write_json_artifact(
+                    run_dir, "research_scout_canonical_output.json", canonical_debug,
+                )
+                _write_json_artifact(
+                    run_dir, "research_to_eda_validation_errors.json", error_payload,
+                )
+                fallback_output = build_deterministic_research_scout_fallback(
+                    competition_id=resolved_competition_id,
+                    competition_url=competition_url,
+                    competition_desc=competition_desc,
+                    plan_data=plan_data,
+                    retrieved_documents=retrieved_documents,
+                    model=settings.deepseek_v4_pro,
+                    reason=str(exc)[:1000],
+                )
+                fallback_canonicalization = canonicalize_research_to_eda_contract(
+                    fallback_output.to_research_hypotheses_payload(),
+                    fallback_output.to_eda_task_plan_payload(),
+                )
+                canonical_hypotheses = fallback_canonicalization.research_hypotheses
+                canonical_task_plan = fallback_canonicalization.eda_task_plan
+                validate_research_artifact_bundle(canonical_hypotheses, canonical_task_plan)
+                require_valid_research_to_eda_contract(canonical_hypotheses, canonical_task_plan)
+                scout_summary_override = fallback_output.to_summary_markdown()
+                warnings.append(
+                    "Research Scout output failed semantic publication validation; "
+                    "a deterministic generic fallback was published."
+                )
+            scout_summary = scout_summary_override or build_research_scout_summary(scout_payload)
             _write_json_artifact(run_dir, "research_scout_raw.json", scout_raw_payload)
             hypotheses_path = run_dir / "research_hypotheses.json"
             eda_task_plan_path = run_dir / "eda_task_plan.json"
@@ -649,6 +719,13 @@ async def run_research(
         eda_summary_path: Path | None = provided_eda_summary_path
         final_strategy_path: Path | None = None
         final_strategy_summary_path: Path | None = None
+        final_synthesis_diagnostics_path: Path | None = None
+        final_synthesis_status: str | None = None
+        final_synthesis_degraded = False
+        final_synthesis_stage_status: FinalSynthesisStageStatus | None = None
+        workflow_status: WorkflowStatus = "success"
+        degraded_stages: list[str] = []
+        limitations: list[str] = []
         if execute_eda:
             _require_scout_paths_for_eda(scout_output_paths)
             if not scout_output_paths:
@@ -719,17 +796,50 @@ async def run_research(
                 registries=registries,
                 eda_summary_text=_load_optional_text(eda_summary_path),
             )
+            final_strategy_output_dir = (
+                Path(final_output_dir) if final_output_dir is not None else run_dir
+            )
             final_strategy = await synthesize_final_strategy(
                 context=synthesis_context,
                 registries=registries,
                 client=client,
                 model=settings.deepseek_v4_pro,
+                diagnostics_dir=final_strategy_output_dir,
             )
             final_strategy_path, final_strategy_summary_path = _write_final_strategy_outputs(
-                Path(final_output_dir) if final_output_dir is not None else run_dir,
+                final_strategy_output_dir,
                 final_strategy,
                 eda_evidence_pack=eda_pack_for_final.model_dump(mode="json"),
             )
+            final_synthesis_diagnostics_path = (
+                final_strategy_output_dir / "final_synthesis_diagnostics.json"
+            )
+            final_synthesis_status = final_strategy.synthesis_status
+            final_synthesis_degraded = final_strategy.fallback_used
+            if final_strategy.synthesis_status == "llm_success":
+                final_synthesis_stage_status = "success"
+            elif final_strategy.synthesis_status == "repaired_success":
+                final_synthesis_stage_status = "repaired_success"
+                warnings.append(
+                    "Final synthesis required deterministic contract repair and "
+                    "then passed validation."
+                )
+            else:
+                degraded_stages.append("final_synthesis")
+                warnings.append(
+                    "Final synthesis completed with a deterministic degraded fallback; "
+                    "this is not a successful LLM synthesis."
+                )
+                limitations.append(
+                    "The final strategy was assembled deterministically because the "
+                    "LLM output did not satisfy the final strategy contract."
+                )
+                if require_valid_final_synthesis:
+                    workflow_status = "failed"
+                    final_synthesis_stage_status = "failed"
+                else:
+                    workflow_status = "completed_with_degradation"
+                    final_synthesis_stage_status = "degraded_fallback"
             _stage(f"Final strategy saved to: {final_strategy_path}", show_progress)
         result = ResearchRunResult(
             competition_id=resolved_competition_id,
@@ -738,6 +848,9 @@ async def run_research(
             num_documents=len(summarized_documents),
             num_sources=num_sources,
             warnings=warnings,
+            limitations=limitations,
+            workflow_status=workflow_status,
+            degraded_stages=degraded_stages,
             duration_sec=round(time.perf_counter() - started_at, 3),
             report_mode=report_mode,
             run_artifacts_path=str(run_dir),
@@ -763,6 +876,12 @@ async def run_research(
             final_strategy_summary_path=str(final_strategy_summary_path)
             if final_strategy_summary_path
             else None,
+            final_synthesis_diagnostics_path=str(final_synthesis_diagnostics_path)
+            if final_synthesis_diagnostics_path
+            else None,
+            final_synthesis_status=final_synthesis_status,
+            final_synthesis_degraded=final_synthesis_degraded,
+            final_synthesis_stage_status=final_synthesis_stage_status,
         )
         run_summary = _build_research_run_summary(
             result=result,
@@ -773,6 +892,12 @@ async def run_research(
         _write_json_artifact(run_dir, "warnings.json", warnings)
         _write_json_artifact(run_dir, "research_run.json", run_summary)
         _write_json_file(actual_report_path.parent / "research_run.json", run_summary)
+        if workflow_status == "failed" and final_synthesis_degraded:
+            raise FinalSynthesisDegradedError(
+                final_synthesis_diagnostics_path
+                or run_dir / "final_synthesis_diagnostics.json",
+                result=result,
+            )
         return result
     except Exception:
         _write_json_artifact(run_dir, "warnings.json", warnings)
@@ -1791,12 +1916,22 @@ async def run(argv: list[str] | None = None) -> int:
             enable_source_claim_validation=args.enable_source_claim_validation,
             enable_visual_diagnostics=args.enable_visual_diagnostics,
             fail_fast=args.fail_fast,
+            require_valid_final_synthesis=args.require_valid_final_synthesis,
             resume_run_dir=args.resume_run_dir,
             force_rerun_stages=set(args.force_rerun_stage),
             disable_progress=args.no_progress,
         )
-        result = await run_full_research(config)
-        print(f"Full run status: {result.status}")
+        try:
+            result = await run_full_research(config)
+        except FinalSynthesisDegradedError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        print(f"Full run workflow status: {result.workflow_status}")
+        if result.workflow_status == "completed_with_degradation":
+            print(
+                "WARNING: Final synthesis used a deterministic degraded fallback; "
+                "artifacts were preserved."
+            )
         print(f"Run directory: {result.run_dir}")
         print(f"Final strategy: {result.final_strategy_path}")
         print(f"Final report: {result.final_report_path}")
@@ -1812,42 +1947,47 @@ async def run(argv: list[str] | None = None) -> int:
     if mode == "full" and args.report_mode == "minimal":
         mode = "minimal"
 
-    result = await run_research(
-        competition_url=args.competition_url,
-        competition_desc=args.competition_desc,
-        competition_id=args.competition_id,
-        output_dir=args.output_dir,
-        report_path=args.report_path,
-        overwrite_report=args.overwrite_report,
-        report_naming_strategy=args.report_naming_strategy,
-        show_progress=not args.no_progress,
-        report_mode=args.report_mode,
-        mode=mode,
-        allow_minimal_fallback=args.allow_minimal_fallback,
-        allow_partial_scout_output=args.allow_partial_scout_output,
-        write_eda_plan=args.write_eda_plan,
-        execute_eda=args.execute_eda,
-        local_dataset_path=args.local_dataset_path,
-        eda_output_dir=args.eda_output_dir,
-        download_dataset=args.download_dataset,
-        force_download=args.force_download,
-        enable_p1_modules=args.enable_p1_modules,
-        enable_baseline=args.enable_baseline,
-        enable_baseline_ablations=args.enable_baseline_ablations,
-        enable_interaction_diagnostics=args.enable_interaction_diagnostics,
-        enable_source_claim_validation=args.enable_source_claim_validation,
-        enable_visual_diagnostics=args.enable_visual_diagnostics,
-        enable_slice_diagnostics=args.enable_slice_diagnostics,
-        research_hypotheses_path=args.research_hypotheses_path,
-        eda_task_plan_path=args.eda_task_plan_path,
-        eda_evidence_pack_path=args.eda_evidence_pack_path,
-        eda_summary_path=args.eda_summary_path,
-        final_synthesis=args.final_synthesis,
-        final_output_dir=args.final_output_dir,
-        debug=args.debug,
-        no_github=args.no_github,
-        fast=args.fast,
-    )
+    try:
+        result = await run_research(
+            competition_url=args.competition_url,
+            competition_desc=args.competition_desc,
+            competition_id=args.competition_id,
+            output_dir=args.output_dir,
+            report_path=args.report_path,
+            overwrite_report=args.overwrite_report,
+            report_naming_strategy=args.report_naming_strategy,
+            show_progress=not args.no_progress,
+            report_mode=args.report_mode,
+            mode=mode,
+            allow_minimal_fallback=args.allow_minimal_fallback,
+            allow_partial_scout_output=args.allow_partial_scout_output,
+            write_eda_plan=args.write_eda_plan,
+            execute_eda=args.execute_eda,
+            local_dataset_path=args.local_dataset_path,
+            eda_output_dir=args.eda_output_dir,
+            download_dataset=args.download_dataset,
+            force_download=args.force_download,
+            enable_p1_modules=args.enable_p1_modules,
+            enable_baseline=args.enable_baseline,
+            enable_baseline_ablations=args.enable_baseline_ablations,
+            enable_interaction_diagnostics=args.enable_interaction_diagnostics,
+            enable_source_claim_validation=args.enable_source_claim_validation,
+            enable_visual_diagnostics=args.enable_visual_diagnostics,
+            enable_slice_diagnostics=args.enable_slice_diagnostics,
+            research_hypotheses_path=args.research_hypotheses_path,
+            eda_task_plan_path=args.eda_task_plan_path,
+            eda_evidence_pack_path=args.eda_evidence_pack_path,
+            eda_summary_path=args.eda_summary_path,
+            final_synthesis=args.final_synthesis,
+            final_output_dir=args.final_output_dir,
+            require_valid_final_synthesis=args.require_valid_final_synthesis,
+            debug=args.debug,
+            no_github=args.no_github,
+            fast=args.fast,
+        )
+    except FinalSynthesisDegradedError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     if result.mode == "scout":
         print("Research Scout complete.")
         print(f"Hypotheses saved to: {result.research_hypotheses_path}")
@@ -1862,7 +2002,15 @@ async def run(argv: list[str] | None = None) -> int:
         print(result.model_dump_json(indent=2))
         return 0
 
-    print("Research run complete.")
+    if result.workflow_status == "completed_with_degradation":
+        print("Research run completed with degradation.")
+        print(
+            "WARNING: Final synthesis used a deterministic degraded fallback; "
+            "artifacts were preserved."
+        )
+    else:
+        print("Research run complete.")
+    print(f"Workflow status: {result.workflow_status}")
     print(f"Report mode: {result.report_mode}")
     print(f"Report saved to: {result.report_path}")
     print(f"Run artifacts saved to: {result.run_artifacts_path}")
