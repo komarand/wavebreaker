@@ -166,6 +166,67 @@ Expected outputs:
 - Large datasets may be sampled. If table profiles contain `sampled=true`, treat affected conclusions as sample-limited.
 - EDA exceptions are sanitized before JSON output; secrets such as Kaggle keys and API tokens must not be logged.
 
+## Persistent Source Registry and Cache
+
+The source registry stores one global source identity, immutable content versions, and
+fingerprinted processing artifacts. `num_documents` continues to mean the sources selected
+for the current research run, not the total number of physical registry rows.
+
+Normal cached research run:
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_researcher.main `
+  "https://www.kaggle.com/competitions/example-competition" `
+  "Competition description" `
+  --source-refresh auto `
+  --source-cache-report
+```
+
+Refresh discovery and metadata while retaining compatible processing artifacts:
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_researcher.main `
+  "https://www.kaggle.com/competitions/example-competition" `
+  "Competition description" `
+  --source-refresh always
+```
+
+Rebuild only summary-derived embeddings:
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_researcher.main `
+  "https://www.kaggle.com/competitions/example-competition" `
+  "Competition description" `
+  --rebuild-source-artifacts embeddings
+```
+
+Offline source-provider mode (cached discovery and source content are required):
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_researcher.main `
+  "https://www.kaggle.com/competitions/example-competition" `
+  "Competition description" `
+  --source-refresh never
+```
+
+Migrate the legacy `documents` table without deleting it:
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_researcher.source_registry.migrations `
+  migrate-legacy-documents `
+  --dry-run
+
+E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_researcher.source_registry.migrations `
+  migrate-legacy-documents
+```
+
+The migration is idempotent. Unknown legacy summary fingerprints are retained as
+`legacy:unknown:*` and are never treated as compatible with current processors. Legacy
+embeddings are skipped unless their model fingerprint and dimension are known. Rollback is
+operational rather than destructive: disable `SOURCE_REGISTRY_ENABLED`, keep reading the
+unchanged `documents` table, and investigate the registry tables. Automatic table deletion is
+intentionally not provided.
+
 ## Generic Tabular Validation Behavior
 
 - Ordinary binary or multiclass classification can use StratifiedKFold.

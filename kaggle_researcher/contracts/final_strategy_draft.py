@@ -20,6 +20,13 @@ from kaggle_researcher.contracts.reference_catalog import (
 
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+_PROMPT_CONTEXT_EVIDENCE_ALIASES = {
+    # The 2026-07-19 prompt exposed this bounded context label while the canonical
+    # EDA registry owns the concrete semantic item below.
+    "feature_probe_evidence.unsafe_feature_probes": (
+        "feature_probe_evidence.naive_target_encoding_or_woe"
+    ),
+}
 
 
 class FinalStrategySupportRef(ContractModel):
@@ -114,6 +121,51 @@ def normalize_legacy_final_strategy_to_draft(
     return FinalStrategyDraft.model_validate(payload)
 
 
+def compile_final_strategy_draft(
+    raw_response: Mapping[str, Any] | FinalStrategyDraft,
+    catalog: ReferenceCatalog,
+) -> dict[str, Any]:
+    """Compile the LLM-facing draft into the strict canonical strategy shape.
+
+    The LLM contract intentionally uses narrative/actions/support_refs. Those names
+    are never passed through to FinalStrategyResult, whose strict extra-field policy
+    remains unchanged.
+    """
+
+    draft = normalize_legacy_final_strategy_to_draft(raw_response, catalog)
+    sections = []
+    for section in draft.sections:
+        compiled_actions = [_compile_action(action) for action in section.actions]
+        section_refs = _split_support_refs(section.evidence_summary_refs)
+        sections.append({
+            "section_id": section.section_id,
+            "title": section.title,
+            "summary": section.narrative,
+            "actions": compiled_actions,
+            "evidence_refs": section_refs["evidence_refs"],
+            "related_hypothesis_ids": section_refs["related_hypothesis_ids"],
+            "source_refs": section_refs["source_refs"],
+            "limitations": list(section.limitations),
+        })
+    if draft.executive_summary:
+        executive = next(
+            (item for item in sections if item["section_id"] == "executive_summary"),
+            None,
+        )
+        if executive is not None:
+            executive["summary"] = draft.executive_summary
+    return {
+        "schema_version": "2.0",
+        "competition_id": draft.competition_id,
+        "sections": sections,
+        "actions": [_compile_action(action) for action in draft.actions],
+        "limitations": list(dict.fromkeys([
+            *draft.limitations,
+            *(f"LLM warning: {warning}" for warning in draft.warnings),
+        ])),
+    }
+
+
 def _normalize_section(
     raw: Mapping[str, Any],
     catalog: ReferenceCatalog,
@@ -196,9 +248,70 @@ def _normalize_action(
         "source_claim": raw.get("source_claim"),
         "validation_strategy": raw.get("validation_strategy"),
         "confidence": raw.get("confidence") or "medium",
-        "evidence_origin": raw.get("evidence_origin") or "Hypothesis-to-test",
+        "evidence_origin": _canonical_evidence_origin(raw.get("evidence_origin")),
         "limitations": _unique_strings(raw.get("limitations")),
     }
+
+
+def _compile_action(action: FinalStrategyActionDraft) -> dict[str, Any]:
+    refs = _split_support_refs(action.support_refs)
+    hypotheses = list(dict.fromkeys([
+        *action.related_hypothesis_ids,
+        *refs["related_hypothesis_ids"],
+    ]))
+    return {
+        "action_id": action.action_id,
+        "priority": action.priority,
+        "action": action.action,
+        "reason": action.reason,
+        "evidence_refs": refs["evidence_refs"],
+        "related_hypothesis_ids": hypotheses,
+        "hypothesis_ids": list(hypotheses),
+        "experiment_ids": list(action.experiment_ids),
+        "source_claim": action.source_claim,
+        "source_refs": refs["source_refs"],
+        "risk_ids": refs["risk_ids"],
+        "validation_requirement_ids": refs["validation_requirement_ids"],
+        "safety_constraint_ids": refs["safety_constraint_ids"],
+        "validation_strategy": action.validation_strategy,
+        "confidence": action.confidence,
+        "evidence_origin": action.evidence_origin,
+        "limitations": list(action.limitations),
+    }
+
+
+def _split_support_refs(
+    values: list[FinalStrategySupportRef],
+) -> dict[str, list[str]]:
+    fields = {
+        "evidence": "evidence_refs",
+        "hypothesis": "related_hypothesis_ids",
+        "source_claim": "source_refs",
+        "risk": "risk_ids",
+        "validation_requirement": "validation_requirement_ids",
+        "safety_constraint": "safety_constraint_ids",
+    }
+    result = {field: [] for field in fields.values()}
+    for item in values:
+        field = fields[item.namespace]
+        if item.ref_id not in result[field]:
+            result[field].append(item.ref_id)
+    return result
+
+
+def _canonical_evidence_origin(value: Any) -> str:
+    normalized = str(value or "Hypothesis-to-test").strip()
+    for dash in ("‑", "–", "—", "−", "‐", "‒"):
+        normalized = normalized.replace(dash, "-")
+    aliases = {
+        "eda-confirmed": "EDA-confirmed",
+        "eda-inferred": "EDA-inferred",
+        "source-supported": "Source-supported",
+        "hypothesis-to-test": "Hypothesis-to-test",
+        "safety-warning": "Safety-warning",
+        "fallback-generated": "Fallback-generated",
+    }
+    return aliases.get(normalized.casefold(), normalized)
 
 
 def _extend_typed_support_refs(
@@ -252,6 +365,8 @@ def _append_resolved_ref(
     catalog: ReferenceCatalog,
     field_path: str,
 ) -> None:
+    if expected_namespace in {None, "evidence"}:
+        ref_id = _PROMPT_CONTEXT_EVIDENCE_ALIASES.get(ref_id, ref_id)
     resolution = catalog.resolve(ref_id, expected_namespace)
     if not resolution.is_resolved or resolution.entry is None:
         diagnostics = "; ".join(item.message for item in resolution.diagnostics)
@@ -288,6 +403,7 @@ def _unique_strings(value: Any) -> list[str]:
 
 
 __all__ = [
+    "compile_final_strategy_draft",
     "FinalStrategyActionDraft",
     "FinalStrategyDraft",
     "FinalStrategyDraftReferenceError",

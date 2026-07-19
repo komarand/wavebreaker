@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import timedelta
 
 DEFAULT_EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_EMBED_DIM = 1024
@@ -32,6 +33,23 @@ class Settings:
     kaggle_username: str | None = None
     kaggle_key: str | None = None
     github_token: str | None = None
+    source_registry_enabled: bool = True
+    source_refresh_mode: str = "auto"
+    source_search_ttl_kaggle_hours: int = 24
+    source_search_ttl_github_hours: int = 24
+    source_search_ttl_arxiv_hours: int = 168
+    source_search_ttl_papers_with_code_hours: int = 168
+    source_cache_allow_stale_offline: bool = True
+    source_content_dir: str = "./data/source_content"
+    source_artifact_dir: str = "./data/source_artifacts"
+
+    def source_search_ttls(self) -> dict[str, timedelta]:
+        return {
+            "kaggle": timedelta(hours=self.source_search_ttl_kaggle_hours),
+            "github": timedelta(hours=self.source_search_ttl_github_hours),
+            "arxiv": timedelta(hours=self.source_search_ttl_arxiv_hours),
+            "papers_with_code": timedelta(hours=self.source_search_ttl_papers_with_code_hours),
+        }
 
 
 def load_config() -> Settings:
@@ -58,6 +76,15 @@ def load_config() -> Settings:
         kaggle_username=os.getenv("KAGGLE_USERNAME"),
         kaggle_key=os.getenv("KAGGLE_KEY"),
         github_token=os.getenv("GITHUB_TOKEN"),
+        source_registry_enabled=_get_bool_env("SOURCE_REGISTRY_ENABLED", True),
+        source_refresh_mode=_get_choice_env("SOURCE_REFRESH_MODE", "auto", {"auto", "always", "never"}),
+        source_search_ttl_kaggle_hours=_get_positive_int_env("SOURCE_SEARCH_TTL_KAGGLE_HOURS", 24),
+        source_search_ttl_github_hours=_get_positive_int_env("SOURCE_SEARCH_TTL_GITHUB_HOURS", 24),
+        source_search_ttl_arxiv_hours=_get_positive_int_env("SOURCE_SEARCH_TTL_ARXIV_HOURS", 168),
+        source_search_ttl_papers_with_code_hours=_get_positive_int_env("SOURCE_SEARCH_TTL_PAPERS_WITH_CODE_HOURS", 168),
+        source_cache_allow_stale_offline=_get_bool_env("SOURCE_CACHE_ALLOW_STALE_OFFLINE", True),
+        source_content_dir=os.getenv("SOURCE_CONTENT_DIR", "./data/source_content"),
+        source_artifact_dir=os.getenv("SOURCE_ARTIFACT_DIR", "./data/source_artifacts"),
     )
 
 
@@ -74,4 +101,23 @@ def _get_positive_int_env(name: str, default: int) -> int:
     if value <= 0:
         raise ConfigError(f"{name} must be a positive integer")
 
+    return value
+
+
+def _get_bool_env(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(f"{name} must be a boolean")
+
+
+def _get_choice_env(name: str, default: str, choices: set[str]) -> str:
+    value = os.getenv(name, default).strip().lower()
+    if value not in choices:
+        raise ConfigError(f"{name} must be one of: {', '.join(sorted(choices))}")
     return value

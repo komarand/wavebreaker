@@ -72,6 +72,8 @@ from kaggle_researcher.reasoning.deterministic_strategy import (
     StrategyContext,
     compile_competition_strategy,
 )
+from kaggle_researcher.reasoning.strategy_compaction import compact_final_strategy
+from kaggle_researcher.reasoning.model_registry import supported_models
 from kaggle_researcher.contracts.final_strategy_evidence import (
     build_action_evidence_bindings,
     validate_action_evidence_consistency,
@@ -82,7 +84,10 @@ from kaggle_researcher.contracts.final_strategy_compilation import (
     FinalStrategyRepairError,
     FinalStrategySchemaValidationError,
 )
-from kaggle_researcher.contracts.final_strategy_draft import FinalStrategyDraft
+from kaggle_researcher.contracts.final_strategy_draft import (
+    FinalStrategyDraft,
+    compile_final_strategy_draft,
+)
 from kaggle_researcher.contracts.final_synthesis_diagnostics import (
     FinalSynthesisDiagnostics,
     SynthesisAttemptDiagnostic,
@@ -376,6 +381,15 @@ async def _synthesize_final_strategy_impl(
         ],
     )
     _derive_eda_result_refs(result, allowed_eda_refs)
+    result = compact_final_strategy(
+        result,
+        evidence_pack=eda_evidence_pack.model_dump(mode="json"),
+        source_ids=[document.id for document in retrieved_documents],
+    )
+    synthesis_diagnostics.quality_metrics = result.quality_metrics.model_dump(mode="json")
+    synthesis_diagnostics.provenance_telemetry = dict(
+        result.diagnostics_summary.get("provenance") or {}
+    )
     validate_final_synthesis_bundle(
         eda_evidence_pack,
         context.experiment_plan,
@@ -775,6 +789,9 @@ def _build_final_synthesizer_prompt(
             "Direct EDA paths use namespace=evidence.",
             "Retrieved source claims use namespace=source_claim.",
             "Do not invent source-to-hypothesis or hypothesis-to-EDA links; those are assembled deterministically from Scout and EDA contracts.",
+            "Recommend only supported_model_families and never compare two aliases of one canonical family.",
+            "Baseline reproduction is the first modeling step when completed baseline evidence exists.",
+            "Threshold selection is OOF-only downstream postprocessing, never the first modeling step.",
         ],
         "allowed_hypothesis_ids": context_payload["allowed_hypothesis_ids"],
         "allowed_experiment_ids": context_payload["allowed_experiment_ids"],
@@ -801,6 +818,15 @@ def _build_final_synthesizer_prompt(
             }
             for entry in reference_catalog.entries
             if entry.namespace == "source_claim" and entry.source_type is not None
+        ],
+        "supported_model_families": [
+            {
+                "canonical_family_id": identity.canonical_family_id,
+                "implementation_id": identity.implementation_id,
+                "display_name": identity.display_name,
+                "capabilities": dict(identity.capabilities),
+            }
+            for identity in supported_models(context.plan_data.task_type)
         ],
         "allowed_hypothesis_ids_instruction": (
             "Every action MUST reference at least one allowed hypothesis ID in "
@@ -929,7 +955,11 @@ def _result_from_payload(
     diagnostics_dir: Path | None = None,
     synthesis_diagnostics: FinalSynthesisDiagnostics | None = None,
 ) -> FinalStrategyResult:
-    normalized = dict(payload)
+    normalized = (
+        compile_final_strategy_draft(payload, reference_catalog)
+        if _looks_like_final_strategy_draft(payload)
+        else dict(payload)
+    )
     normalized.setdefault("competition_id", eda_evidence_pack.competition_id)
     normalized.setdefault("task_type", plan_data.task_type)
     normalized.setdefault("metric", {"name": plan_data.metric})
@@ -1604,7 +1634,19 @@ def _assign_final_synthesis_status(
     )
     if status == "degraded_fallback":
         payload["repair_attempted"] = diagnostics.repair_attempted
-        _complete_degraded_result_structure(payload)
+        if not (payload.get("schema_version") == "2.0" and payload.get("evidence_catalog")):
+            _complete_degraded_result_structure(payload)
+    for section in payload.get("sections") or []:
+        if section.get("section_id") != "executive_summary":
+            continue
+        summary = str(section.get("summary") or "")
+        if summary.startswith("Synthesis status:"):
+            section["summary"] = re.sub(
+                r"^Synthesis status:\s*[^.]+",
+                f"Synthesis status: {status}",
+                summary,
+            )
+        break
     return FinalStrategyResult.model_validate(payload)
 
 
@@ -3877,6 +3919,8 @@ def _record_evidence_repair(
 
 
 def render_final_strategy(result: FinalStrategyResult) -> str:
+    if result.schema_version == "2.0" and result.evidence_catalog:
+        return _render_compacted_final_strategy(result)
     lines = ["# Final Strategy", ""]
     if result.synthesis_status == "repaired_success":
         lines.extend([
@@ -4002,6 +4046,131 @@ def render_final_strategy(result: FinalStrategyResult) -> str:
         lines.extend(f"- {item}" for item in result.limitations)
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_compacted_final_strategy(result: FinalStrategyResult) -> str:
+    action_map = {
+        action.action_id: action for action in result.actions if action.action_id
+    }
+    sections = {section.section_id: section for section in result.sections}
+    lines = ["# Final Strategy", "", "## Synthesis Status", ""]
+    if result.synthesis_status == "degraded_fallback":
+        lines.extend([
+            "**Degraded fallback:** the LLM draft did not satisfy the canonical contract; "
+            "this compact strategy was compiled deterministically from validated evidence.",
+            "",
+        ])
+    elif result.synthesis_status == "repaired_success":
+        lines.extend(["The LLM draft passed after deterministic contract repair.", ""])
+    else:
+        lines.extend(["The LLM draft passed the canonical contract.", ""])
+
+    executive = sections.get("executive_summary")
+    lines.extend(["## Executive Summary", "", executive.summary if executive else "Not available.", ""])
+    ordered = [
+        ("Metric and Validation", "metric_and_validation"),
+        ("Dataset Facts From EDA", "dataset_facts_from_eda"),
+        ("Leakage and Data Quality", "leakage_and_data_quality"),
+        ("Drift and Leaderboard Risk", "drift_and_leaderboard_risk"),
+        ("Baseline Findings", "baseline_findings"),
+        ("Feature Priorities", "feature_priorities"),
+        ("Modeling Plan", "modeling_plan"),
+    ]
+    for title, section_id in ordered:
+        section = sections.get(section_id)
+        lines.extend([f"## {title}", ""])
+        if section:
+            lines.extend([section.summary, ""])
+            for action_id in section.action_ids:
+                action = action_map.get(action_id)
+                if action:
+                    _append_compact_action(lines, action)
+        else:
+            lines.extend(["Not available.", ""])
+
+    lines.extend(["## Feature Experiment Families", ""])
+    for family in result.feature_experiment_families:
+        lines.extend([
+            f"### {family.name}", "",
+            f"- Inputs: {', '.join(f'`{column}`' for column in family.input_columns)}",
+            f"- Baseline arm: {family.baseline_arm.name}",
+            "- Candidate arms: " + "; ".join(
+                f"{arm.name} — {arm.exact_change}" for arm in family.candidate_arms
+            ),
+            f"- Acceptance: {family.acceptance_rule}",
+            f"- Risks: {'; '.join(family.risks)}",
+            "",
+        ])
+
+    _append_compact_experiment_section(lines, "Core Experiments", result.core_experiments)
+    _append_compact_experiment_section(lines, "Experiment Backlog", result.experiment_backlog)
+
+    what_not = sections.get("what_not_to_do")
+    lines.extend(["## What Not To Do", ""])
+    if what_not:
+        lines.extend([what_not.summary, ""])
+        for action_id in what_not.action_ids:
+            action = action_map.get(action_id)
+            if action:
+                _append_compact_action(lines, action)
+
+    first_48 = sections.get("first_48_hours")
+    lines.extend(["## First 48 Hours", ""])
+    if first_48:
+        for block in first_48.time_blocks:
+            label = block.time_window.replace("_hours", " hours").replace("-", "–")
+            refs = ", ".join(f"`{item}`" for item in block.experiment_ids) or "contract actions only"
+            lines.extend([f"### {label}", "", block.summary, "", f"- Experiments: {refs}", ""])
+
+    lines.extend(["## Enforced Contract References", ""])
+    lines.append(
+        "- Validation requirements: "
+        + (", ".join(result.selected_validation_requirement_ids) or "none registered")
+    )
+    lines.append(
+        "- Safety constraints: "
+        + (", ".join(result.enforced_safety_constraint_ids) or "none registered")
+    )
+    lines.extend(["", "## Evidence Availability and Uncertainty", ""])
+    lines.extend(f"- {item}" for item in result.limitations)
+    lines.extend([
+        f"- Evidence catalog: {len(result.evidence_catalog)} unique references; "
+        f"approximately {result.quality_metrics.duplicate_preview_bytes_avoided} duplicate preview bytes avoided.",
+        "",
+    ])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _append_compact_action(lines: list[str], action: FinalStrategyAction) -> None:
+    primary = action.primary_evidence_refs[:1] or action.evidence_refs[:1]
+    supporting = [ref for ref in action.evidence_refs if ref not in primary][:2]
+    refs = [*primary, *supporting]
+    lines.append(f"- {action.priority}: {action.action}")
+    if refs:
+        lines.append("  Evidence: " + ", ".join(f"`{ref}`" for ref in refs))
+    additional = max(0, len(action.evidence_refs) - len(refs))
+    if additional:
+        lines.append(f"  Additional evidence: {additional} references.")
+
+
+def _append_compact_experiment_section(
+    lines: list[str], title: str, experiments: list[Any]
+) -> None:
+    lines.extend([f"## {title}", ""])
+    if not experiments:
+        lines.extend(["No experiments in this tier.", ""])
+        return
+    for index, experiment in enumerate(experiments, start=1):
+        primary = experiment.primary_evidence_refs[:1] or experiment.evidence_refs[:1]
+        lines.extend([
+            f"{index}. **{experiment.name}** (`{experiment.experiment_id}`; {experiment.estimated_cost} cost)",
+            f"   - Change: {experiment.change}",
+            f"   - Acceptance: {experiment.acceptance_rule}",
+            "   - Evidence: " + ", ".join(f"`{ref}`" for ref in primary),
+        ])
+        if experiment.dependencies:
+            lines.append("   - Dependencies: " + ", ".join(experiment.dependencies))
+    lines.append("")
 
 
 def render_final_strategy_summary(result: FinalStrategyResult) -> str:
@@ -4263,6 +4432,9 @@ def _refresh_action_and_section_provenance(result: FinalStrategyResult) -> None:
             action_id=action_id,
             source_refs=list(action.source_refs),
             hypothesis_ids=list(action.hypothesis_ids),
+            motivating_hypothesis_ids=list(action.motivating_hypothesis_ids),
+            safety_hypothesis_ids=list(action.safety_hypothesis_ids),
+            validation_context_ids=list(action.validation_context_ids),
             eda_result_refs=list(action.eda_result_refs),
         )
         for action_id, action in action_map.items()
@@ -4998,6 +5170,25 @@ def _normalize_sections(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [dict(item) for item in value if isinstance(item, dict)]
     return []
+
+
+def _looks_like_final_strategy_draft(payload: dict[str, Any]) -> bool:
+    if any(key in payload for key in ("executive_summary", "warnings")):
+        return True
+    for action in payload.get("actions") or []:
+        if isinstance(action, dict) and "support_refs" in action:
+            return True
+    for section in payload.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        if "narrative" in section or "evidence_summary_refs" in section:
+            return True
+        if any(
+            isinstance(action, dict) and "support_refs" in action
+            for action in section.get("actions") or []
+        ):
+            return True
+    return False
 
 
 def _normalize_actions(value: Any) -> list[dict[str, Any]]:

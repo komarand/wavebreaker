@@ -198,11 +198,20 @@ class CachePolicy(StrictModel):
     write_cache_telemetry: bool = False
     cache_enabled: bool = True
 
+    @field_validator("source_refresh_mode", mode="before")
+    @classmethod
+    def normalize_refresh_mode(cls, value: Any) -> SourceRefreshMode:
+        if isinstance(value, SourceRefreshMode):
+            return value
+        return SourceRefreshMode(str(value).strip().lower())
+
     @field_validator("rebuild_artifacts", mode="before")
     @classmethod
     def normalize_rebuild_artifacts(cls, value: Any) -> set[str]:
         if value is None:
             return set()
+        if isinstance(value, str):
+            value = value.split(",")
         values = {str(item).strip().lower().replace("-", "_") for item in value}
         aliases = {"summary": "summaries", "embedding": "embeddings", "static": "static_analysis"}
         values = {aliases.get(item, item) for item in values if item and item != "none"}

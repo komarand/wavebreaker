@@ -91,6 +91,12 @@ class ResearchRunResult(BaseModel):
     ] | None = None
     final_synthesis_degraded: bool = False
     final_synthesis_stage_status: FinalSynthesisStageStatus | None = None
+    source_cache_report_path: str | None = None
+    num_new_sources: int = 0
+    num_reused_sources: int = 0
+    num_changed_sources: int = 0
+    num_reused_embeddings: int = 0
+    num_computed_embeddings: int = 0
 
     @model_validator(mode="after")
     def validate_workflow_synthesis_state(self) -> "ResearchRunResult":

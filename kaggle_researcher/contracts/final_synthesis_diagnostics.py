@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -43,7 +43,7 @@ class SynthesisAttemptDiagnostic(DiagnosticsModel):
 
 
 class FinalSynthesisDiagnostics(DiagnosticsModel):
-    schema_version: str = "1.0"
+    schema_version: str = "2.0"
     competition_id: str
     attempts: list[SynthesisAttemptDiagnostic] = Field(default_factory=list)
     initial_output_valid: bool = False
@@ -51,6 +51,8 @@ class FinalSynthesisDiagnostics(DiagnosticsModel):
     repair_succeeded: bool = False
     fallback_required: bool = False
     fallback_reason: str | None = None
+    quality_metrics: dict[str, Any] = Field(default_factory=dict)
+    provenance_telemetry: dict[str, int] = Field(default_factory=dict)
 
 
 __all__ = [

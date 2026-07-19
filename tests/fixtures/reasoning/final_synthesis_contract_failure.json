@@ -1,0 +1,28 @@
+{
+  "fallback_reason": "Deterministic repair failed FinalStrategyResult schema validation.",
+  "initial": {
+    "json_parse_succeeded": true,
+    "issue_counts": {
+      "extra_forbidden": 46,
+      "literal_error": 28,
+      "missing": 8,
+      "missing_evidence_reference": 28
+    },
+    "prompt_only_fields": [
+      "executive_summary",
+      "warnings",
+      "sections[].narrative",
+      "sections[].evidence_summary_refs",
+      "actions[].support_refs"
+    ],
+    "unicode_literal": "EDA‑confirmed"
+  },
+  "repair": {
+    "json_parse_succeeded": true,
+    "issue_counts": {
+      "extra_forbidden": 46,
+      "literal_error": 28
+    },
+    "preserved_incompatible_fields": true
+  }
+}

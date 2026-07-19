@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 from typing import Any
 
 import httpx
 
 from kaggle_researcher.logging_utils import get_logger
 from kaggle_researcher.parsers.pdf_parser import download_pdf, parse_pdf
+from kaggle_researcher.parsers.pdf_parser import PDF_PARSER_VERSION
 from kaggle_researcher.schemas import SourceDocument
+from kaggle_researcher.source_registry.fingerprints import build_parser_fingerprint
+from kaggle_researcher.source_registry.hashing import sha256_bytes
 
 try:  # pragma: no cover - optional dependency is mocked in unit tests.
     import arxiv  # type: ignore[import-not-found]
@@ -107,6 +111,10 @@ def build_arxiv_documents(
             {
                 "entry_id": entry_id,
                 "pdf_url": paper.get("pdf_url"),
+                "source_revision": paper.get("source_revision") or metadata.get("source_revision"),
+                "revision_is_reliable": bool(
+                    paper.get("revision_is_reliable", metadata.get("revision_is_reliable", False))
+                ),
             }
         )
 
@@ -148,11 +156,28 @@ async def _enrich_one(paper: dict[str, Any], cache_dir: str) -> dict[str, Any]:
 
         parsed_content = parse_pdf(pdf_path)
         enriched["content"] = parsed_content if parsed_content.strip() else abstract
+        raw_pdf_hash = sha256_bytes(pdf_path.read_bytes()) if pdf_path.is_file() else None
+        enriched["metadata"] = {
+            **dict(enriched.get("metadata") or {}),
+            "raw_pdf_hash": raw_pdf_hash,
+            "raw_pdf_size_bytes": pdf_path.stat().st_size if pdf_path.is_file() else None,
+            "content_location": str(pdf_path) if pdf_path.is_file() else None,
+            "content_mime_type": "application/pdf",
+            "parser_fingerprint": arxiv_pdf_parser_fingerprint(),
+            "parsed_with_fingerprint": arxiv_pdf_parser_fingerprint(),
+        }
     except Exception as exc:
         logger.warning("Failed to enrich paper %s with PDF content: %s", paper_id, exc)
         enriched["content"] = abstract
 
     return enriched
+
+
+def arxiv_pdf_parser_fingerprint() -> str:
+    return build_parser_fingerprint(
+        processor_name="arxiv_pdf_parser",
+        processor_version=PDF_PARSER_VERSION,
+    ).fingerprint
 
 
 def _paper_from_arxiv_result(result: Any) -> dict[str, Any]:
@@ -162,6 +187,8 @@ def _paper_from_arxiv_result(result: Any) -> dict[str, Any]:
     abstract = str(getattr(result, "summary", "") or "")
     authors = [str(author) for author in getattr(result, "authors", [])]
 
+    revision_match = re.search(r"(v\d+)(?:\.pdf)?$", entry_id, flags=re.I)
+    source_revision = revision_match.group(1).lower() if revision_match else None
     return {
         "id": entry_id,
         "entry_id": entry_id,
@@ -171,9 +198,13 @@ def _paper_from_arxiv_result(result: Any) -> dict[str, Any]:
         "pdf_url": pdf_url,
         "url": entry_id,
         "source": "arxiv",
+        "source_revision": source_revision,
+        "revision_is_reliable": source_revision is not None,
         "metadata": {
             "authors": authors,
             "published": str(getattr(result, "published", "") or ""),
+            "source_revision": source_revision,
+            "revision_is_reliable": source_revision is not None,
         },
     }
 

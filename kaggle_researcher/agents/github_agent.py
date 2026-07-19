@@ -2,21 +2,24 @@ from __future__ import annotations
 
 import base64
 import hashlib
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 
 from kaggle_researcher.logging_utils import get_logger
 from kaggle_researcher.schemas import SourceDocument
+from kaggle_researcher.source_registry.fingerprints import build_parser_fingerprint
 
 
 logger = get_logger(__name__)
+GITHUB_README_EXTRACTOR_VERSION = "1.0"
 
 
 async def search_repos(
     queries: list[str],
     token: str | None = None,
     max_repos: int = 10,
+    content_cache_lookup: Callable[[str, str], Awaitable[str | None]] | None = None,
 ) -> list[dict[str, Any]]:
     if max_repos <= 0:
         return []
@@ -58,6 +61,7 @@ async def search_repos(
                     item=item,
                     client=client,
                     rate_limit_context=rate_limit_context,
+                    content_cache_lookup=content_cache_lookup,
                 )
                 full_name = repo.get("full_name")
                 if not full_name:
@@ -100,7 +104,9 @@ def build_github_documents(
         full_name = str(repo.get("full_name") or repo.get("fullName"))
         description = str(repo.get("description") or "")
         readme = str(repo.get("readme") or repo.get("readme_text") or "")
-        content = "\n\n".join(part for part in (description, readme) if part.strip())
+        content = str(repo.get("content") or "") or "\n\n".join(
+            part for part in (description, readme) if part.strip()
+        )
         stars = _parse_int(repo.get("stars", repo.get("stargazers_count", 0)))
         language = repo.get("language")
         updated_at = repo.get("updated_at")
@@ -111,6 +117,14 @@ def build_github_documents(
                 "language": language,
                 "full_name": full_name,
                 "updated_at": updated_at,
+                "commit_sha": repo.get("commit_sha") or repo.get("source_revision"),
+                "source_revision": repo.get("source_revision") or repo.get("commit_sha"),
+                "revision_is_reliable": bool(
+                    repo.get("revision_is_reliable", repo.get("commit_sha") is not None)
+                ),
+                "content_scope": repo.get("content_scope") or "readme_only",
+                "content_from_registry_cache": bool(repo.get("content_from_registry_cache")),
+                "parser_fingerprint": github_readme_parser_fingerprint(),
             }
         )
         if "rate_limit_remaining" in repo:
@@ -139,9 +153,21 @@ async def _repo_from_search_item(
     item: dict[str, Any],
     client: httpx.AsyncClient,
     rate_limit_context: dict[str, Any],
+    content_cache_lookup: Callable[[str, str], Awaitable[str | None]] | None = None,
 ) -> dict[str, Any]:
     full_name = str(item.get("full_name") or "")
-    readme = await _fetch_readme(client=client, full_name=full_name) if full_name else ""
+    commit_sha = None
+    default_branch = item.get("default_branch")
+    if full_name and default_branch:
+        commit_sha = await _fetch_default_branch_sha(client, full_name, str(default_branch))
+    cached_content = None
+    if full_name and commit_sha and content_cache_lookup is not None:
+        cached_content = await content_cache_lookup(full_name, commit_sha)
+    readme = (
+        await _fetch_readme(client=client, full_name=full_name)
+        if full_name and cached_content is None
+        else ""
+    )
 
     repo = {
         "full_name": full_name,
@@ -151,10 +177,32 @@ async def _repo_from_search_item(
         "language": item.get("language"),
         "updated_at": item.get("updated_at"),
         "readme": readme,
+        "content": cached_content,
+        "content_from_registry_cache": cached_content is not None,
         "source": "github",
+        "commit_sha": commit_sha,
+        "source_revision": commit_sha,
+        "revision_is_reliable": commit_sha is not None,
+        "content_scope": "readme_only",
     }
     repo.update(rate_limit_context)
     return repo
+
+
+async def _fetch_default_branch_sha(
+    client: httpx.AsyncClient,
+    full_name: str,
+    default_branch: str,
+) -> str | None:
+    try:
+        response = await client.get(f"/repos/{full_name}/commits/{default_branch}")
+        if response.status_code >= 400:
+            return None
+        payload = response.json()
+        sha = payload.get("sha") if isinstance(payload, dict) else None
+        return str(sha) if sha else None
+    except (httpx.HTTPError, ValueError):
+        return None
 
 
 async def _fetch_readme(client: httpx.AsyncClient, full_name: str) -> str:
@@ -202,3 +250,11 @@ def _parse_int(value: Any) -> int:
 def _document_id(competition_id: str, full_name: str) -> str:
     digest = hashlib.sha1(f"{competition_id}:{full_name}".encode("utf-8")).hexdigest()[:16]
     return f"github-{digest}"
+
+
+def github_readme_parser_fingerprint() -> str:
+    return build_parser_fingerprint(
+        processor_name="github_readme_content_selector",
+        processor_version=GITHUB_README_EXTRACTOR_VERSION,
+        content_scope="readme_only",
+    ).fingerprint

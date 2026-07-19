@@ -10,11 +10,13 @@ from kaggle.api.kaggle_api_extended import KaggleApi
 
 from kaggle_researcher.logging_utils import get_logger
 from kaggle_researcher.schemas import SourceDocument
+from kaggle_researcher.source_registry.fingerprints import build_parser_fingerprint
 
 
 logger = get_logger(__name__)
 MAX_NOTEBOOKS = 20
 CODE_CELL_MAX_CHARS = 800
+NOTEBOOK_TEXT_EXTRACTOR_VERSION = "1.0"
 
 
 def search_notebooks(
@@ -123,8 +125,14 @@ def _normalize_kernel(kernel: Any, competition_id: str | None) -> dict[str, Any]
         f"https://www.kaggle.com/code/{kernel_ref}" if kernel_ref else None
     )
     raw_metadata = _get_kernel_value(kernel, "metadata")
+    version = _get_kernel_value(kernel, "version", "versionNumber", "currentVersionNumber")
     metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
-    metadata.update({"ref": kernel_ref, "competition_id": competition_id})
+    metadata.update({
+        "ref": kernel_ref,
+        "competition_id": competition_id,
+        "source_revision": str(version) if version is not None else None,
+        "revision_is_reliable": version is not None,
+    })
 
     return {
         "id": kernel_ref,
@@ -193,10 +201,11 @@ def build_kaggle_documents(
                 title=title,
                 url=str(url),
                 content=content,
-                metadata={
+        metadata={
                     **dict(raw_result.get("metadata") or {}),
                     "kernel_ref": kernel_ref,
                     "total_votes": total_votes,
+                    "parser_fingerprint": kaggle_notebook_parser_fingerprint(),
                 },
             )
         )
@@ -256,3 +265,12 @@ def _parse_votes(value: Any) -> int:
 def _document_id(competition_id: str, kernel_ref: str) -> str:
     digest = hashlib.sha1(f"{competition_id}:{kernel_ref}".encode("utf-8")).hexdigest()[:16]
     return f"kaggle-{digest}"
+
+
+def kaggle_notebook_parser_fingerprint() -> str:
+    return build_parser_fingerprint(
+        processor_name="kaggle_notebook_text_extractor",
+        processor_version=NOTEBOOK_TEXT_EXTRACTOR_VERSION,
+        max_chars=8000,
+        cell_source_limit=CODE_CELL_MAX_CHARS,
+    ).fingerprint

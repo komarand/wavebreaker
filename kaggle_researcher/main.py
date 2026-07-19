@@ -8,7 +8,7 @@ import re
 import sys
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from tqdm.auto import tqdm
 
 from kaggle_researcher.agents.arxiv_agent import (
+    arxiv_pdf_parser_fingerprint,
     build_arxiv_documents,
     enrich_with_pdf,
     search_arxiv,
@@ -24,11 +25,13 @@ from kaggle_researcher.agents.arxiv_agent import (
 from kaggle_researcher.agents.github_agent import (
     build_github_documents,
     search_repos,
+    github_readme_parser_fingerprint,
 )
 from kaggle_researcher.agents.kaggle_agent import (
     build_kaggle_documents,
     get_notebook_content,
     search_notebooks,
+    kaggle_notebook_parser_fingerprint,
 )
 from kaggle_researcher.agents.paper_search_agent import search_paper_sources
 from kaggle_researcher.clients.deepseek_client import DeepSeekClient
@@ -102,6 +105,19 @@ from kaggle_researcher.schemas import (
 )
 from kaggle_researcher.store.domain_memory import DomainMemory
 from kaggle_researcher.store.pg_store import PgStore
+from kaggle_researcher.store.source_registry_store import SourceRegistryStore
+from kaggle_researcher.source_registry.processing_cache import process_source_documents
+from kaggle_researcher.source_registry.schemas import (
+    CachePolicy,
+    CacheRunTelemetry,
+    SearchCacheEntry,
+    SourceRefreshMode,
+)
+from kaggle_researcher.source_registry.fingerprints import build_search_request_fingerprint
+from kaggle_researcher.source_registry.hashing import sha256_text
+from kaggle_researcher.source_registry.identity import canonicalize_source_identity
+from kaggle_researcher.source_registry.search_cache import normalize_search_query
+from kaggle_researcher.source_registry.telemetry import write_cache_report
 from kaggle_researcher.workflow import (
     FinalSynthesisDegradedError,
     FinalSynthesisStageStatus,
@@ -291,6 +307,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Reduce collection limits and skip the skeptical reviewer pass.",
     )
+    parser.add_argument(
+        "--source-refresh", choices=("auto", "always", "never"), default=None,
+        help="Source discovery/content refresh policy. CLI value overrides SOURCE_REFRESH_MODE.",
+    )
+    parser.add_argument(
+        "--rebuild-source-artifacts", default="",
+        help="Comma-separated stages: parsed,summaries,embeddings,static-analysis,all.",
+    )
+    parser.add_argument(
+        "--no-source-cache", action="store_true",
+        help="Bypass compatible artifact reuse for this run without deleting stored cache records.",
+    )
+    parser.add_argument(
+        "--source-cache-report", action="store_true",
+        help="Write source_cache_report.json with aggregate and per-source cache decisions.",
+    )
+    parser.add_argument(
+        "--source-registry-migrate", action="store_true",
+        help="Migrate legacy documents into the source registry before the run.",
+    )
     return parser
 
 
@@ -366,6 +402,10 @@ async def run_research(
     debug: bool = False,
     no_github: bool = False,
     fast: bool = False,
+    source_refresh: Literal["auto", "always", "never"] | None = None,
+    rebuild_source_artifacts: set[str] | list[str] | tuple[str, ...] | str | None = None,
+    no_source_cache: bool = False,
+    source_cache_report: bool = False,
     **workflow_options: Any,
 ) -> ResearchRunResult:
     legacy_execute_eda = bool(workflow_options.pop("run" "_eda", False))
@@ -403,6 +443,19 @@ async def run_research(
     resolved_competition_id = competition_id or derive_competition_id(competition_url)
     warnings: list[str] = []
     run_dir = _create_run_dir(resolved_competition_id)
+    registry_enabled = bool(getattr(settings, "source_registry_enabled", False))
+    cache_policy = _build_source_cache_policy(
+        settings,
+        source_refresh=source_refresh,
+        rebuild_source_artifacts=rebuild_source_artifacts,
+        no_source_cache=no_source_cache,
+        source_cache_report=source_cache_report,
+    )
+    cache_telemetry = CacheRunTelemetry(
+        run_id=run_dir.name,
+        competition_id=resolved_competition_id,
+    )
+    source_cache_report_path: Path | None = None
     models_used = _models_used(settings)
     if mode == "scout":
         models_used["research_scout"] = settings.deepseek_v4_pro
@@ -413,10 +466,19 @@ async def run_research(
         embed_dim=settings.embed_dim,
     )
     domain_memory = DomainMemory(dsn=settings.pg_dsn, embed_dim=settings.embed_dim)
+    registry: SourceRegistryStore | None = None
 
     try:
         _stage("[1/8] Planning search queries...", show_progress)
-        await store.init()
+        if registry_enabled:
+            registry = SourceRegistryStore(
+                dsn=settings.pg_dsn,
+                embed_dim=settings.embed_dim,
+                competition_id=resolved_competition_id,
+            )
+            await registry.init()
+        else:
+            await store.init()
         await domain_memory.init()
         client = DeepSeekClient(api_key=settings.deepseek_api_key)
         plan_data = await _build_plan(
@@ -427,15 +489,31 @@ async def run_research(
         )
         _write_json_artifact(run_dir, "plan.json", plan_data)
         _stage("[2/8] Collecting Kaggle notebooks...", show_progress)
-        source_documents = await _collect_sources(
-            plan_data=plan_data,
-            competition_id=resolved_competition_id,
-            settings=settings,
-            warnings=warnings,
-            show_progress=show_progress,
-            no_github=no_github,
-            fast=fast,
+        discovery_requests = _source_discovery_requests(
+            plan_data, resolved_competition_id, settings, no_github=no_github, fast=fast
         )
+        cached_source_ids: list[str] | None = None
+        if registry is not None:
+            cached_source_ids = await _cached_discovery_source_ids(
+                registry, discovery_requests, cache_policy, cache_telemetry
+            )
+        discovery_refreshed = cached_source_ids is None
+        if cached_source_ids is not None:
+            source_documents = await _load_cached_source_documents(
+                registry, resolved_competition_id, source_ids=cached_source_ids
+            )
+        else:
+            source_documents = await _collect_sources(
+                plan_data=plan_data,
+                competition_id=resolved_competition_id,
+                settings=settings,
+                warnings=warnings,
+                show_progress=show_progress,
+                no_github=no_github,
+                fast=fast,
+                registry=registry,
+                cache_policy=cache_policy,
+            )
         if not source_documents:
             raise RuntimeError("No source documents were collected")
         num_sources = _source_counts(source_documents)
@@ -443,30 +521,82 @@ async def run_research(
         _write_json_artifact(run_dir, "source_counts.json", num_sources)
 
         _stage("[4/8] Summarizing documents...", show_progress)
-        summarized_documents = await summarize_documents(
-            client=client,
-            docs=source_documents,
-            model=settings.deepseek_v4_flash,
-            show_progress=show_progress,
-        )
         _stage("[5/8] Embedding and indexing...", show_progress)
-        indexed_texts = [document.summary or document.content for document in summarized_documents]
-        embeddings = _embed_documents(
-            indexed_texts,
-            batch_size=settings.max_embed_batch_size,
-            show_progress=show_progress,
-        )
+        if registry is not None:
+            from kaggle_researcher.summarizer import summarize_one
+
+            async def cached_summarize_one(document: SourceDocument) -> SourceDocument:
+                return await summarize_one(client=client, doc=document, model=settings.deepseek_v4_flash)
+
+            def cached_embed_one(text: str) -> list[float]:
+                values = _embed_documents(
+                    [text], batch_size=settings.max_embed_batch_size, show_progress=show_progress
+                )
+                if not values:
+                    raise RuntimeError("No embedding was generated")
+                return values[0]
+
+            def cached_embed_many(texts: list[str]) -> list[list[float]]:
+                return _embed_documents(
+                    texts, batch_size=settings.max_embed_batch_size, show_progress=show_progress
+                )
+
+            summarized_documents, embeddings, processing_results = await process_source_documents(
+                source_documents,
+                competition_id=resolved_competition_id,
+                run_id=run_dir.name,
+                registry=registry,
+                cache_policy=cache_policy,
+                summarize_one=cached_summarize_one,
+                embed_one=cached_embed_one,
+                embed_many=cached_embed_many,
+                summary_model=settings.deepseek_v4_flash,
+                embed_model=settings.embed_model,
+                telemetry=cache_telemetry,
+            )
+            warnings.extend(
+                warning for processing_result in processing_results
+                for warning in processing_result.warnings if warning not in warnings
+            )
+            if discovery_refreshed:
+                await _save_discovery_cache(
+                    registry,
+                    discovery_requests,
+                    summarized_documents,
+                    cache_policy,
+                )
+        else:
+            summarized_documents = await summarize_documents(
+                client=client,
+                docs=source_documents,
+                model=settings.deepseek_v4_flash,
+                show_progress=show_progress,
+            )
+            indexed_texts = [document.summary or document.content for document in summarized_documents]
+            embeddings = _embed_documents(
+                indexed_texts,
+                batch_size=settings.max_embed_batch_size,
+                show_progress=show_progress,
+            )
         if not embeddings:
             raise RuntimeError("No embeddings were generated")
         if len(embeddings) != len(summarized_documents):
             raise RuntimeError("Embedding count does not match document count")
 
         _stage("Indexing documents in pgvector...", show_progress)
-        await store.upsert(summarized_documents, embeddings)
+        retrieval_store: Any = store
+        if registry is None:
+            await store.upsert(summarized_documents, embeddings)
+        else:
+            retrieval_store = registry
         _write_json_artifact(run_dir, "documents_indexed.json", summarized_documents)
+        if cache_policy.write_cache_telemetry:
+            source_cache_report_path = write_cache_report(
+                run_dir / "source_cache_report.json", cache_telemetry, cache_policy
+            )
         _stage("[6/8] Retrieving evidence...", show_progress)
         retrieved_documents = await _retrieve_documents(
-            store=store,
+            store=retrieval_store,
             plan_data=plan_data,
             competition_id=resolved_competition_id,
             run_dir=run_dir,
@@ -476,6 +606,17 @@ async def run_research(
             fast=fast,
         )
         _write_json_artifact(run_dir, "retrieved_documents.json", retrieved_documents)
+        if registry is not None:
+            for document in retrieved_documents:
+                await registry.record_run_source(
+                    run_dir.name,
+                    resolved_competition_id,
+                    document.id,
+                    version_id=document.metadata.get("version_id"),
+                    selected_for_retrieval=True,
+                    retrieval_score=document.score,
+                    rrf_score=document.rrf_score,
+                )
         scout_output_paths: dict[str, Path] = dict(provided_scout_paths)
         scout_num_hypotheses = 0
         scout_num_eda_tasks = 0
@@ -673,6 +814,12 @@ async def run_research(
                 summary_path=str(summary_path),
                 num_hypotheses=len(scout_payload["hypotheses"]),
                 num_eda_tasks=len(scout_payload["eda_tasks"]),
+                source_cache_report_path=str(source_cache_report_path) if source_cache_report_path else None,
+                num_new_sources=cache_telemetry.sources_new,
+                num_reused_sources=cache_telemetry.sources_reused,
+                num_changed_sources=cache_telemetry.sources_changed,
+                num_reused_embeddings=cache_telemetry.embeddings_reused,
+                num_computed_embeddings=cache_telemetry.embeddings_computed,
             )
             run_summary = _build_research_run_summary(
                 result=result,
@@ -882,6 +1029,12 @@ async def run_research(
             final_synthesis_status=final_synthesis_status,
             final_synthesis_degraded=final_synthesis_degraded,
             final_synthesis_stage_status=final_synthesis_stage_status,
+            source_cache_report_path=str(source_cache_report_path) if source_cache_report_path else None,
+            num_new_sources=cache_telemetry.sources_new,
+            num_reused_sources=cache_telemetry.sources_reused,
+            num_changed_sources=cache_telemetry.sources_changed,
+            num_reused_embeddings=cache_telemetry.embeddings_reused,
+            num_computed_embeddings=cache_telemetry.embeddings_computed,
         )
         run_summary = _build_research_run_summary(
             result=result,
@@ -900,9 +1053,13 @@ async def run_research(
             )
         return result
     except Exception:
+        if cache_policy.write_cache_telemetry:
+            write_cache_report(run_dir / "source_cache_report.json", cache_telemetry, cache_policy)
         _write_json_artifact(run_dir, "warnings.json", warnings)
         raise
     finally:
+        if registry is not None:
+            await registry.close()
         await store.close()
         await domain_memory.close()
 
@@ -975,18 +1132,21 @@ async def _collect_sources(
     show_progress: bool,
     no_github: bool = False,
     fast: bool = False,
+    registry: SourceRegistryStore | None = None,
+    cache_policy: CachePolicy | None = None,
 ) -> list[SourceDocument]:
     documents: list[SourceDocument] = []
     try:
         documents.extend(
-            await asyncio.to_thread(
+            await _collect_kaggle_sources_cached(
                 _collect_kaggle_sources,
-                plan_data,
-                competition_id,
-                settings,
-                warnings,
-                show_progress,
-                fast,
+                plan_data=plan_data,
+                competition_id=competition_id,
+                settings=settings,
+                warnings=warnings,
+                show_progress=show_progress,
+                fast=fast,
+                registry=registry,
             )
         )
     except Exception as exc:
@@ -994,14 +1154,14 @@ async def _collect_sources(
     _stage("[3/8] Collecting papers and repos...", show_progress)
     _stage("Processing arXiv PDFs...", show_progress)
     documents.extend(
-        await asyncio.to_thread(
-            _collect_arxiv_sources,
-            plan_data,
-            competition_id,
-            settings,
-            warnings,
-            show_progress,
-            fast,
+        await _collect_arxiv_sources_cached(
+            plan_data=plan_data,
+            competition_id=competition_id,
+            settings=settings,
+            warnings=warnings,
+            show_progress=show_progress,
+            fast=fast,
+            registry=registry,
         )
     )
     documents.extend(
@@ -1024,9 +1184,353 @@ async def _collect_sources(
                 warnings=warnings,
                 show_progress=show_progress,
                 fast=fast,
+                registry=registry,
             )
         )
     return documents
+
+
+async def _collect_kaggle_sources_cached(
+    collector: Any,
+    *,
+    plan_data: PlanData,
+    competition_id: str,
+    settings: object,
+    warnings: list[str],
+    show_progress: bool,
+    fast: bool,
+    registry: SourceRegistryStore | None,
+) -> list[SourceDocument]:
+    if registry is None:
+        return await asyncio.to_thread(
+            collector, plan_data, competition_id, settings, warnings, show_progress, fast
+        )
+    raw_notebooks = await asyncio.to_thread(
+        search_notebooks,
+        plan_data.kaggle_queries,
+        competition_id,
+        _fast_limit(settings.max_notebooks, FAST_MAX_NOTEBOOKS, fast),
+    )
+    usable: list[dict[str, Any]] = []
+    for notebook in raw_notebooks:
+        notebook_id = _notebook_id(notebook)
+        if not notebook_id:
+            continue
+        metadata = dict(notebook.get("metadata") or {})
+        revision = metadata.get("source_revision")
+        cached_content = await _cached_content_for_revision(
+            registry, "kaggle", notebook_id, notebook.get("url"), revision,
+            bool(metadata.get("revision_is_reliable")),
+            expected_parser_fingerprint=kaggle_notebook_parser_fingerprint(),
+        )
+        item = dict(notebook)
+        if cached_content is not None:
+            item["content"] = cached_content
+            item["metadata"] = {**metadata, "content_from_registry_cache": True}
+        else:
+            try:
+                item["content"] = await asyncio.to_thread(get_notebook_content, notebook_id)
+            except Exception as exc:
+                warnings.append(f"Kaggle notebook pull failed for {notebook_id}: {exc}")
+                continue
+        if str(item.get("content") or "").strip():
+            usable.append(item)
+    if not usable:
+        raise RuntimeError("Kaggle retrieval returned 0 usable notebooks")
+    return build_kaggle_documents(usable, competition_id=competition_id)
+
+
+async def _collect_arxiv_sources_cached(
+    *,
+    plan_data: PlanData,
+    competition_id: str,
+    settings: object,
+    warnings: list[str],
+    show_progress: bool,
+    fast: bool,
+    registry: SourceRegistryStore | None,
+) -> list[SourceDocument]:
+    try:
+        papers = await asyncio.to_thread(
+            search_arxiv,
+            plan_data.arxiv_queries,
+            _fast_limit(settings.max_papers, FAST_MAX_PAPERS, fast),
+        )
+        if registry is None:
+            enriched = await asyncio.to_thread(enrich_with_pdf, papers, settings.pdf_cache_dir)
+            return build_arxiv_documents(enriched, competition_id=competition_id)
+        reusable: list[dict[str, Any]] = []
+        needs_content: list[dict[str, Any]] = []
+        for paper in papers:
+            metadata = dict(paper.get("metadata") or {})
+            revision = paper.get("source_revision") or metadata.get("source_revision")
+            content = await _cached_content_for_revision(
+                registry, "arxiv", paper.get("entry_id"), paper.get("url"), revision,
+                bool(paper.get("revision_is_reliable", metadata.get("revision_is_reliable", False))),
+                expected_parser_fingerprint=arxiv_pdf_parser_fingerprint(),
+            )
+            if content is None:
+                needs_content.append(paper)
+            else:
+                identity = canonicalize_source_identity(
+                    "arxiv",
+                    str(paper.get("entry_id") or "") or None,
+                    str(paper.get("url") or "") or None,
+                )
+                cached_source = await registry.get_source(identity.source_id)
+                cached_metadata = cached_source.metadata if cached_source is not None else {}
+                reusable.append({
+                    **paper,
+                    "content": content,
+                    "metadata": {
+                        **cached_metadata,
+                        **metadata,
+                        "content_from_registry_cache": True,
+                    },
+                })
+        if needs_content:
+            reusable.extend(await asyncio.to_thread(enrich_with_pdf, needs_content, settings.pdf_cache_dir))
+        return build_arxiv_documents(reusable, competition_id=competition_id)
+    except Exception as exc:
+        warnings.append(f"arXiv source collection failed: {exc}")
+        return []
+
+
+async def _cached_content_for_revision(
+    registry: SourceRegistryStore,
+    source_type: str,
+    external_id: Any,
+    url: Any,
+    revision: Any,
+    revision_is_reliable: bool,
+    expected_parser_fingerprint: str | None = None,
+) -> str | None:
+    if not revision_is_reliable or revision is None:
+        return None
+    identity = canonicalize_source_identity(
+        source_type,
+        str(external_id) if external_id else None,
+        str(url) if url else None,
+    )
+    current = await registry.get_current_version(identity.source_id)
+    if current is None or current.source_revision != str(revision):
+        return None
+    if current.content_location and not Path(current.content_location).is_file():
+        return None
+    parsed = await registry.find_latest_artifact(current.version_id, "parsed_text")
+    if expected_parser_fingerprint and (
+        parsed is None or parsed.processor_fingerprint != expected_parser_fingerprint
+    ):
+        return None
+    if current.raw_content:
+        return current.raw_content
+    if parsed and isinstance(parsed.payload, dict):
+        return str(parsed.payload.get("text") or "") or None
+    return None
+
+
+async def _load_cached_source_documents(
+    registry: SourceRegistryStore,
+    competition_id: str,
+    *,
+    source_ids: list[str] | None = None,
+) -> list[SourceDocument]:
+    documents: list[SourceDocument] = []
+    selected_ids = source_ids if source_ids is not None else await registry.list_competition_source_ids(competition_id)
+    for source_id in selected_ids:
+        source = await registry.get_source(source_id)
+        version = await registry.get_current_version(source_id)
+        if source is None or version is None:
+            continue
+        if version.content_location and not Path(version.content_location).is_file():
+            continue
+        parsed = await registry.find_latest_artifact(version.version_id, "parsed_text")
+        payload = parsed.payload if parsed is not None else None
+        if isinstance(payload, dict):
+            content = str(payload.get("text") or payload.get("summary") or "")
+        elif isinstance(payload, str):
+            content = payload
+        else:
+            content = version.raw_content or ""
+        if not content:
+            continue
+        current_metadata = dict(source.metadata)
+        if source.source_type == "arxiv" and current_metadata.get("raw_pdf_hash"):
+            current_metadata["parser_fingerprint"] = arxiv_pdf_parser_fingerprint()
+        elif source.source_type == "kaggle":
+            current_metadata["parser_fingerprint"] = kaggle_notebook_parser_fingerprint()
+        elif source.source_type == "github":
+            current_metadata["parser_fingerprint"] = github_readme_parser_fingerprint()
+        documents.append(
+            SourceDocument(
+                id=source.source_id,
+                competition_id=competition_id,
+                source=source.source_type,
+                title=source.title or source.source_id,
+                url=source.canonical_url,
+                content=content,
+                metadata={
+                    **current_metadata,
+                    "source_id": source.source_id,
+                    "source_revision": version.source_revision,
+                    "revision_is_reliable": bool(version.metadata.get("revision_is_reliable")),
+                    "version_id": str(version.version_id),
+                    "content_from_registry_cache": True,
+                },
+            )
+        )
+    if not documents:
+        from kaggle_researcher.source_registry.errors import SourceOfflineCacheMissError
+
+        raise SourceOfflineCacheMissError(
+            f"No cached sources are associated with competition {competition_id!r}"
+        )
+    return documents
+
+
+def _source_discovery_requests(
+    plan_data: PlanData,
+    competition_id: str,
+    settings: object,
+    *,
+    no_github: bool,
+    fast: bool,
+) -> list[dict[str, Any]]:
+    paper_query = " | ".join(plan_data.arxiv_queries)
+    requests = [
+        {
+            "provider": "kaggle",
+            "query": f"competition:{competition_id} | {' | '.join(plan_data.kaggle_queries)}",
+            "limit": _fast_limit(settings.max_notebooks, FAST_MAX_NOTEBOOKS, fast),
+            "sort_mode": "voteCount",
+        }
+    ]
+    if paper_query:
+        requests.extend([
+            {"provider": "arxiv", "query": paper_query, "limit": _fast_limit(settings.max_papers, FAST_MAX_PAPERS, fast), "sort_mode": "relevance"},
+            {"provider": "papers_with_code", "query": paper_query, "limit": _fast_limit(settings.max_papers, FAST_MAX_PAPERS, fast), "sort_mode": "provider_default"},
+        ])
+    if not no_github and plan_data.github_queries:
+        requests.append({
+            "provider": "github", "query": " | ".join(plan_data.github_queries),
+            "limit": _fast_limit(settings.max_repos, FAST_MAX_REPOS, fast), "sort_mode": "stars",
+        })
+    return requests
+
+
+async def _cached_discovery_source_ids(
+    registry: SourceRegistryStore,
+    requests: list[dict[str, Any]],
+    policy: CachePolicy,
+    telemetry: CacheRunTelemetry,
+) -> list[str] | None:
+    if policy.source_refresh_mode == SourceRefreshMode.ALWAYS:
+        telemetry.search_cache_misses += len(requests)
+        telemetry.provider_calls += len(requests)
+        return None
+    now = datetime.now(timezone.utc)
+    entries: list[SearchCacheEntry] = []
+    for request in requests:
+        normalized = normalize_search_query(request["query"])
+        fingerprint = build_search_request_fingerprint(
+            provider=request["provider"], normalized_query=normalized,
+            result_limit=request["limit"], sort_mode=request["sort_mode"],
+        ).fingerprint
+        entry = await registry.get_search_cache(request["provider"], sha256_text(normalized), fingerprint)
+        fresh = entry is not None and entry.expires_at > now
+        if entry is None or (not fresh and policy.source_refresh_mode == SourceRefreshMode.AUTO):
+            if policy.source_refresh_mode == SourceRefreshMode.NEVER:
+                from kaggle_researcher.source_registry.errors import SourceOfflineCacheMissError
+
+                raise SourceOfflineCacheMissError(
+                    f"No cached {request['provider']} discovery result is available in offline mode"
+                )
+            telemetry.search_cache_misses += 1
+            telemetry.provider_calls += len(requests)
+            return None
+        if not fresh:
+            if not policy.allow_stale_search_cache_when_offline:
+                from kaggle_researcher.source_registry.errors import SourceOfflineCacheMissError
+
+                raise SourceOfflineCacheMissError(
+                    f"Cached {request['provider']} discovery result is stale in offline mode"
+                )
+            telemetry.search_stale_hits += 1
+            telemetry.warnings.append(
+                f"Used stale {request['provider']} discovery cache while source refresh was disabled."
+            )
+        else:
+            telemetry.search_cache_hits += 1
+        entries.append(entry)
+    return list(dict.fromkeys(source_id for entry in entries for source_id in entry.result_source_ids))
+
+
+async def _save_discovery_cache(
+    registry: SourceRegistryStore,
+    requests: list[dict[str, Any]],
+    documents: list[SourceDocument],
+    policy: CachePolicy,
+) -> None:
+    now = datetime.now(timezone.utc)
+    for request in requests:
+        provider = request["provider"]
+        if provider in {"arxiv", "papers_with_code"}:
+            accepted_sources = {"arxiv", "papers_with_code", "papers_with_code_legacy", "huggingface_papers"}
+        else:
+            accepted_sources = {provider}
+        source_ids = [document.id for document in documents if document.source in accepted_sources]
+        normalized = normalize_search_query(request["query"])
+        fingerprint = build_search_request_fingerprint(
+            provider=provider, normalized_query=normalized, result_limit=request["limit"],
+            sort_mode=request["sort_mode"],
+        ).fingerprint
+        ttl = policy.search_ttl_by_provider.get(provider)
+        if ttl is None:
+            continue
+        await registry.save_search_cache(SearchCacheEntry(
+            provider=provider, query_hash=sha256_text(normalized), normalized_query=normalized,
+            request_fingerprint=fingerprint, result_source_ids=list(dict.fromkeys(source_ids)),
+            raw_result_metadata={"result_count": len(source_ids)}, fetched_at=now, expires_at=now + ttl,
+        ))
+
+
+def _build_source_cache_policy(
+    settings: object,
+    *,
+    source_refresh: str | None,
+    rebuild_source_artifacts: set[str] | list[str] | tuple[str, ...] | str | None,
+    no_source_cache: bool,
+    source_cache_report: bool,
+) -> CachePolicy:
+    if isinstance(rebuild_source_artifacts, str):
+        rebuild = {item.strip() for item in rebuild_source_artifacts.split(",") if item.strip()}
+    else:
+        rebuild = set(rebuild_source_artifacts or ())
+    if hasattr(settings, "source_search_ttls"):
+        ttls = settings.source_search_ttls()
+    else:
+        from datetime import timedelta
+
+        ttls = {
+            "kaggle": timedelta(hours=int(getattr(settings, "source_search_ttl_kaggle_hours", 24))),
+            "github": timedelta(hours=int(getattr(settings, "source_search_ttl_github_hours", 24))),
+            "arxiv": timedelta(hours=int(getattr(settings, "source_search_ttl_arxiv_hours", 168))),
+            "papers_with_code": timedelta(
+                hours=int(getattr(settings, "source_search_ttl_papers_with_code_hours", 168))
+            ),
+        }
+    return CachePolicy(
+        source_refresh_mode=SourceRefreshMode(
+            source_refresh or str(getattr(settings, "source_refresh_mode", "auto"))
+        ),
+        rebuild_artifacts=rebuild,
+        search_ttl_by_provider=ttls,
+        allow_stale_search_cache_when_offline=bool(
+            getattr(settings, "source_cache_allow_stale_offline", True)
+        ),
+        write_cache_telemetry=source_cache_report,
+        cache_enabled=not no_source_cache,
+    )
 
 
 def _collect_kaggle_sources(
@@ -1129,15 +1633,26 @@ async def _collect_github_sources(
     warnings: list[str],
     show_progress: bool,
     fast: bool = False,
+    registry: SourceRegistryStore | None = None,
 ) -> list[SourceDocument]:
     if not plan_data.github_queries:
         return []
     _stage("Collecting GitHub repos...", show_progress)
     try:
+        async def cached_github_content(full_name: str, commit_sha: str) -> str | None:
+            if registry is None:
+                return None
+            return await _cached_content_for_revision(
+                registry, "github", full_name, f"https://github.com/{full_name}",
+                commit_sha, True,
+                expected_parser_fingerprint=github_readme_parser_fingerprint(),
+            )
+
         raw_repos = await search_repos(
             plan_data.github_queries,
             token=settings.github_token,
             max_repos=_fast_limit(settings.max_repos, FAST_MAX_REPOS, fast),
+            content_cache_lookup=cached_github_content if registry is not None else None,
         )
         return build_github_documents(raw_repos, competition_id=competition_id)
     except Exception as exc:
@@ -1939,6 +2454,12 @@ async def run(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.source_registry_migrate:
+        from kaggle_researcher.source_registry.migrations import _run_cli as run_migration_cli
+
+        await run_migration_cli(["migrate-legacy-documents"])
+        if not args.competition_url or not args.competition_desc:
+            return 0
     if not args.competition_url or not args.competition_desc:
         print("Provide competition_url and competition_desc to run the minimal pipeline.")
         return 0
@@ -1984,6 +2505,10 @@ async def run(argv: list[str] | None = None) -> int:
             debug=args.debug,
             no_github=args.no_github,
             fast=args.fast,
+            source_refresh=args.source_refresh,
+            rebuild_source_artifacts=args.rebuild_source_artifacts,
+            no_source_cache=args.no_source_cache,
+            source_cache_report=args.source_cache_report,
         )
     except FinalSynthesisDegradedError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

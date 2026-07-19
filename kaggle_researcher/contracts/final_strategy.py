@@ -46,6 +46,9 @@ SectionAvailability = Literal["available", "limited", "not_available"]
 First48HourWindow = Literal["0-4_hours", "4-12_hours", "12-24_hours", "24-48_hours"]
 FitScope = Literal["per_row", "within_fold", "oof_only", "not_applicable"]
 LeakageRisk = Literal["low", "medium", "high"]
+ExperimentCost = Literal["low", "medium", "high"]
+ExperimentStatus = Literal["required", "core", "backlog", "rejected", "blocked"]
+FamilyStatus = Literal["planned", "backlog", "rejected"]
 REQUIRED_SECTION_IDS = [
     "executive_summary", "metric_and_validation", "dataset_facts_from_eda",
     "leakage_and_data_quality", "drift_and_leaderboard_risk", "baseline_findings",
@@ -67,6 +70,86 @@ class EvidenceBinding(ContractModel):
     ref: EvidenceRef
     resolved_value_preview: str | int | float | bool | None | dict[str, Any] | list[Any]
     role: EvidenceBindingRole = "supporting"
+
+
+class EvidenceCatalogEntry(ContractModel):
+    ref: EvidenceRef
+    resolved_value_preview: str | int | float | bool | None | dict[str, Any] | list[Any]
+    value_type: NonEmptyString
+    source_component: NonEmptyString
+    specificity: Literal["root", "object", "item", "leaf"]
+    available: bool = True
+    warnings: list[NonEmptyString] = Field(default_factory=list)
+
+
+class ExperimentArm(ContractModel):
+    arm_id: NonEmptyString
+    name: NonEmptyString
+    exact_change: NonEmptyString
+    generated_features: list[NonEmptyString] = Field(default_factory=list)
+    fit_scope: FitScope
+    leakage_risk: LeakageRisk
+    dependencies: list[NonEmptyString] = Field(default_factory=list)
+
+
+class FeatureExperimentFamily(ContractModel):
+    family_id: NonEmptyString
+    name: NonEmptyString
+    priority: Priority
+    input_columns: list[NonEmptyString]
+    hypothesis: NonEmptyString
+    baseline_arm: ExperimentArm
+    candidate_arms: list[ExperimentArm]
+    validation_strategy: FinalValidationMethod
+    metric: NonEmptyString
+    fit_scope: FitScope
+    evidence_refs: list[EvidenceRef]
+    motivating_hypothesis_ids: list[HypothesisId] = Field(default_factory=list)
+    risks: list[NonEmptyString]
+    acceptance_rule: NonEmptyString
+    estimated_cost: ExperimentCost
+    status: FamilyStatus = "planned"
+
+    @model_validator(mode="after")
+    def _require_comparable_arms(self) -> "FeatureExperimentFamily":
+        if not self.input_columns or not self.candidate_arms or not self.evidence_refs:
+            raise ValueError("Feature experiment families require inputs, candidate arms, and evidence")
+        arm_ids = [self.baseline_arm.arm_id, *(arm.arm_id for arm in self.candidate_arms)]
+        if len(arm_ids) != len(set(arm_ids)):
+            raise ValueError("Feature experiment family arm IDs must be unique")
+        return self
+
+
+class ExperimentBudget(ContractModel):
+    max_core_experiments: int = Field(default=8, ge=1)
+    max_first_24h_experiments: int = Field(default=4, ge=1)
+    max_first_48h_experiments: int = Field(default=8, ge=1)
+    max_high_cost_experiments: int = Field(default=2, ge=0)
+    estimated_total_cost: float = Field(default=0.0, ge=0.0)
+    budget_policy_version: NonEmptyString = "1.0"
+
+
+class FinalStrategyQualityMetrics(ContractModel):
+    model_config = {
+        **ContractModel.model_config,
+        "protected_namespaces": (),
+    }
+    action_count: int = 0
+    feature_family_count: int = 0
+    core_experiment_count: int = 0
+    backlog_experiment_count: int = 0
+    average_evidence_refs_per_action: float = 0.0
+    max_evidence_refs_per_action: int = 0
+    root_refs_for_specific_claims: int = 0
+    unsupported_evidence_refs_removed: int = 0
+    actions_exceeding_evidence_limits: int = 0
+    unresolved_refs: int = 0
+    actions_with_source_refs: int = 0
+    actions_without_source_refs: int = 0
+    hypothesis_role_counts: dict[str, int] = Field(default_factory=dict)
+    duplicate_preview_bytes_avoided: int = 0
+    model_self_comparisons_removed: int = 0
+    first_48h_experiment_count: int = 0
 
 
 class FeatureActionMetadata(ContractModel):
@@ -106,9 +189,18 @@ class FinalStrategyExperiment(ContractModel):
     success_metric: NonEmptyString
     acceptance_rule: NonEmptyString
     evidence_refs: list[EvidenceRef]
+    primary_evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    limitation_evidence_refs: list[EvidenceRef] = Field(default_factory=list)
     related_hypothesis_ids: list[HypothesisId]
     risks: list[NonEmptyString]
     fit_scope: FitScope
+    baseline_canonical_family_id: NonEmptyString | None = None
+    baseline_implementation_id: NonEmptyString | None = None
+    candidate_canonical_family_id: NonEmptyString | None = None
+    candidate_implementation_id: NonEmptyString | None = None
+    status: ExperimentStatus = "core"
+    estimated_cost: ExperimentCost = "low"
+    dependencies: list[NonEmptyString] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _require_grounding(self) -> "FinalStrategyExperiment":
@@ -122,6 +214,10 @@ class FinalStrategyExperiment(ContractModel):
             raise ValueError("FinalStrategyExperiment.risks must not be empty")
         object.__setattr__(self, "feature_inputs", sorted(set(self.feature_inputs)))
         object.__setattr__(self, "evidence_refs", list(dict.fromkeys(self.evidence_refs)))
+        primary = [ref for ref in self.primary_evidence_refs if ref in self.evidence_refs]
+        limitations = [ref for ref in self.limitation_evidence_refs if ref in self.evidence_refs]
+        object.__setattr__(self, "primary_evidence_refs", primary or self.evidence_refs[:1])
+        object.__setattr__(self, "limitation_evidence_refs", limitations)
         object.__setattr__(
             self,
             "related_hypothesis_ids",
@@ -137,9 +233,18 @@ class FinalStrategyAction(ContractModel):
     action: NonEmptyString
     reason: NonEmptyString
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
-    evidence_bindings: list[EvidenceBinding] = Field(default_factory=list)
+    primary_evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    limitation_evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    evidence_overflow_reason: NonEmptyString | None = None
+    # Accepted only as a legacy input adapter. Canonical JSON uses evidence_catalog.
+    evidence_bindings: list[EvidenceBinding] = Field(default_factory=list, exclude=True)
     related_hypothesis_ids: list[HypothesisId] = Field(default_factory=list)
     hypothesis_ids: list[HypothesisId] = Field(default_factory=list)
+    motivating_hypothesis_ids: list[HypothesisId] = Field(default_factory=list)
+    safety_hypothesis_ids: list[HypothesisId] = Field(default_factory=list)
+    validation_context_ids: list[HypothesisId] = Field(default_factory=list)
+    rejected_hypothesis_ids: list[HypothesisId] = Field(default_factory=list)
+    hypothesis_role_overlap_reason: NonEmptyString | None = None
     experiment_ids: list[ExperimentId] = Field(default_factory=list)
     experiment_id: NonEmptyString | None = None
     hypothesis: NonEmptyString | None = None
@@ -158,6 +263,8 @@ class FinalStrategyAction(ContractModel):
     evidence_origin: EvidenceOrigin = "Hypothesis-to-test"
     limitations: list[NonEmptyString] = Field(default_factory=list)
     feature_metadata: FeatureActionMetadata | None = None
+    action_kind: NonEmptyString = "general"
+    dependencies: list[NonEmptyString] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -166,13 +273,46 @@ class FinalStrategyAction(ContractModel):
 
     @model_validator(mode="after")
     def _require_strategy_links(self) -> "FinalStrategyAction":
-        linked = list(dict.fromkeys([*self.related_hypothesis_ids, *self.hypothesis_ids]))
+        roles = [
+            *self.motivating_hypothesis_ids,
+            *self.safety_hypothesis_ids,
+            *self.validation_context_ids,
+            *self.rejected_hypothesis_ids,
+        ]
+        legacy = list(dict.fromkeys([*self.related_hypothesis_ids, *self.hypothesis_ids]))
+        if not roles and legacy:
+            object.__setattr__(self, "motivating_hypothesis_ids", list(legacy))
+            roles = list(legacy)
+        elif legacy:
+            unassigned = [item for item in legacy if item not in roles]
+            if unassigned:
+                object.__setattr__(
+                    self,
+                    "motivating_hypothesis_ids",
+                    list(dict.fromkeys([*self.motivating_hypothesis_ids, *unassigned])),
+                )
+                roles = [*roles, *unassigned]
+        linked = list(dict.fromkeys(roles))
         object.__setattr__(self, "related_hypothesis_ids", linked)
         object.__setattr__(self, "hypothesis_ids", list(linked))
         if not self.evidence_refs:
             raise ValueError("FinalStrategyAction.evidence_refs must not be empty")
         if not self.related_hypothesis_ids:
             raise ValueError("FinalStrategyAction.related_hypothesis_ids must not be empty")
+        primary = [ref for ref in self.primary_evidence_refs if ref in self.evidence_refs]
+        limitations = [ref for ref in self.limitation_evidence_refs if ref in self.evidence_refs]
+        object.__setattr__(self, "primary_evidence_refs", primary or self.evidence_refs[:1])
+        object.__setattr__(self, "limitation_evidence_refs", limitations)
+        role_memberships = [
+            self.motivating_hypothesis_ids,
+            self.safety_hypothesis_ids,
+            self.validation_context_ids,
+            self.rejected_hypothesis_ids,
+        ]
+        role_total = sum(len(set(values)) for values in role_memberships)
+        if role_total != len(set().union(*(set(values) for values in role_memberships))):
+            if not self.hypothesis_role_overlap_reason:
+                raise ValueError("A hypothesis in multiple semantic roles requires justification")
         missing_eda_refs = set(self.eda_result_refs) - set(self.evidence_refs)
         if missing_eda_refs:
             raise ValueError(
@@ -241,6 +381,9 @@ class ActionProvenance(ContractModel):
     action_id: NonEmptyString
     source_refs: list[SourceClaimId] = Field(default_factory=list)
     hypothesis_ids: list[HypothesisId] = Field(default_factory=list)
+    motivating_hypothesis_ids: list[HypothesisId] = Field(default_factory=list)
+    safety_hypothesis_ids: list[HypothesisId] = Field(default_factory=list)
+    validation_context_ids: list[HypothesisId] = Field(default_factory=list)
     eda_result_refs: list[EvidenceRef] = Field(default_factory=list)
 
 
@@ -289,7 +432,7 @@ class FinalStrategySection(ContractModel):
 
 class FinalStrategyResult(ContractModel):
     contract_family: Literal["final_strategy"] = "final_strategy"
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.0", "2.0"] = "2.0"
     competition_id: NonEmptyString
     synthesis_status: SynthesisStatus
     llm_output_valid: bool
@@ -303,6 +446,13 @@ class FinalStrategyResult(ContractModel):
     sections: list[FinalStrategySection] = Field(default_factory=list)
     actions: list[FinalStrategyAction] = Field(default_factory=list)
     experiments: list[FinalStrategyExperiment] = Field(default_factory=list)
+    evidence_catalog: dict[str, EvidenceCatalogEntry] = Field(default_factory=dict)
+    feature_experiment_families: list[FeatureExperimentFamily] = Field(default_factory=list)
+    core_experiments: list[FinalStrategyExperiment] = Field(default_factory=list)
+    experiment_backlog: list[FinalStrategyExperiment] = Field(default_factory=list)
+    experiment_budget: ExperimentBudget = Field(default_factory=ExperimentBudget)
+    quality_metrics: FinalStrategyQualityMetrics = Field(default_factory=FinalStrategyQualityMetrics)
+    diagnostics_summary: dict[str, Any] = Field(default_factory=dict)
     source_to_hypothesis_links: list[SourceToHypothesisLink] = Field(default_factory=list)
     hypothesis_to_eda_links: list[HypothesisToEdaLink] = Field(default_factory=list)
     action_provenance: list[ActionProvenance] = Field(default_factory=list)
@@ -402,7 +552,41 @@ class FinalStrategyResult(ContractModel):
                 )
         self._validate_provenance_shape()
         self._validate_first_48_hour_references()
+        self._validate_compacted_contract()
         return self
+
+    def _validate_compacted_contract(self) -> None:
+        if self.schema_version != "2.0":
+            return
+        catalog_refs = set(self.evidence_catalog)
+        if self.evidence_catalog:
+            unresolved = sorted({
+                ref
+                for action in self.actions
+                for ref in action.evidence_refs
+                if ref not in catalog_refs
+            })
+            if unresolved:
+                raise ValueError(f"Action evidence refs are absent from evidence_catalog: {unresolved}")
+        core_ids = [item.experiment_id for item in self.core_experiments]
+        backlog_ids = [item.experiment_id for item in self.experiment_backlog]
+        overlap = set(core_ids) & set(backlog_ids)
+        if overlap:
+            raise ValueError(f"Core and backlog experiments overlap: {sorted(overlap)}")
+        if len(core_ids) > self.experiment_budget.max_core_experiments:
+            raise ValueError("Core experiment budget exceeded")
+        high_cost = sum(item.estimated_cost == "high" for item in self.core_experiments)
+        if high_cost > self.experiment_budget.max_high_cost_experiments:
+            raise ValueError("High-cost experiment budget exceeded")
+        for item in [*self.experiments, *self.core_experiments, *self.experiment_backlog]:
+            if (
+                item.baseline_canonical_family_id
+                and item.candidate_canonical_family_id
+                and item.baseline_canonical_family_id == item.candidate_canonical_family_id
+            ):
+                raise ValueError(
+                    f"Experiment {item.experiment_id!r} compares one canonical model family with itself"
+                )
 
     def _validate_first_48_hour_references(self) -> None:
         action_ids = {action.action_id for action in self.actions if action.action_id}
@@ -449,11 +633,14 @@ class FinalStrategyResult(ContractModel):
                 action_id=action_id,
                 source_refs=list(dict.fromkeys(action.source_refs)),
                 hypothesis_ids=list(dict.fromkeys(action.hypothesis_ids)),
+                motivating_hypothesis_ids=list(dict.fromkeys(action.motivating_hypothesis_ids)),
+                safety_hypothesis_ids=list(dict.fromkeys(action.safety_hypothesis_ids)),
+                validation_context_ids=list(dict.fromkeys(action.validation_context_ids)),
                 eda_result_refs=list(dict.fromkeys(action.eda_result_refs)),
             )
             for action_id, action in action_map.items()
         }
-        if not self.action_provenance:
+        if not self.action_provenance or self.schema_version == "1.0":
             object.__setattr__(
                 self,
                 "action_provenance",
@@ -665,10 +852,35 @@ def migrate_legacy_final_strategy_payload(
     )
 
 
+def upgrade_final_strategy_v1_to_v2(
+    payload: Mapping[str, Any],
+    *,
+    evidence_pack: Mapping[str, Any],
+    source_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Read a v1 artifact and emit the compact v2 canonical representation.
+
+    Legacy action-level evidence_bindings are accepted as input by the model but are
+    intentionally excluded from v2 serialization; previews are rebuilt once in the
+    top-level evidence_catalog.
+    """
+
+    from kaggle_researcher.reasoning.strategy_compaction import compact_final_strategy
+
+    legacy = FinalStrategyResult.model_validate(payload)
+    return compact_final_strategy(
+        legacy,
+        evidence_pack=evidence_pack,
+        source_ids=source_ids or [],
+    ).model_dump(mode="json")
+
+
 __all__ = [
     "ActionProvenance", "Confidence", "EvidenceBinding", "EvidenceBindingRole",
-    "EvidenceOrigin", "EvidenceRef", "FALLBACK_LIMITATION",
-    "FeatureActionMetadata", "FinalStrategyExperiment", "FitScope", "LeakageRisk",
+    "EvidenceCatalogEntry", "EvidenceOrigin", "EvidenceRef", "ExperimentArm",
+    "ExperimentBudget", "ExperimentCost", "ExperimentStatus", "FALLBACK_LIMITATION",
+    "FamilyStatus", "FeatureActionMetadata", "FeatureExperimentFamily",
+    "FinalStrategyExperiment", "FinalStrategyQualityMetrics", "FitScope", "LeakageRisk",
     "First48HourBlock", "First48HourWindow",
     "FinalStrategyAction", "FinalStrategyResult", "FinalStrategySection",
     "HypothesisToEdaLink",
@@ -678,5 +890,6 @@ __all__ = [
     "SectionAvailability",
     "TEMPORAL_VALIDATION_METHODS",
     "migrate_legacy_final_strategy_payload",
+    "upgrade_final_strategy_v1_to_v2",
     "upgrade_legacy_final_strategy_synthesis_status",
 ]

@@ -21,7 +21,15 @@ async def summarize_one(
 ) -> SourceDocument:
     content = doc.content or ""
     if len(content) < 150:
-        return doc.model_copy(update={"summary": content})
+        return doc.model_copy(update={
+            "summary": content,
+            "metadata": {
+                **doc.metadata,
+                "summary_fallback_used": True,
+                "summary_fallback_reason": "short_content",
+                "summary_actual_input_kind": "raw_or_parsed_text",
+            },
+        })
 
     try:
         summary = await client.chat_text(
@@ -30,8 +38,17 @@ async def summarize_one(
             user_prompt=_build_user_prompt(doc),
             timeout=90,
         )
-    except Exception:
+    except Exception as exc:
         summary = content[:800]
+        return doc.model_copy(update={
+            "summary": summary,
+            "metadata": {
+                **doc.metadata,
+                "summary_fallback_used": True,
+                "summary_fallback_reason": type(exc).__name__,
+                "summary_actual_input_kind": "raw_or_parsed_text",
+            },
+        })
 
     return doc.model_copy(update={"summary": summary})
 

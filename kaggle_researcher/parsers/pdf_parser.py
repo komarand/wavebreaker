@@ -15,6 +15,7 @@ except ImportError:  # pragma: no cover
 
 
 logger = get_logger(__name__)
+PDF_PARSER_VERSION = "1.0"
 
 
 async def download_pdf(url: str, paper_id: str, cache_dir: str) -> Path | None:
