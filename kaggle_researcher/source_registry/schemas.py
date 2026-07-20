@@ -250,3 +250,32 @@ class CacheRunTelemetry(StrictModel):
     estimated_avoided_operations: int = 0
     per_source: list[dict[str, Any]] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class CompetitionSourceLink(StrictModel):
+    competition_id: str
+    source_id: str
+    discovery_queries: list[str] = Field(default_factory=list)
+    relevance_score: float | None = None
+    relevance_summary: str | None = None
+    first_seen_at: datetime = Field(default_factory=utc_now)
+    last_seen_at: datetime = Field(default_factory=utc_now)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+ProcessingStatus = Literal["success", "degraded", "failed"]
+
+
+class ProcessingManifest(StrictModel):
+    manifest_id: UUID
+    run_id: str
+    competition_id: str
+    source_id: str
+    version_id: UUID
+    input_hash: str
+    cache_decisions: list[CacheDecision] = Field(default_factory=list)
+    processor_fingerprints: list[str] = Field(default_factory=list)
+    started_at: datetime
+    completed_at: datetime
+    status: ProcessingStatus
+    warnings: list[str] = Field(default_factory=list)
