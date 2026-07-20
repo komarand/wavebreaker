@@ -4,7 +4,10 @@ import json
 
 import pytest
 
-from kaggle_researcher.reasoning.validation_architect import design_validation
+from kaggle_researcher.reasoning.validation_architect import (
+    design_validation,
+    normalize_validation_result_payload,
+)
 from kaggle_researcher.schemas import PlanData, RetrievedDocument, ValidationResult
 
 
@@ -57,6 +60,7 @@ def _validation_response(
             "Hypothesis: leakage risk comes from repeated patient ids. "
             "Recommendation: use group-aware validation."
         ),
+        "primary_validation": {"method": "group_kfold", "reason": "Patient groups must remain isolated."},
     }
 
 
@@ -84,6 +88,10 @@ async def test_design_validation_validates_mock_response_into_validation_result(
     assert "Separate facts, hypotheses, and recommendations" in system_prompt
     assert "Every source-backed claim must cite evidence_ids" in system_prompt
     assert "Keep confidence below high unless sources explicitly describe split, time, or group structure" in system_prompt
+    assert "secondary_validation may be null" in system_prompt
+    assert "Do not duplicate primary_validation" in system_prompt
+    assert "the only allowed keys are method, reason, n_splits, shuffle, group_column, and split_column" in system_prompt
+    assert "Never return description, why, must_preserve_chronology, or allowed_only_if" in system_prompt
 
     payload = json.loads(str(client.kwargs["user_prompt"]))
     assert payload["competition_desc"] == "Classify medical images."
@@ -91,6 +99,48 @@ async def test_design_validation_validates_mock_response_into_validation_result(
     assert "ID: doc-1" in payload["retrieved_documents"]
     assert "RRF score: 0.2000" in payload["retrieved_documents"]
     assert "expected_schema" in payload
+
+
+def test_validation_result_distinguishes_optional_secondary_from_invalid_primary() -> None:
+    payload = _validation_response()
+    payload["secondary_validation"] = None
+
+    result = ValidationResult.model_validate(payload)
+
+    assert result.secondary_validation is None
+    assert result.model_dump(mode="json")["secondary_validation"] is None
+
+    missing_primary = dict(payload)
+    missing_primary.pop("primary_validation")
+    with pytest.raises(Exception):
+        ValidationResult.model_validate(missing_primary)
+
+    null_primary = dict(payload, primary_validation=None)
+    with pytest.raises(Exception):
+        ValidationResult.model_validate(null_primary)
+
+    invalid_secondary = dict(payload, secondary_validation={})
+    with pytest.raises(Exception):
+        ValidationResult.model_validate(invalid_secondary)
+
+
+def test_validation_result_accepts_typed_secondary_and_normalizes_known_null_collections() -> None:
+    payload = _validation_response()
+    payload.update({
+        "secondary_validation": {"method": "time_holdout", "reason": "Robustness check."},
+        "failure_modes": None,
+        "do_not_use": None,
+        "policy_notes": None,
+    })
+
+    result = ValidationResult.model_validate(payload)
+
+    assert result.primary_validation.method == "group_kfold"
+    assert result.secondary_validation is not None
+    assert result.secondary_validation.method == "time_holdout"
+    assert result.failure_modes == []
+    assert result.do_not_use == []
+    assert result.policy_notes == []
 
 
 @pytest.mark.asyncio
@@ -121,3 +171,75 @@ async def test_design_validation_demotes_high_confidence_without_split_sources()
 
     assert result.confidence == "medium"
     assert any("Confidence reduced from high" in note for note in result.policy_notes)
+
+
+@pytest.mark.asyncio
+async def test_design_validation_normalizes_exact_nested_extra_fields_from_traceback() -> None:
+    payload = _validation_response()
+    payload["primary_validation"] = {
+        "method": "time_holdout",
+        "description": "Hold out the latest period.",
+        "why": "Estimate future-period generalization.",
+        "must_preserve_chronology": True,
+    }
+    payload["secondary_validation"] = {
+        "method": "group_kfold",
+        "description": "Use as a robustness diagnostic.",
+        "allowed_only_if": "groups never mix future observations into training",
+    }
+
+    result = await design_validation(
+        competition_desc="Classify records.",
+        plan_data=_plan(domain="tabular classification"),
+        retrieved_documents=[_doc()],
+        client=FakeClient(payload),
+        model="reasoning-model",
+    )
+
+    assert result.primary_validation.reason == (
+        "Hold out the latest period. Estimate future-period generalization."
+    )
+    assert result.secondary_validation is not None
+    assert result.secondary_validation.reason == "Use as a robustness diagnostic."
+    dumped = result.model_dump(mode="json")
+    allowed = {"method", "reason", "n_splits", "shuffle", "group_column", "split_column"}
+    assert set(dumped["primary_validation"]) == allowed
+    assert set(dumped["secondary_validation"]) == allowed
+
+
+def test_validation_normalization_preserves_chronology_and_allowed_condition() -> None:
+    payload = _validation_response()
+    payload["primary_validation"] = {
+        "method": "time_holdout",
+        "must_preserve_chronology": True,
+    }
+    payload["secondary_validation"] = {
+        "method": "group_kfold",
+        "allowed_only_if": "the grouping diagnostic respects time order",
+    }
+
+    normalized = normalize_validation_result_payload(payload)
+    result = ValidationResult.model_validate(normalized)
+
+    assert "primary_validation constraint: must preserve chronology." in result.policy_notes
+    assert (
+        "secondary_validation constraint: allowed only if the grouping diagnostic respects time order"
+        in result.policy_notes
+    )
+
+
+def test_unknown_nested_validation_field_is_preserved_as_policy_note() -> None:
+    payload = _validation_response()
+    payload["primary_validation"] = {
+        "method": "purged_time_split",
+        "purge_gap": {"days": 7},
+    }
+
+    normalized = normalize_validation_result_payload(payload)
+    result = ValidationResult.model_validate(normalized)
+
+    assert "purge_gap" not in normalized["primary_validation"]
+    assert (
+        'primary_validation unmodeled constraint purge_gap={"days": 7}'
+        in result.policy_notes
+    )

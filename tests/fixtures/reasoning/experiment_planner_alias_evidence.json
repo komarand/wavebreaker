@@ -1,0 +1,13 @@
+{
+  "experiments": [
+    {
+      "priority": "P0",
+      "experiment": "Train a fold-safe baseline on fixed splits",
+      "why": "A baseline anchors later comparisons against the validation policy.",
+      "cost": "low",
+      "expected_gain": "diagnostic",
+      "risk": "A changing split would invalidate comparisons.",
+      "evidence_ids": ["validation_policy", "source-001"]
+    }
+  ]
+}

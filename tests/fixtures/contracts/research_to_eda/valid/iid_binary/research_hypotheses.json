@@ -1,0 +1,16 @@
+{
+  "contract_family": "research_hypotheses",
+  "schema_version": "1.0",
+  "competition_id": "fixture-competition",
+  "created_at": "2026-01-02T03:04:05+00:00",
+  "hypotheses": [
+    {"hypothesis_id":"schema_core","category":"schema","claim":"Check whether generic train/test roles can be inferred.","rationale":"Schema evidence is required.","expected_eda_checks":["schema_inferer.detect_target"],"priority":"P0","confidence_before_eda":"medium","source_refs":[],"status":"needs_eda","limitations":[]},
+    {"hypothesis_id":"metric_core","category":"metric","claim":"EDA should verify metric semantics.","rationale":"Metric semantics constrain evaluation.","expected_eda_checks":["metric_analyzer.resolve_metric"],"priority":"P0","confidence_before_eda":"medium","source_refs":[],"status":"needs_eda","limitations":[]},
+    {"hypothesis_id":"val_core","category":"validation","claim":"EDA should verify a primary validation policy.","rationale":"Observed structure determines splits.","expected_eda_checks":["validation_analyzer.select_primary_validation"],"priority":"P0","confidence_before_eda":"medium","source_refs":[],"status":"needs_eda","limitations":[]},
+    {"hypothesis_id":"leak_core","category":"leakage","claim":"Check whether generic overlap exists.","rationale":"Leakage invalidates validation.","expected_eda_checks":["leakage_checker.train_test_id_overlap"],"priority":"P0","confidence_before_eda":"medium","source_refs":[],"status":"needs_eda","limitations":[]}
+  ],
+  "eda_tasks": [],
+  "structured_findings": [],
+  "scout_limitations": [],
+  "models_used": {"fixture":"deterministic"}
+}

@@ -1,0 +1,20 @@
+{
+  "contract_family": "eda_task_plan",
+  "schema_version": "1.0",
+  "competition_id": "fixture-competition",
+  "task_type": "binary_classification",
+  "metric": {"name":"roc_auc"},
+  "dataset": {"download_required":false,"id_column":"row_id","target_column":"target"},
+  "eda_tasks": [
+    {"task_id":"inventory","module":"file_inventory","priority":"P0","blocking":true,"related_hypothesis_ids":["schema_core"],"dependencies":[],"expected_outputs":[],"params":{}},
+    {"task_id":"schema","module":"schema_inferer","priority":"P0","blocking":true,"related_hypothesis_ids":["schema_core"],"dependencies":[],"expected_outputs":[],"params":{}},
+    {"task_id":"profile","module":"table_profiler","priority":"P0","blocking":false,"related_hypothesis_ids":["schema_core"],"dependencies":[],"expected_outputs":[],"params":{}},
+    {"task_id":"metric","module":"metric_analyzer","priority":"P0","blocking":false,"related_hypothesis_ids":["metric_core"],"dependencies":[],"expected_outputs":[],"params":{}},
+    {"task_id":"validation","module":"validation_analyzer","priority":"P0","blocking":true,"related_hypothesis_ids":["val_core"],"dependencies":[],"expected_outputs":[],"params":{}},
+    {"task_id":"leakage","module":"leakage_checker","priority":"P0","blocking":true,"related_hypothesis_ids":["leak_core"],"dependencies":[],"expected_outputs":[],"params":{}}
+  ],
+  "hypothesis_index": {"schema_core":["inventory","schema","profile"],"metric_core":["metric"],"val_core":["validation"],"leak_core":["leakage"]},
+  "recommended_module_sequence": ["file_inventory","schema_inferer","table_profiler","metric_analyzer","validation_analyzer","leakage_checker"],
+  "recommended_human_checklist": ["Confirm target and metric before modeling."],
+  "blocking_tasks": ["file_inventory","schema_inferer","validation_analyzer","leakage_checker"]
+}

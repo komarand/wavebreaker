@@ -1,0 +1,12 @@
+{
+  "run_id": "legacy-failure",
+  "competition_id": "demo",
+  "status": "error",
+  "config": {},
+  "stages": {
+    "scout": {"status": "success", "outputs": {}},
+    "eda": {"status": "success", "outputs": {}},
+    "reasoning": {"status": "error", "error": "provider returned invalid JSON", "outputs": {}}
+  },
+  "final_outputs": {}
+}

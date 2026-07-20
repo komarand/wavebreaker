@@ -150,7 +150,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(pytest.mark.unit)
         if "/tests/integration/" in path:
             item.add_marker(pytest.mark.integration)
-            if not run_pg:
+            if not run_pg and "pipeline_smoke" not in item.keywords:
                 item.add_marker(skip_integration)
         if "/tests/network/" in path:
             item.add_marker(pytest.mark.network)

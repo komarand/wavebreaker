@@ -178,6 +178,7 @@ def test_full_mocked_pipeline_completes_and_records_github_warning(
             validation_risk="high",
             likely_split="time",
             reasoning="reason",
+            primary_validation={"method": "temporal_cv"},
         )
 
     async def fake_analyze_leakage_risk(**kwargs: Any) -> LeakageRiskResult:

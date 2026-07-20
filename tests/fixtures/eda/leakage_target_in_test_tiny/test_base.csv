@@ -1,0 +1,4 @@
+id,feature_a,feature_b,target
+101,0.44,A,0
+102,0.66,B,1
+103,0.53,C,0

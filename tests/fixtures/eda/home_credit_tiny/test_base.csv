@@ -1,0 +1,5 @@
+case_id,WEEK_NUM,date_decision,income,ext_score,product_type,mostly_missing_note,applicant_code
+2001,5,2024-02-01,52000,0.59,cash,,app_2001
+2002,5,2024-02-02,68000,0.63,revolving,,app_2002
+2003,6,2024-02-08,49000,0.52,cash,,app_2003
+2004,6,2024-02-09,76000,0.57,revolving,manual_review,app_2004

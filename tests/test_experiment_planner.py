@@ -5,7 +5,15 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from kaggle_researcher.reasoning.experiment_planner import plan_experiments
+from kaggle_researcher.reasoning.common import (
+    CANONICAL_REASONING_EVIDENCE_IDS,
+    known_evidence_ids,
+)
+from kaggle_researcher.reasoning.experiment_planner import (
+    known_experiment_evidence_ids,
+    normalize_evidence_ids,
+    plan_experiments,
+)
 from kaggle_researcher.schemas import (
     ExperimentItem,
     LeakageRiskResult,
@@ -25,6 +33,19 @@ class FakeClient:
         return self.response
 
 
+class SequentialClient(FakeClient):
+    def __init__(self, responses: list[dict[str, object]]) -> None:
+        super().__init__(responses[0])
+        self.responses = responses
+        self.calls = 0
+
+    async def chat_json(self, **kwargs):
+        self.kwargs = kwargs
+        response = self.responses[self.calls]
+        self.calls += 1
+        return response
+
+
 def _validation() -> ValidationResult:
     return ValidationResult(
         confidence="medium",
@@ -34,6 +55,7 @@ def _validation() -> ValidationResult:
         likely_split="time",
         failure_modes=["Public/private distribution shift."],
         reasoning="Use honest temporal validation before trusting improvements.",
+        primary_validation={"method": "temporal_cv"},
     )
 
 
@@ -124,6 +146,34 @@ async def test_plan_experiments_validates_mock_response_and_sorts_by_priority() 
     assert "expected_schema" in payload
 
 
+@pytest.mark.contract
+@pytest.mark.asyncio
+async def test_planner_prompt_separates_experiment_and_source_hypothesis_ids() -> None:
+    item = _item("P0", "Build baseline model on honest validation")
+    item["source_hypothesis_ids"] = ["eda_hypothesis_007"]
+    client = FakeClient({"experiments": [item]})
+
+    result = await plan_experiments(
+        validation_result=_validation(),
+        leakage_result=_leakage(),
+        metric_result=_metric(),
+        retrieved_documents=[_doc()],
+        eda_hypotheses=[{
+            "hypothesis_id": "eda_hypothesis_007",
+            "hypothesis": "High-cardinality encoding may help.",
+        }],
+        client=client,
+    )
+
+    assert result[0].experiment_id
+    assert result[0].experiment_id != "eda_hypothesis_007"
+    assert result[0].source_hypothesis_ids == ["eda_hypothesis_007"]
+    payload = json.loads(str(client.kwargs["user_prompt"]))
+    assert payload["allowed_hypothesis_ids"] == ["eda_hypothesis_007"]
+    assert payload["eda_testable_hypotheses"][0]["hypothesis_id"] == "eda_hypothesis_007"
+    assert "must not equal a hypothesis ID" in str(client.kwargs["system_prompt"])
+
+
 @pytest.mark.asyncio
 async def test_plan_experiments_invalid_priority_fails_validation() -> None:
     client = FakeClient({"experiments": [_item("P4", "Invalid priority experiment")]})
@@ -152,6 +202,65 @@ async def test_plan_experiments_rejects_unknown_evidence_ids() -> None:
             client=client,
             model="reasoning-model",
         )
+
+
+@pytest.mark.asyncio
+async def test_plan_experiments_normalizes_validation_alias_and_exposes_registry() -> None:
+    client = FakeClient({"experiments": [_item("P1", "Compare validation folds", evidence_ids=["validation_policy"])]})
+
+    result = await plan_experiments(
+        validation_result=_validation(), leakage_result=_leakage(), metric_result=_metric(),
+        retrieved_documents=[_doc()], client=client, model="reasoning-model",
+    )
+
+    planned = next(item for item in result if item.experiment == "Compare validation folds")
+    assert planned.evidence_ids == ["validation_result"]
+    payload = json.loads(str(client.kwargs["user_prompt"]))
+    assert payload["allowed_evidence_ids"] == known_experiment_evidence_ids([_doc()])
+    assert payload["allowed_evidence_ids"] == known_evidence_ids(
+        [_doc()], additional_ids=CANONICAL_REASONING_EVIDENCE_IDS,
+    )
+    assert "Every evidence_ids entry must exactly match" in str(client.kwargs["system_prompt"])
+    assert "Do not invent aliases" in str(client.kwargs["system_prompt"])
+
+
+def test_normalize_evidence_ids_deduplicates_known_aliases_without_fuzzy_matching() -> None:
+    assert normalize_evidence_ids(["validation_result"]) == ["validation_result"]
+    assert normalize_evidence_ids(["validation_policy", "primary_validation", "validation_result"]) == ["validation_result"]
+    assert normalize_evidence_ids(["doc-1", "validation_result"]) == ["doc-1", "validation_result"]
+    assert normalize_evidence_ids(["validatoin_policy"]) == ["validatoin_policy"]
+
+
+@pytest.mark.asyncio
+async def test_plan_experiments_repairs_unknown_ids_once_then_fails_hard() -> None:
+    client = SequentialClient([
+        {"experiments": [_item("P1", "Check validation", evidence_ids=["validatoin_policy"])]},
+        {"experiments": [_item("P1", "Check validation", evidence_ids=["still_unknown"])]},
+    ])
+
+    with pytest.raises(ValueError, match="final stage"):
+        await plan_experiments(
+            validation_result=_validation(), leakage_result=_leakage(), metric_result=_metric(),
+            retrieved_documents=[_doc()], client=client, model="reasoning-model",
+        )
+    assert client.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_plan_experiments_accepts_single_repair_to_canonical_id() -> None:
+    client = SequentialClient([
+        {"experiments": [_item("P1", "Check validation", evidence_ids=["made_up_evidence"])]},
+        {"experiments": [_item("P1", "Check validation", evidence_ids=["validation_result"])]},
+    ])
+
+    result = await plan_experiments(
+        validation_result=_validation(), leakage_result=_leakage(), metric_result=_metric(),
+        retrieved_documents=[_doc()], client=client, model="reasoning-model",
+    )
+
+    planned = next(item for item in result if item.experiment == "Check validation")
+    assert planned.evidence_ids == ["validation_result"]
+    assert client.calls == 2
 
 
 @pytest.mark.asyncio

@@ -102,6 +102,7 @@ def test_report_composer_prompt_includes_provenance_and_temporal_policy() -> Non
                 validation_risk="high",
                 likely_split="time",
                 reasoning="reason",
+                primary_validation={"method": "temporal_cv"},
             ),
             leakage_result=LeakageRiskResult(confidence="low", evidence_ids=[], risk_level="medium"),
             metric_result=MetricResult(

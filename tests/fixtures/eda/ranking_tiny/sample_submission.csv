@@ -1,0 +1,6 @@
+query_id,item_id,prediction
+q2,i10,0.5
+q2,i11,0.5
+q4,i12,0.5
+q4,i13,0.5
+q4,i14,0.5

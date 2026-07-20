@@ -1,0 +1,34 @@
+{
+  "schema_version": "1.0",
+  "competition_id": "demo",
+  "synthesis_status": "llm_success",
+  "llm_output_valid": true,
+  "repair_attempted": false,
+  "repair_succeeded": false,
+  "fallback_used": false,
+  "synthesis_diagnostics_path": null,
+  "task_type": "binary_classification",
+  "recommended_validation": "stratified_kfold",
+  "sections": [
+    {
+      "section_id": "metric_and_validation",
+      "title": "Metric and validation",
+      "summary": "Keep the validation design fixed for comparable experiments.",
+      "evidence_refs": ["validation_evidence.primary_validation"],
+      "related_hypothesis_ids": ["val_001"]
+    }
+  ],
+  "actions": [
+    {
+      "action_id": "action_001",
+      "priority": "P0",
+      "action": "Use fixed stratified folds for every baseline comparison.",
+      "reason": "The selected validation policy is the reproducibility anchor.",
+      "evidence_refs": ["validation_evidence.primary_validation"],
+      "related_hypothesis_ids": ["val_001"],
+      "validation_strategy": "stratified_kfold",
+      "confidence": "high",
+      "evidence_origin": "EDA-confirmed"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "contract_family":"research_hypotheses","schema_version":"1.0","competition_id":"research-side","created_at":"2026-01-02T03:04:05+00:00",
+  "hypotheses":[
+    {"hypothesis_id":"schema_core","category":"schema","claim":"Check whether roles can be inferred.","rationale":"Required.","expected_eda_checks":["schema_inferer.detect_target"],"priority":"P0","confidence_before_eda":"medium"},
+    {"hypothesis_id":"metric_core","category":"metric","claim":"EDA should verify the metric.","rationale":"Required.","expected_eda_checks":["metric_analyzer.resolve_metric"],"priority":"P0","confidence_before_eda":"medium"},
+    {"hypothesis_id":"val_core","category":"validation","claim":"EDA should verify validation.","rationale":"Required.","expected_eda_checks":["validation_analyzer.select_primary_validation"],"priority":"P0","confidence_before_eda":"medium"},
+    {"hypothesis_id":"leak_core","category":"leakage","claim":"Check whether overlap exists.","rationale":"Required.","expected_eda_checks":["leakage_checker.train_test_id_overlap"],"priority":"P0","confidence_before_eda":"medium"}
+  ],"eda_tasks":[],"structured_findings":[],"scout_limitations":[],"models_used":{}
+}

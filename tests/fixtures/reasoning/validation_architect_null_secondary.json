@@ -1,0 +1,18 @@
+{
+  "confidence": "medium",
+  "evidence_ids": ["source-001"],
+  "recommended_cv": "StratifiedKFold with fixed folds",
+  "validation_risk": "medium",
+  "likely_split": "iid stratified split",
+  "failure_modes": null,
+  "reasoning": "The available source supports stratification but no distinct secondary design.",
+  "primary_validation": {
+    "method": "stratified_kfold",
+    "n_splits": 5,
+    "shuffle": true
+  },
+  "secondary_validation": null,
+  "do_not_use": null,
+  "policy_enforced": false,
+  "policy_notes": null
+}

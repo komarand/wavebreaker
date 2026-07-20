@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "competition_id": "grouped_binary_tiny",
+  "created_at": "2026-07-07T00:00:00+03:00",
+  "hypotheses": [
+    {"hypothesis_id": "schema_001", "category": "schema", "claim": "Generic grouped binary train/test tables expose row_id, customer_id, and target.", "rationale": "Fixture has multiple rows per customer.", "expected_eda_checks": ["schema_inferer.roles"], "priority": "P0", "confidence_before_eda": "medium"},
+    {"hypothesis_id": "metric_001", "category": "metric", "claim": "Logloss requires probability outputs.", "rationale": "The task plan declares logloss.", "expected_eda_checks": ["metric_analyzer.registry"], "priority": "P0", "confidence_before_eda": "medium"},
+    {"hypothesis_id": "val_001", "category": "validation", "claim": "Repeated customer entities should use group-aware validation.", "rationale": "Rows share customer_id.", "expected_eda_checks": ["validation_analyzer.policy"], "priority": "P0", "confidence_before_eda": "medium"},
+    {"hypothesis_id": "leak_001", "category": "leakage", "claim": "Group overlap is a leakage risk warning rather than confirmed target leakage.", "rationale": "Some customer IDs appear in both train and test.", "expected_eda_checks": ["leakage_checker.group_overlap"], "priority": "P0", "confidence_before_eda": "medium"},
+    {"hypothesis_id": "group_001", "category": "validation", "claim": "customer_id should be kept intact across validation folds.", "rationale": "customer_id is an entity/group column.", "expected_eda_checks": ["validation_analyzer.group_policy"], "priority": "P0", "confidence_before_eda": "medium"}
+  ],
+  "eda_tasks": [],
+  "structured_findings": [],
+  "scout_limitations": [],
+  "models_used": {}
+}
