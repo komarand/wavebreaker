@@ -43,6 +43,9 @@ def test_recorded_failure_was_schema_not_json_parsing() -> None:
     assert diagnostic["initial"]["issue_counts"]["literal_error"] == 28
     assert diagnostic["repair"]["preserved_incompatible_fields"] is True
     assert diagnostic["fallback_reason"].startswith("Deterministic repair failed")
+    assert diagnostic["initial"]["missing_canonical_evidence_refs"] == 28
+    assert diagnostic["initial"]["extra_field_counts"]["actions[].support_refs"] == 28
+    assert sum(diagnostic["initial"]["invalid_origin_counts"].values()) == 28
 
 
 def test_recorded_draft_fields_and_unicode_origin_compile_to_canonical_contract() -> None:

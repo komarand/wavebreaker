@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
+import os
 import re
 from copy import deepcopy
 from pathlib import Path
@@ -73,6 +74,7 @@ from kaggle_researcher.reasoning.deterministic_strategy import (
     compile_competition_strategy,
 )
 from kaggle_researcher.reasoning.strategy_compaction import compact_final_strategy
+from kaggle_researcher.reasoning.final_strategy_two_call import run_two_call_final_synthesis
 from kaggle_researcher.reasoning.model_registry import supported_models
 from kaggle_researcher.contracts.final_strategy_evidence import (
     build_action_evidence_bindings,
@@ -121,9 +123,11 @@ async def synthesize_final_strategy(
     model: str,
     diagnostics_dir: Path | None = None,
 ) -> FinalStrategyResult:
+    two_call = os.getenv("FINAL_SYNTHESIS_PROTOCOL", "two_call").strip().casefold() == "two_call"
     diagnostics = FinalSynthesisDiagnostics(
         competition_id=context.eda_evidence_pack.competition_id,
-        attempts=[SynthesisAttemptDiagnostic(
+        protocol="two_call" if two_call else "monolithic_legacy",
+        attempts=[] if two_call else [SynthesisAttemptDiagnostic(
             attempt="initial_llm",
             model=model,
         )],
@@ -137,6 +141,8 @@ async def synthesize_final_strategy(
             diagnostics_dir=diagnostics_dir,
             synthesis_diagnostics=diagnostics,
         )
+        if diagnostics.protocol == "two_call":
+            return result
         _refresh_diagnostics_summary(diagnostics)
         return _assign_final_synthesis_status(
             result,
@@ -205,6 +211,58 @@ async def _synthesize_final_strategy_impl(
             "Final strategy failed during reference_catalog_build.",
             phase="reference_catalog_build",
         ) from exc
+    if os.getenv("FINAL_SYNTHESIS_PROTOCOL", "two_call").strip().casefold() == "two_call":
+        def fallback_builder(reason: str) -> FinalStrategyResult:
+            fallback = build_fallback_final_strategy(
+                competition_id=eda_evidence_pack.competition_id,
+                research_hypotheses=research_hypotheses.model_dump(mode="json").get("hypotheses", []),
+                eda_evidence_pack=eda_evidence_pack.model_dump(mode="json"),
+                eda_summary=eda_summary_text,
+                task_type=plan_data.task_type,
+                metric_name=plan_data.metric,
+            )
+            limitations = list(fallback.get("limitations") or [])
+            explanation = f"Deterministic fallback selection was required: {_bounded_message(reason)}"
+            if explanation not in limitations:
+                limitations.append(explanation)
+            fallback["limitations"] = limitations
+            fallback["models_used"] = {
+                **dict(fallback.get("models_used") or {}),
+                "final_synthesizer": model,
+            }
+            grounded, _, _ = _ground_and_compile_strategy_payload(
+                fallback,
+                eda_evidence_pack=eda_evidence_pack,
+                research_hypotheses=research_hypotheses,
+                reference_catalog=reference_catalog,
+                diagnostics_dir=diagnostics_dir,
+            )
+            result = FinalStrategyResult.model_validate(grounded)
+            _apply_eda_grounding(result, eda_evidence_pack, research_hypotheses)
+            result = postprocess_final_strategy_result(
+                result,
+                eda_evidence_pack=eda_evidence_pack.model_dump(mode="json"),
+                source_evidence=[
+                    _retrieved_document_payload(document)
+                    for document in retrieved_documents
+                ],
+            )
+            return compact_final_strategy(
+                result,
+                evidence_pack=eda_evidence_pack.model_dump(mode="json"),
+                source_ids=[str(document.id) for document in retrieved_documents],
+            )
+
+        return await run_two_call_final_synthesis(
+            context=context,
+            registries=registries,
+            client=client,
+            selection_model=os.getenv("FINAL_SYNTHESIS_SELECTION_MODEL", model),
+            rendering_model=os.getenv("FINAL_SYNTHESIS_RENDERING_MODEL", model),
+            diagnostics=synthesis_diagnostics,
+            diagnostics_dir=diagnostics_dir,
+            fallback_builder=fallback_builder,
+        )
     try:
         raw = await client.chat_json(
             model=model,
@@ -1892,6 +1950,18 @@ def write_final_synthesis_diagnostics(
         attempt["warnings"] = sorted({
             _bounded_message(str(warning)) for warning in attempt["warnings"]
         })
+    for group_name in ("selection_attempts", "rendering_attempts"):
+        for attempt in payload.get(group_name) or []:
+            for issue in attempt.get("issues") or []:
+                issue["message"] = _bounded_message(
+                    str(issue.get("message") or "")
+                )
+            attempt["warnings"] = sorted({
+                _bounded_message(str(warning))
+                for warning in attempt.get("warnings") or []
+            })
+    for failure in payload.get("provider_failures") or []:
+        failure["message"] = _bounded_message(str(failure.get("message") or ""))
     _write_diagnostic_json(
         diagnostics_dir, "final_synthesis_diagnostics.json", payload
     )
@@ -1949,6 +2019,12 @@ def _record_reference_issues(
 def _refresh_diagnostics_summary(
     diagnostics: FinalSynthesisDiagnostics,
 ) -> None:
+    if diagnostics.protocol == "two_call":
+        diagnostics.initial_output_valid = diagnostics.selection_status == "llm_success"
+        diagnostics.repair_attempted = diagnostics.selection_status == "repaired_success"
+        diagnostics.repair_succeeded = diagnostics.selection_status == "repaired_success"
+        diagnostics.fallback_required = diagnostics.selection_status == "degraded_fallback"
+        return
     initial = _attempt_diagnostic(diagnostics, "initial_llm")
     diagnostics.initial_output_valid = bool(
         initial.output_received

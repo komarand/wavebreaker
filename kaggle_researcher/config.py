@@ -42,6 +42,9 @@ class Settings:
     source_cache_allow_stale_offline: bool = True
     source_content_dir: str = "./data/source_content"
     source_artifact_dir: str = "./data/source_artifacts"
+    final_synthesis_protocol: str = "two_call"
+    final_synthesis_selection_model: str = "deepseek-v4-pro"
+    final_synthesis_rendering_model: str = "deepseek-v4-pro"
 
     def source_search_ttls(self) -> dict[str, timedelta]:
         return {
@@ -85,6 +88,15 @@ def load_config() -> Settings:
         source_cache_allow_stale_offline=_get_bool_env("SOURCE_CACHE_ALLOW_STALE_OFFLINE", True),
         source_content_dir=os.getenv("SOURCE_CONTENT_DIR", "./data/source_content"),
         source_artifact_dir=os.getenv("SOURCE_ARTIFACT_DIR", "./data/source_artifacts"),
+        final_synthesis_protocol=_get_choice_env(
+            "FINAL_SYNTHESIS_PROTOCOL", "two_call", {"two_call", "monolithic_legacy"}
+        ),
+        final_synthesis_selection_model=os.getenv(
+            "FINAL_SYNTHESIS_SELECTION_MODEL", "deepseek-v4-pro"
+        ),
+        final_synthesis_rendering_model=os.getenv(
+            "FINAL_SYNTHESIS_RENDERING_MODEL", "deepseek-v4-pro"
+        ),
     )
 
 

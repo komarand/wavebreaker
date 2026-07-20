@@ -39,6 +39,13 @@ from kaggle_researcher.schemas import PlanData, RetrievedDocument
 from tests.fixtures.final_synthesis import synthesize_for_test as synthesize_final_strategy
 
 
+@pytest.fixture(autouse=True)
+def _exercise_legacy_monolithic_compatibility(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module is the retained v1 protocol compatibility suite."""
+
+    monkeypatch.setenv("FINAL_SYNTHESIS_PROTOCOL", "monolithic_legacy")
+
+
 class FakeFinalSynthesizerClient:
     def __init__(self, response: dict[str, Any]) -> None:
         self.response = response

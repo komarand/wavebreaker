@@ -39,6 +39,12 @@ SynthesisStatus = Literal[
     "repaired_success",
     "degraded_fallback",
 ]
+SelectionStatus = Literal[
+    "llm_success", "repaired_success", "degraded_fallback", "failed",
+]
+RenderingStatus = Literal[
+    "llm_success", "repaired_success", "deterministic_render", "failed",
+]
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 EvidenceRef = EvidenceId
 EvidenceBindingRole = Literal["primary", "supporting", "limitation"]
@@ -435,11 +441,17 @@ class FinalStrategyResult(ContractModel):
     schema_version: Literal["1.0", "2.0"] = "2.0"
     competition_id: NonEmptyString
     synthesis_status: SynthesisStatus
+    selection_status: SelectionStatus | None = None
+    rendering_status: RenderingStatus | None = None
     llm_output_valid: bool
     repair_attempted: bool
     repair_succeeded: bool
     fallback_used: bool
     synthesis_diagnostics_path: str | None
+    skeleton_id: str | None = None
+    skeleton_hash: str | None = None
+    selection_prompt_fingerprint: dict[str, Any] = Field(default_factory=dict)
+    rendering_prompt_fingerprint: dict[str, Any] = Field(default_factory=dict)
     task_type: NonEmptyString | None = None
     metric: dict[str, Any] = Field(default_factory=dict)
     recommended_validation: FinalValidationMethod | None = None
@@ -451,12 +463,14 @@ class FinalStrategyResult(ContractModel):
     core_experiments: list[FinalStrategyExperiment] = Field(default_factory=list)
     experiment_backlog: list[FinalStrategyExperiment] = Field(default_factory=list)
     experiment_budget: ExperimentBudget = Field(default_factory=ExperimentBudget)
+    dependency_graph: dict[str, list[str]] = Field(default_factory=dict)
     quality_metrics: FinalStrategyQualityMetrics = Field(default_factory=FinalStrategyQualityMetrics)
     diagnostics_summary: dict[str, Any] = Field(default_factory=dict)
     source_to_hypothesis_links: list[SourceToHypothesisLink] = Field(default_factory=list)
     hypothesis_to_eda_links: list[HypothesisToEdaLink] = Field(default_factory=list)
     action_provenance: list[ActionProvenance] = Field(default_factory=list)
     limitations: list[NonEmptyString] = Field(default_factory=list)
+    warnings: list[NonEmptyString] = Field(default_factory=list)
     models_used: dict[str, Any] = Field(default_factory=dict)
     reference_repairs: list[dict[str, str]] = Field(default_factory=list)
     acknowledged_risk_ids: list[RiskId] = Field(default_factory=list)
@@ -485,6 +499,19 @@ class FinalStrategyResult(ContractModel):
 
     @model_validator(mode="after")
     def _validate_synthesis_status(self) -> "FinalStrategyResult":
+        if self.selection_status is None:
+            object.__setattr__(self, "selection_status", self.synthesis_status)
+        if self.rendering_status is None:
+            object.__setattr__(self, "rendering_status", "deterministic_render")
+        if self.selection_status != self.synthesis_status:
+            if self.skeleton_id is None:
+                # Legacy artifacts predate the separate stage status. Their
+                # compatibility alias is derived on read and cannot diverge.
+                object.__setattr__(self, "selection_status", self.synthesis_status)
+            else:
+                raise ValueError(
+                    "synthesis_status must describe and match strategic selection status"
+                )
         expected = {
             "llm_success": {
                 "llm_output_valid": True,

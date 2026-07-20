@@ -25,6 +25,13 @@ from kaggle_researcher.schemas import ResearchRunResult
 from kaggle_researcher.workflow import FinalSynthesisDegradedError
 
 
+@pytest.fixture(autouse=True)
+def _exercise_legacy_workflow_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The historical workflow fake returns a monolithic v1 strategy payload."""
+
+    monkeypatch.setenv("FINAL_SYNTHESIS_PROTOCOL", "monolithic_legacy")
+
+
 @dataclass(slots=True)
 class FakeSettings:
     deepseek_api_key: str = "secret"

@@ -15,6 +15,21 @@
       "sections[].evidence_summary_refs",
       "actions[].support_refs"
     ],
+    "invalid_origin_counts": {
+      "Fallback‑generated": 14,
+      "EDA‑confirmed": 9,
+      "Safety‑warning": 4,
+      "EDA‑inferred": 1
+    },
+    "missing_field_paths": "sections[0..7].summary",
+    "extra_field_counts": {
+      "actions[].support_refs": 28,
+      "sections[].narrative": 8,
+      "sections[].evidence_summary_refs": 8,
+      "executive_summary": 1,
+      "warnings": 1
+    },
+    "missing_canonical_evidence_refs": 28,
     "unicode_literal": "EDA‑confirmed"
   },
   "repair": {
