@@ -13,9 +13,7 @@ from kaggle_researcher.contracts.final_strategy_draft import (
     FinalStrategyDraftReferenceError,
     compile_final_strategy_draft,
 )
-from kaggle_researcher.contracts.reference_catalog import (
-    build_final_strategy_reference_catalog,
-)
+from tests.contracts.factories import build_final_strategy_reference_catalog
 from kaggle_researcher.eda.schemas import (
     EdaEvidencePack,
     ResearchHypotheses,

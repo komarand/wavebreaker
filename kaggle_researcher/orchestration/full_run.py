@@ -18,7 +18,7 @@ from kaggle_researcher.contracts.artifacts import (
     FinalStageResult,
     ReasoningStageResult,
     ResearchStageResult,
-    load_eda_evidence_pack,
+    load_eda_publication_bundle,
     load_experiment_plan,
     load_final_strategy,
     load_skeptical_review,
@@ -57,7 +57,10 @@ from kaggle_researcher.contracts.research_hypotheses import (
     load_research_hypotheses,
     write_research_hypotheses_atomic,
 )
-from kaggle_researcher.contracts.synthesis_context import build_final_synthesis_context
+from kaggle_researcher.contracts.synthesis_context import (
+    adapt_legacy_eda_evidence_pack,
+    build_final_synthesis_context,
+)
 from kaggle_researcher.eda.orchestrator import run_eda
 from kaggle_researcher.eda.schemas import EdaRunConfig
 from kaggle_researcher.orchestration.state import (
@@ -493,6 +496,16 @@ async def _run_eda_stage(state: FullRunState) -> None:
     target.mkdir(parents=True, exist_ok=True)
     shutil.copy2(result.evidence_pack_path, target / "eda_evidence_pack.json")
     shutil.copy2(result.summary_path, target / "eda_summary.md")
+    if result.evidence_manifest_path is not None:
+        shutil.copy2(
+            result.evidence_manifest_path,
+            target / "evidence_reference_manifest.json",
+        )
+    if result.published_bundle_path is not None:
+        shutil.copy2(
+            result.published_bundle_path,
+            target / "published_eda_evidence_bundle.json",
+        )
     for filename in ("plots_manifest.json", "module_statuses.json"):
         candidate = result.output_dir / filename
         if candidate.is_file():
@@ -607,7 +620,10 @@ async def _synthesize_strategy(state: FullRunState) -> None:
     context = build_final_synthesis_context(
         competition_desc=state.config.competition_description,
         research=research,
-        eda=eda,
+        published_eda_bundle=(
+            eda.published_bundle
+            or adapt_legacy_eda_evidence_pack(eda.evidence_pack)
+        ),
         reasoning=reasoning,
         registries=registries,
         eda_summary_text=eda.summary_path.read_text(encoding="utf-8"),
@@ -678,10 +694,23 @@ def _load_research_stage_result(run_dir: Path) -> ResearchStageResult:
 def _load_eda_stage_result(run_dir: Path) -> EdaStageResult:
     target = run_dir / "eda"
     evidence_path = target / "eda_evidence_pack.json"
+    manifest_path = target / "evidence_reference_manifest.json"
+    bundle_path = target / "published_eda_evidence_bundle.json"
+    published_bundle, migration_warnings = load_eda_publication_bundle(target)
+    if migration_warnings:
+        write_json_atomic(
+            target / "eda_publication_migration_warnings.json",
+            {"warnings": list(migration_warnings)},
+        )
     return EdaStageResult(
-        load_eda_evidence_pack(evidence_path),
+        published_bundle.evidence_pack,
         evidence_path,
         target / "eda_summary.md",
+        published_bundle.evidence_manifest,
+        manifest_path if manifest_path.is_file() else None,
+        published_bundle,
+        bundle_path if bundle_path.is_file() else None,
+        migration_warnings,
     )
 
 
@@ -798,6 +827,9 @@ def _manifest_output_path(
 def _expected_output_names(stage_id: str) -> set[str]:
     return {
         "research_scout": {"research_hypotheses", "eda_task_plan", "plan", "retrieved_documents"},
+        # Legacy completed runs may predate bundle publication. New runs still
+        # record the manifest and bundle pointers below, while resume keeps the
+        # compatibility floor until artifact migration is introduced.
         "eda_engine": {"evidence_pack", "summary"},
         "reasoning_context": {"validation", "metric", "leakage", "leaderboard"},
         "experiment_planner": {"experiment_plan"},
@@ -817,6 +849,14 @@ def _stage_output_pointers(stage_id: str, run_dir: Path) -> dict[str, ArtifactPo
         },
         "eda_engine": {
             "evidence_pack": ("eda/eda_evidence_pack.json", "eda_evidence_pack"),
+            "evidence_manifest": (
+                "eda/evidence_reference_manifest.json",
+                "evidence_reference_manifest",
+            ),
+            "published_bundle": (
+                "eda/published_eda_evidence_bundle.json",
+                "published_eda_evidence_bundle",
+            ),
             "summary": ("eda/eda_summary.md", None),
         },
         "reasoning_context": {

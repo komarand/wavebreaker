@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from kaggle_researcher.contracts.errors import ContractError
 from kaggle_researcher.contracts.final_strategy import FinalStrategyResult
 from kaggle_researcher.contracts.final_strategy_protocol import (
     StrategyRenderingDraft,
@@ -19,6 +20,11 @@ from kaggle_researcher.contracts.final_synthesis_diagnostics import (
     RenderingAttemptDiagnostic,
     SelectionAttemptDiagnostic,
 )
+from kaggle_researcher.contracts.ingest import (
+    MigrationPolicy,
+    RepairPolicy,
+    ingest_contract,
+)
 from kaggle_researcher.contracts.registries import ContractRegistries
 from kaggle_researcher.contracts.synthesis_context import FinalSynthesisContext
 from kaggle_researcher.reasoning.final_strategy_bridge import (
@@ -26,6 +32,7 @@ from kaggle_researcher.reasoning.final_strategy_bridge import (
     freeze_fallback_result,
     freeze_strategy_selection,
     skeleton_to_result,
+    validate_skeleton_integrity,
     validate_rendering_draft,
 )
 from kaggle_researcher.reasoning.final_strategy_context import (
@@ -68,7 +75,9 @@ async def run_two_call_final_synthesis(
     draft: StrategySelectionDraft | None = None
     skeleton = None
     selection_failure = ""
-    max_repairs = _env_nonnegative_int("FINAL_SYNTHESIS_SELECTION_REPAIR_ATTEMPTS", 1)
+    max_repairs = _env_bounded_repair_count(
+        "FINAL_SYNTHESIS_SELECTION_REPAIR_ATTEMPTS", 1
+    )
     for attempt_index in range(max_repairs + 1):
         attempt_name = "initial" if attempt_index == 0 else "repair"
         attempt = SelectionAttemptDiagnostic(
@@ -91,7 +100,11 @@ async def run_two_call_final_synthesis(
             )
             attempt.response_hash = _hash(selection_raw)
             attempt.parse_succeeded = True
-            draft = StrategySelectionDraft.model_validate(selection_raw)
+            draft = _ingest_llm_contract(
+                selection_raw,
+                expected_family="strategy_selection_draft",
+            )
+            assert isinstance(draft, StrategySelectionDraft)
             attempt.schema_succeeded = True
             selection_status = "llm_success" if attempt_index == 0 else "repaired_success"
             skeleton, bridge_payload = freeze_strategy_selection(
@@ -132,6 +145,7 @@ async def run_two_call_final_synthesis(
         diagnostics.repair_attempted = selection_status == "repaired_success"
         diagnostics.repair_succeeded = selection_status == "repaired_success"
 
+    validate_skeleton_integrity(skeleton)
     rendering_system, rendering_user, rendering_fp = build_rendering_prompt(
         skeleton,
         max_chars=_env_positive_int("FINAL_SYNTHESIS_RENDERING_MAX_CHARS", 50000),
@@ -140,9 +154,14 @@ async def run_two_call_final_synthesis(
     rendering: StrategyRenderingDraft | None = None
     rendering_status = "deterministic_render"
     rendering_warnings: list[str] = []
-    max_render_repairs = _env_nonnegative_int("FINAL_SYNTHESIS_RENDERING_REPAIR_ATTEMPTS", 1)
+    max_render_repairs = _env_bounded_repair_count(
+        "FINAL_SYNTHESIS_RENDERING_REPAIR_ATTEMPTS", 1
+    )
     rendering_raw: dict[str, Any] | None = None
-    for attempt_index in range(max_render_repairs + 1):
+    rendering_enabled = skeleton.synthesis_selection_status in {
+        "llm_success", "repaired_success"
+    }
+    for attempt_index in range(max_render_repairs + 1 if rendering_enabled else 0):
         attempt_name = "initial" if attempt_index == 0 else "repair"
         attempt = RenderingAttemptDiagnostic(
             attempt=attempt_name,
@@ -166,7 +185,12 @@ async def run_two_call_final_synthesis(
             )
             attempt.response_hash = _hash(rendering_raw)
             attempt.parse_succeeded = True
-            candidate = StrategyRenderingDraft.model_validate(rendering_raw)
+            candidate = _ingest_llm_contract(
+                rendering_raw,
+                expected_family="strategy_rendering_draft",
+            )
+            assert isinstance(candidate, StrategyRenderingDraft)
+            validate_skeleton_integrity(skeleton)
             validate_rendering_draft(candidate, skeleton)
             attempt.integrity_validation_succeeded = True
             rendering = candidate
@@ -183,11 +207,14 @@ async def run_two_call_final_synthesis(
             break
 
     if rendering is None:
-        if not _env_bool("FINAL_SYNTHESIS_ALLOW_DETERMINISTIC_RENDER", True):
-            rendering_status = "failed"
-        rendering_warnings.append(
-            "Call 2 did not pass frozen-skeleton integrity validation; deterministic wording was retained."
-        )
+        if rendering_enabled:
+            rendering_warnings.append(
+                "Call 2 did not pass frozen-skeleton integrity validation; deterministic wording was retained."
+            )
+        else:
+            rendering_warnings.append(
+                "Call 2 was skipped because Call 1 required deterministic fallback rendering."
+            )
     diagnostics.rendering_status = rendering_status
     diagnostics.fallback_required = skeleton.synthesis_selection_status == "degraded_fallback"
     result = skeleton_to_result(
@@ -213,6 +240,11 @@ async def run_two_call_final_synthesis(
 
 
 def _issues(exc: Exception) -> list[dict[str, Any]]:
+    if isinstance(exc, ContractError):
+        return [issue.as_dict() for issue in exc.issues] or [{
+            "type": type(exc).__name__,
+            "message": str(exc)[:500],
+        }]
     if isinstance(exc, ValidationError):
         return [
             {
@@ -247,11 +279,31 @@ def _env_nonnegative_int(name: str, default: int) -> int:
     return value
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().casefold() in {"1", "true", "yes", "on"}
+def _env_bounded_repair_count(name: str, default: int) -> int:
+    value = _env_nonnegative_int(name, default)
+    if value > 1:
+        raise ValueError(f"{name} must be 0 or 1 for the bounded repair protocol")
+    return value
+
+
+def _ingest_llm_contract(
+    raw: Any,
+    *,
+    expected_family: str,
+) -> StrategySelectionDraft | StrategyRenderingDraft:
+    result = ingest_contract(
+        raw,
+        expected_family=expected_family,
+        source_kind="llm_generated",
+        migration_policy=MigrationPolicy.REQUIRE_CURRENT,
+        repair_policy=RepairPolicy.FORBID,
+    )
+    contract = result.contract
+    if not isinstance(contract, (StrategySelectionDraft, StrategyRenderingDraft)):
+        raise TwoCallProtocolError(
+            f"Ingest dispatched {type(contract).__name__}, expected {expected_family}"
+        )
+    return contract
 
 
 __all__ = ["TwoCallProtocolError", "run_two_call_final_synthesis"]

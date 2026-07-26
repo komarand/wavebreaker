@@ -13,6 +13,11 @@ from kaggle_researcher.contracts.eda_task_plan import load_eda_task_plan
 from kaggle_researcher.contracts.research_to_eda import (
     require_valid_research_to_eda_contract,
 )
+from kaggle_researcher.contracts.errors import EvidenceManifestConflictError
+from kaggle_researcher.contracts.evidence_manifest import (
+    EvidenceConflictPolicy,
+    publish_eda_evidence_bundle,
+)
 from kaggle_researcher.eda.boundary import (
     DEPRECATED_OUTPUTS,
     MODULE_CLASSIFICATION,
@@ -529,7 +534,37 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
             "module_status_details": module_status_details,
         },
     )
+    try:
+        published_bundle = publish_eda_evidence_bundle(
+            evidence_pack,
+            conflict_policy=config.evidence_conflict_policy,
+        )
+    except EvidenceManifestConflictError as exc:
+        writer.write_json("evidence_reference_manifest.json", exc.manifest)
+        writer.write_json("evidence_manifest_conflicts.json", {
+            "error": exc.as_manifest_error(),
+            "conflicts": [item.model_dump(mode="json") for item in exc.conflicts],
+        })
+        raise
+    evidence_pack = published_bundle.evidence_pack
+    if config.evidence_conflict_policy == EvidenceConflictPolicy.DEGRADED and any(
+        conflict.severity == "error"
+        for conflict in published_bundle.evidence_manifest.conflicts
+    ):
+        module_statuses["evidence_publication"] = "degraded"
+        module_status_details["evidence_publication"] = {
+            "module": "evidence_publication",
+            "status": "degraded",
+            "error_message": None,
+        }
+        writer.write_module_statuses(module_status_details)
     evidence_pack_path = writer.write_json("eda_evidence_pack.json", evidence_pack)
+    evidence_manifest_path = writer.write_json(
+        "evidence_reference_manifest.json", published_bundle.evidence_manifest
+    )
+    published_bundle_path = writer.write_json(
+        "published_eda_evidence_bundle.json", published_bundle
+    )
     summary_path = writer.write_markdown(
         "eda_summary.md",
         build_eda_summary(evidence_pack),
@@ -540,11 +575,13 @@ async def run_eda(config: EdaRunConfig) -> EdaRunResult:
         run_id=run_dir.name,
         output_dir=run_dir,
         evidence_pack_path=evidence_pack_path,
+        evidence_manifest_path=evidence_manifest_path,
+        published_bundle_path=published_bundle_path,
         summary_path=summary_path,
         module_statuses=module_statuses,
         hypothesis_results_count=len(hypothesis_results),
-        warnings=warnings,
-        limitations=limitations,
+        warnings=published_bundle.warnings,
+        limitations=published_bundle.limitations,
         duration_sec=round(time.perf_counter() - started, 6),
     )
 

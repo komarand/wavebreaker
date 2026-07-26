@@ -1,0 +1,203 @@
+{
+  "$defs": {
+    "ActionWording": {
+      "additionalProperties": false,
+      "properties": {
+        "action_id": {
+          "title": "Action Id",
+          "type": "string"
+        },
+        "display_action": {
+          "title": "Display Action",
+          "type": "string"
+        },
+        "display_reason": {
+          "title": "Display Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action_id",
+        "display_action",
+        "display_reason"
+      ],
+      "title": "ActionWording",
+      "type": "object"
+    },
+    "ExperimentWording": {
+      "additionalProperties": false,
+      "properties": {
+        "display_acceptance_rule": {
+          "title": "Display Acceptance Rule",
+          "type": "string"
+        },
+        "display_exact_change": {
+          "title": "Display Exact Change",
+          "type": "string"
+        },
+        "display_hypothesis": {
+          "title": "Display Hypothesis",
+          "type": "string"
+        },
+        "display_name": {
+          "title": "Display Name",
+          "type": "string"
+        },
+        "display_risk": {
+          "title": "Display Risk",
+          "type": "string"
+        },
+        "experiment_id": {
+          "title": "Experiment Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "experiment_id",
+        "display_name",
+        "display_hypothesis",
+        "display_exact_change",
+        "display_acceptance_rule",
+        "display_risk"
+      ],
+      "title": "ExperimentWording",
+      "type": "object"
+    },
+    "FamilyWording": {
+      "additionalProperties": false,
+      "properties": {
+        "display_acceptance_rule": {
+          "title": "Display Acceptance Rule",
+          "type": "string"
+        },
+        "display_hypothesis": {
+          "title": "Display Hypothesis",
+          "type": "string"
+        },
+        "display_name": {
+          "title": "Display Name",
+          "type": "string"
+        },
+        "display_risks": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Display Risks",
+          "type": "array"
+        },
+        "family_id": {
+          "title": "Family Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "family_id",
+        "display_name",
+        "display_hypothesis",
+        "display_acceptance_rule",
+        "display_risks"
+      ],
+      "title": "FamilyWording",
+      "type": "object"
+    },
+    "SectionSummaryWording": {
+      "additionalProperties": false,
+      "properties": {
+        "section_id": {
+          "title": "Section Id",
+          "type": "string"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "section_id",
+        "summary"
+      ],
+      "title": "SectionSummaryWording",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "action_wording": {
+      "items": {
+        "$ref": "#/$defs/ActionWording"
+      },
+      "title": "Action Wording",
+      "type": "array"
+    },
+    "contract_family": {
+      "const": "strategy_rendering_draft",
+      "default": "strategy_rendering_draft",
+      "title": "Contract Family",
+      "type": "string"
+    },
+    "executive_summary": {
+      "title": "Executive Summary",
+      "type": "string"
+    },
+    "experiment_wording": {
+      "items": {
+        "$ref": "#/$defs/ExperimentWording"
+      },
+      "title": "Experiment Wording",
+      "type": "array"
+    },
+    "family_wording": {
+      "items": {
+        "$ref": "#/$defs/FamilyWording"
+      },
+      "title": "Family Wording",
+      "type": "array"
+    },
+    "limitation_wording": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Limitation Wording",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "2.0",
+      "default": "2.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "section_summaries": {
+      "items": {
+        "$ref": "#/$defs/SectionSummaryWording"
+      },
+      "title": "Section Summaries",
+      "type": "array"
+    },
+    "skeleton_hash": {
+      "title": "Skeleton Hash",
+      "type": "string"
+    },
+    "skeleton_id": {
+      "title": "Skeleton Id",
+      "type": "string"
+    },
+    "uncertainty_summary": {
+      "title": "Uncertainty Summary",
+      "type": "string"
+    }
+  },
+  "required": [
+    "action_wording",
+    "contract_family",
+    "executive_summary",
+    "experiment_wording",
+    "family_wording",
+    "schema_version",
+    "section_summaries",
+    "skeleton_hash",
+    "skeleton_id",
+    "uncertainty_summary"
+  ],
+  "title": "StrategyRenderingDraft",
+  "type": "object"
+}

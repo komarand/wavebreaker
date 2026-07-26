@@ -20,6 +20,7 @@ from kaggle_researcher.contracts.research_hypotheses import (
     ResearchHypotheses,
 )
 from kaggle_researcher.contracts.eda_task_plan import EdaTask, EdaTaskPlan
+from kaggle_researcher.contracts.evidence_manifest import EvidenceConflictPolicy
 
 
 Confidence = Literal["low", "medium", "high"]
@@ -126,6 +127,7 @@ class EdaRunConfig(BaseModel):
 
     random_seed: int = 42
     fail_fast: bool = False
+    evidence_conflict_policy: EvidenceConflictPolicy = EvidenceConflictPolicy.STRICT
 
 
 class EdaRunResult(BaseModel):
@@ -134,6 +136,8 @@ class EdaRunResult(BaseModel):
     output_dir: Path
 
     evidence_pack_path: Path
+    evidence_manifest_path: Path | None = None
+    published_bundle_path: Path | None = None
     summary_path: Path
 
     module_statuses: dict[str, str] = Field(default_factory=dict)

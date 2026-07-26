@@ -18,7 +18,10 @@ from kaggle_researcher.contracts.errors import (
     ContractIssue,
     UnknownReferenceError,
 )
-from kaggle_researcher.contracts.evidence import EvidenceRegistry, build_evidence_registry
+from kaggle_researcher.contracts.evidence import (
+    EvidenceRegistry,
+    build_evidence_registry_from_manifest,
+)
 from kaggle_researcher.contracts.experiments import ExperimentItem, ExperimentPlan
 from kaggle_researcher.contracts.ids import (
     EdaTaskId,
@@ -208,23 +211,6 @@ class ContractRegistries:
     validation_requirements: ValidationRequirementRegistry
     safety_constraints: SafetyConstraintRegistry
 
-    def namespace_for(self, value: str) -> str | None:
-        namespaces = {
-            "hypothesis": self.hypotheses.by_id,
-            "experiment": self.experiments.by_id,
-            "risk": self.risks.by_id,
-            "validation_requirement": self.validation_requirements.by_id,
-            "safety_constraint": self.safety_constraints.by_id,
-            "evidence": (
-                set(self.evidence.ids("eda_evidence"))
-                | set(self.evidence.ids("reasoning_evidence"))
-                | set(self.evidence.ids("source_claim"))
-                | set(self.evidence.ids("synthetic_inference"))
-            ),
-        }
-        return classify_namespace(value, **namespaces)
-
-
 def build_contract_registries(
     *,
     research: Any,
@@ -244,7 +230,14 @@ def build_contract_registries(
     review = reasoning.review if reasoning else None
     source_ids = [document.id for document in research.retrieved_documents]
     hypothesis_ids = [item.hypothesis_id for item in hypotheses.hypotheses]
-    evidence = build_evidence_registry(
+    evidence_manifest = getattr(eda, "evidence_manifest", None)
+    if evidence_manifest is None:
+        raise ValueError(
+            "Canonical registry construction requires the published EDA evidence manifest; "
+            "adapt legacy EDA artifacts at the ingest boundary first."
+        )
+    evidence = build_evidence_registry_from_manifest(
+        evidence_manifest,
         evidence_pack,
         source_ids=source_ids,
         hypothesis_ids=hypothesis_ids,

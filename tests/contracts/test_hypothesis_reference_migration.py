@@ -5,9 +5,7 @@ from kaggle_researcher.contracts.hypothesis_reference_migration import (
     migrate_final_strategy_hypothesis_references,
     migrate_hypothesis_references,
 )
-from kaggle_researcher.contracts.reference_catalog import (
-    build_final_strategy_reference_catalog,
-)
+from tests.contracts.factories import build_final_strategy_reference_catalog
 
 
 CURRENT_FAILURE_IDS = (

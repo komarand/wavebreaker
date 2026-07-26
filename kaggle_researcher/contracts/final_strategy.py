@@ -19,6 +19,7 @@ from kaggle_researcher.contracts.ids import (
     ValidationRequirementId,
 )
 from kaggle_researcher.contracts.normalization import normalize_contract_payload
+from kaggle_researcher.contracts.registries import classify_namespace
 
 if TYPE_CHECKING:
     from kaggle_researcher.contracts.registries import ContractRegistries
@@ -847,7 +848,14 @@ def migrate_legacy_final_strategy_payload(
             }
             for reference in action.get("evidence_refs") or []:
                 try:
-                    namespace = registries.namespace_for(str(reference))
+                    namespace = classify_namespace(
+                        str(reference),
+                        hypothesis=registries.hypotheses.by_id,
+                        experiment=registries.experiments.by_id,
+                        risk=registries.risks.by_id,
+                        validation_requirement=registries.validation_requirements.by_id,
+                        safety_constraint=registries.safety_constraints.by_id,
+                    )
                 except AmbiguousReferenceError as exc:
                     raise AmbiguousReferenceError(
                         f"Legacy Final Strategy reference {reference!r} is ambiguous"
@@ -902,6 +910,77 @@ def upgrade_final_strategy_v1_to_v2(
     ).model_dump(mode="json")
 
 
+def migrate_legacy_evidence_bindings_payload(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Lift legacy action previews into the canonical top-level evidence catalog."""
+    migrated = deepcopy(dict(payload))
+    catalog = deepcopy(dict(migrated.get("evidence_catalog") or {}))
+    migrated_any = False
+    action_groups: list[list[Any]] = [list(migrated.get("actions") or [])]
+    for section in migrated.get("sections") or []:
+        if isinstance(section, Mapping):
+            action_groups.append(list(section.get("actions") or []))
+    for actions in action_groups:
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            bindings = action.pop("evidence_bindings", None)
+            if not isinstance(bindings, list):
+                continue
+            migrated_any = migrated_any or bool(bindings)
+            for binding in bindings:
+                if not isinstance(binding, Mapping):
+                    continue
+                ref = str(binding.get("ref") or "").strip()
+                if not ref or ref in catalog:
+                    continue
+                preview = deepcopy(binding.get("resolved_value_preview"))
+                catalog[ref] = {
+                    "ref": ref,
+                    "resolved_value_preview": preview,
+                    "value_type": _legacy_preview_value_type(preview),
+                    "source_component": ref.split(".", 1)[0].split("[", 1)[0],
+                    "specificity": "leaf" if "." in ref or "[" in ref else "root",
+                    "available": True,
+                    "warnings": ["Migrated from legacy action-level evidence_bindings."],
+                }
+    migrated["evidence_catalog"] = catalog
+    if migrated_any:
+        warnings = list(migrated.get("warnings") or [])
+        message = (
+            "Legacy action-level evidence_bindings were migrated in memory to the "
+            "canonical evidence_catalog."
+        )
+        if message not in warnings:
+            warnings.append(message)
+        migrated["warnings"] = warnings
+    return migrated
+
+
+def normalize_legacy_final_strategy_payload(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    upgraded = upgrade_legacy_final_strategy_synthesis_status(payload)
+    return migrate_legacy_evidence_bindings_payload(upgraded)
+
+
+def _legacy_preview_value_type(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return "string"
+
+
 __all__ = [
     "ActionProvenance", "Confidence", "EvidenceBinding", "EvidenceBindingRole",
     "EvidenceCatalogEntry", "EvidenceOrigin", "EvidenceRef", "ExperimentArm",
@@ -917,6 +996,8 @@ __all__ = [
     "SectionAvailability",
     "TEMPORAL_VALIDATION_METHODS",
     "migrate_legacy_final_strategy_payload",
+    "migrate_legacy_evidence_bindings_payload",
+    "normalize_legacy_final_strategy_payload",
     "upgrade_final_strategy_v1_to_v2",
     "upgrade_legacy_final_strategy_synthesis_status",
 ]

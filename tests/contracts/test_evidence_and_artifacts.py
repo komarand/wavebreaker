@@ -15,6 +15,7 @@ from kaggle_researcher.contracts.pipeline import (
     validate_full_run_artifacts,
     validate_final_strategy_references,
 )
+from kaggle_researcher.contracts.evidence_manifest import build_evidence_reference_manifest
 from kaggle_researcher.contracts.research_hypotheses import ResearchHypotheses
 from kaggle_researcher.eda.schemas import EdaEvidencePack
 from kaggle_researcher.reasoning.final_synthesizer import FinalStrategyResult
@@ -78,8 +79,10 @@ def test_typed_evidence_registry_resolves_exact_nested_paths() -> None:
 
 
 def test_final_strategy_references_are_checked_by_namespace() -> None:
+    pack = _pack()
     validate_final_strategy_references(
-        _strategy(), _pack(), hypothesis_ids={"val_001"}, source_ids=set()
+        _strategy(), pack, hypothesis_ids={"val_001"}, source_ids=set(),
+        evidence_manifest=build_evidence_reference_manifest(pack),
     )
 
     bad = _strategy().model_copy(deep=True)
@@ -87,13 +90,15 @@ def test_final_strategy_references_are_checked_by_namespace() -> None:
     bad.actions[0].related_hypothesis_ids = ["unknown-hypothesis"]
     with pytest.raises(ArtifactContractValidationError) as raised:
         validate_final_strategy_references(
-            bad, _pack(), hypothesis_ids={"val_001"}, source_ids=set()
+            bad, pack, hypothesis_ids={"val_001"}, source_ids=set(),
+            evidence_manifest=build_evidence_reference_manifest(pack),
         )
     assert set(raised.value.invalid_ids) == {"unknown.measurement", "unknown-hypothesis"}
     assert raised.value.suggested_rerun_stage == "final_strategy"
 
 
 def test_final_strategy_eda_result_refs_reject_global_source_ids() -> None:
+    pack = _pack()
     bad = _strategy().model_copy(deep=True)
     bad.actions[0].evidence_refs = ["source-001"]
     bad.actions[0].eda_result_refs = ["source-001"]
@@ -101,9 +106,10 @@ def test_final_strategy_eda_result_refs_reject_global_source_ids() -> None:
     with pytest.raises(ArtifactContractValidationError) as raised:
         validate_final_strategy_references(
             bad,
-            _pack(),
+            pack,
             hypothesis_ids={"val_001"},
             source_ids={"source-001"},
+            evidence_manifest=build_evidence_reference_manifest(pack),
         )
 
     assert raised.value.invalid_ids == ("source-001",)

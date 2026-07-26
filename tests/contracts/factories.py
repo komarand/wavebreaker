@@ -4,6 +4,10 @@ from copy import deepcopy
 from typing import Any
 
 from kaggle_researcher.contracts.eda import EdaTaskPlan
+from kaggle_researcher.contracts.evidence_manifest import build_evidence_reference_manifest
+from kaggle_researcher.contracts.reference_catalog import (
+    build_final_strategy_reference_catalog as _build_final_strategy_reference_catalog,
+)
 from kaggle_researcher.contracts.research import ResearchHypotheses
 
 
@@ -139,6 +143,14 @@ def payload_copy(value: dict[str, Any]) -> dict[str, Any]:
     return deepcopy(value)
 
 
+def build_final_strategy_reference_catalog(evidence_pack: Any, **kwargs: Any):
+    """Test helper that explicitly publishes the immutable manifest snapshot."""
+    kwargs.setdefault(
+        "evidence_manifest", build_evidence_reference_manifest(evidence_pack)
+    )
+    return _build_final_strategy_reference_catalog(evidence_pack, **kwargs)
+
+
 def _task(
     task_id: str, module: str, hypothesis_id: str, *, blocking: bool = False
 ) -> dict[str, Any]:
@@ -152,4 +164,3 @@ def _task(
         "expected_outputs": [],
         "params": {},
     }
-

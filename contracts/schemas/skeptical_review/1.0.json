@@ -1,0 +1,90 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "approved_experiment_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Approved Experiment Ids",
+      "type": "array"
+    },
+    "confidence": {
+      "default": "medium",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "Confidence",
+      "type": "string"
+    },
+    "contract_family": {
+      "const": "skeptical_review",
+      "default": "skeptical_review",
+      "title": "Contract Family",
+      "type": "string"
+    },
+    "evidence_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Evidence Ids",
+      "type": "array"
+    },
+    "rejected_experiment_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Rejected Experiment Ids",
+      "type": "array"
+    },
+    "reviewed_experiment_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Reviewed Experiment Ids",
+      "type": "array"
+    },
+    "revised_sections": {
+      "title": "Revised Sections",
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "too_generic": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Too Generic",
+      "type": "array"
+    },
+    "unnecessary_experiments": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Unnecessary Experiments",
+      "type": "array"
+    },
+    "unsupported_claims": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Unsupported Claims",
+      "type": "array"
+    }
+  },
+  "required": [
+    "contract_family",
+    "schema_version"
+  ],
+  "title": "SkepticalReview",
+  "type": "object"
+}

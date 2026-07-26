@@ -34,9 +34,11 @@ class FinalStrategySelectionContext(ContractModel):
     hypothesis_catalog: list[dict[str, Any]]
     source_catalog: list[dict[str, Any]]
     evidence_catalog: list[dict[str, Any]]
+    evidence_manifest_metadata: dict[str, Any] = Field(default_factory=dict)
     model_catalog: list[dict[str, Any]]
     safety_constraint_catalog: list[dict[str, Any]]
     validation_requirement_catalog: list[dict[str, Any]]
+    approved_experiment_catalog: list[dict[str, Any]] = Field(default_factory=list)
     required_section_ids: list[str]
     strategy_limits: dict[str, int]
     unavailable_capabilities: list[str] = Field(default_factory=list)
@@ -99,14 +101,17 @@ def build_final_strategy_selection_context(
     required_evidence = _required_evidence_refs(eda)
     evidence = []
     for ref in sorted(map(str, context.allowed_eda_result_refs)):
+        entry = context.lookup_evidence_ref(ref)
+        if entry is None or entry.canonical_path is None:
+            continue
         try:
-            value = resolve_evidence_ref(eda, ref)
+            value = resolve_evidence_ref(eda, entry.canonical_path)
         except EvidencePathResolutionError:
             continue
         evidence.append({
             "evidence_ref": ref,
             "value_preview": _bounded_value(value),
-            "value_type": type(value).__name__,
+            "value_type": entry.value_type or type(value).__name__,
             "specificity": _specificity(ref, value),
             "semantic_tags": _semantic_tags(ref),
             "required": ref in required_evidence,
@@ -135,6 +140,25 @@ def build_final_strategy_selection_context(
         item.model_dump(mode="json")
         for _, item in sorted(registries.validation_requirements.by_id.items(), key=lambda pair: str(pair[0]))
     ]
+    approved_experiments = [
+        {
+            "experiment_id": str(identifier),
+            "experiment": str(registries.experiments.by_id[identifier].experiment)[:500],
+            "why": str(registries.experiments.by_id[identifier].why)[:500],
+            "cost": str(registries.experiments.by_id[identifier].cost),
+            "source_hypothesis_ids": [
+                str(value)
+                for value in registries.experiments.experiment_to_hypotheses.get(
+                    identifier, ()
+                )
+            ],
+            "evidence_ids": [
+                str(value)
+                for value in registries.experiments.by_id[identifier].evidence_ids[:8]
+            ],
+        }
+        for identifier in sorted(registries.experiments.approved_ids, key=str)[:100]
+    ]
     payload: dict[str, Any] = {
         "competition_id": context.eda_evidence_pack.competition_id,
         "task_type": context.plan_data.task_type,
@@ -149,9 +173,13 @@ def build_final_strategy_selection_context(
         "hypothesis_catalog": hypotheses,
         "source_catalog": sources,
         "evidence_catalog": evidence,
+        "evidence_manifest_metadata": context.reference_prompt_payload()[
+            "evidence_manifest_metadata"
+        ],
         "model_catalog": models,
         "safety_constraint_catalog": safety,
         "validation_requirement_catalog": requirements,
+        "approved_experiment_catalog": approved_experiments,
         "required_section_ids": list(REQUIRED_SECTION_IDS),
         "strategy_limits": {
             "max_actions": _env_int("FINAL_SYNTHESIS_MAX_ACTIONS", 15),
@@ -173,7 +201,12 @@ def build_final_strategy_selection_context(
 
 
 def _fit_catalogs(payload: dict[str, Any], budget: int, required_evidence: set[str]) -> None:
-    omitted = {"hypothesis_catalog": 0, "source_catalog": 0, "evidence_catalog": 0}
+    omitted = {
+        "hypothesis_catalog": 0,
+        "source_catalog": 0,
+        "evidence_catalog": 0,
+        "approved_experiment_catalog": 0,
+    }
     while len(_stable_json(payload)) > budget:
         evidence = payload["evidence_catalog"]
         removable_index = next(
@@ -193,6 +226,10 @@ def _fit_catalogs(payload: dict[str, Any], budget: int, required_evidence: set[s
         if payload["source_catalog"]:
             payload["source_catalog"].pop()
             omitted["source_catalog"] += 1
+            continue
+        if payload["approved_experiment_catalog"]:
+            payload["approved_experiment_catalog"].pop()
+            omitted["approved_experiment_catalog"] += 1
             continue
         break
     payload["omitted_catalog_counts"] = omitted

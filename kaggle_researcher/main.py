@@ -50,6 +50,7 @@ from kaggle_researcher.contracts.artifacts import (
     EdaStageResult,
     ReasoningStageResult,
     ResearchStageResult,
+    load_eda_publication_bundle,
     load_experiment_plan,
     load_skeptical_review,
     write_json_atomic,
@@ -924,10 +925,16 @@ async def run_research(
                 tuple(retrieved_documents),
                 tuple(_load_domain_patterns(run_dir)),
             )
+            published_eda_bundle, publication_warnings = load_eda_publication_bundle(
+                eda_evidence_pack_path.parent
+            )
             eda_stage = EdaStageResult(
-                eda_pack_for_final,
+                published_eda_bundle.evidence_pack,
                 eda_evidence_pack_path,
                 eda_summary_path or eda_evidence_pack_path.with_suffix(".md"),
+                evidence_manifest=published_eda_bundle.evidence_manifest,
+                published_bundle=published_eda_bundle,
+                publication_migration_warnings=publication_warnings,
             )
             reasoning_stage = _load_reasoning_stage_for_synthesis(
                 run_dir, eda_pack_for_final
@@ -938,7 +945,7 @@ async def run_research(
             synthesis_context = build_final_synthesis_context(
                 competition_desc=competition_desc,
                 research=research_stage,
-                eda=eda_stage,
+                published_eda_bundle=published_eda_bundle,
                 reasoning=reasoning_stage,
                 registries=registries,
                 eda_summary_text=_load_optional_text(eda_summary_path),

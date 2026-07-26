@@ -140,6 +140,10 @@ def run(argv: list[str] | None = None) -> int:
     )
     result = asyncio.run(run_eda(config))
     print(f"EDA evidence pack: {result.evidence_pack_path}")
+    if result.evidence_manifest_path is not None:
+        print(f"Evidence reference manifest: {result.evidence_manifest_path}")
+    if result.published_bundle_path is not None:
+        print(f"Published EDA evidence bundle: {result.published_bundle_path}")
     print(f"EDA summary: {result.summary_path}")
     return 0
 

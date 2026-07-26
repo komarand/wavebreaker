@@ -1,0 +1,2186 @@
+{
+  "$defs": {
+    "EdaEvidencePack": {
+      "additionalProperties": false,
+      "properties": {
+        "ablation_purpose": {
+          "default": "broad_feature_block_diagnostics",
+          "title": "Ablation Purpose",
+          "type": "string"
+        },
+        "artifacts": {
+          "title": "Artifacts",
+          "type": "object"
+        },
+        "baseline_ablation_evidence": {
+          "title": "Baseline Ablation Evidence",
+          "type": "object"
+        },
+        "baseline_evidence": {
+          "title": "Baseline Evidence",
+          "type": "object"
+        },
+        "baseline_purpose": {
+          "default": "diagnostic_sanity_floor",
+          "title": "Baseline Purpose",
+          "type": "string"
+        },
+        "competition_id": {
+          "title": "Competition Id",
+          "type": "string"
+        },
+        "contract_family": {
+          "const": "eda_evidence_pack",
+          "default": "eda_evidence_pack",
+          "enum": [
+            "eda_evidence_pack"
+          ],
+          "title": "Contract Family",
+          "type": "string"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "string"
+        },
+        "dataset": {
+          "title": "Dataset",
+          "type": "object"
+        },
+        "deprecated_outputs": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "title": "Deprecated Outputs",
+          "type": "object"
+        },
+        "drift_evidence": {
+          "title": "Drift Evidence",
+          "type": "object"
+        },
+        "eda_implications": {
+          "items": {
+            "type": "object"
+          },
+          "title": "Eda Implications",
+          "type": "array"
+        },
+        "eda_risk_register": {
+          "deprecated": true,
+          "items": {
+            "$ref": "#/$defs/EdaRisk"
+          },
+          "title": "Eda Risk Register",
+          "type": "array"
+        },
+        "eda_risks": {
+          "items": {
+            "$ref": "#/$defs/EdaRisk"
+          },
+          "title": "Eda Risks",
+          "type": "array"
+        },
+        "eda_strategy_hints": {
+          "additionalProperties": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "deprecated": true,
+          "title": "Eda Strategy Hints",
+          "type": "object"
+        },
+        "eligible_for_global_risk_synthesis": {
+          "default": true,
+          "title": "Eligible For Global Risk Synthesis",
+          "type": "boolean"
+        },
+        "evidence_origins": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Evidence Origins",
+          "type": "object"
+        },
+        "experiment_candidates": {
+          "deprecated": true,
+          "items": {
+            "type": "object"
+          },
+          "title": "Experiment Candidates",
+          "type": "array"
+        },
+        "feature_diagnostics": {
+          "title": "Feature Diagnostics",
+          "type": "object"
+        },
+        "feature_probe_evidence": {
+          "items": {
+            "type": "object"
+          },
+          "title": "Feature Probe Evidence",
+          "type": "array"
+        },
+        "file_inventory": {
+          "title": "File Inventory",
+          "type": "object"
+        },
+        "hypothesis_results": {
+          "items": {
+            "$ref": "#/$defs/HypothesisResult"
+          },
+          "title": "Hypothesis Results",
+          "type": "array"
+        },
+        "inferred_schema": {
+          "title": "Inferred Schema",
+          "type": "object"
+        },
+        "interaction_diagnostics": {
+          "title": "Interaction Diagnostics",
+          "type": "object"
+        },
+        "leakage_evidence": {
+          "items": {
+            "type": "object"
+          },
+          "title": "Leakage Evidence",
+          "type": "array"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "metric_evidence": {
+          "title": "Metric Evidence",
+          "type": "object"
+        },
+        "module_classification": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Module Classification",
+          "type": "object"
+        },
+        "notebook_static_analysis": {
+          "title": "Notebook Static Analysis",
+          "type": "object"
+        },
+        "owner": {
+          "default": "eda_engine",
+          "title": "Owner",
+          "type": "string"
+        },
+        "recommended_next_actions": {
+          "items": {
+            "$ref": "#/$defs/RecommendedNextAction"
+          },
+          "title": "Recommended Next Actions",
+          "type": "array"
+        },
+        "relationship_evidence": {
+          "title": "Relationship Evidence",
+          "type": "object"
+        },
+        "risk_scope": {
+          "default": "eda_local",
+          "title": "Risk Scope",
+          "type": "string"
+        },
+        "risk_summary": {
+          "title": "Risk Summary",
+          "type": "object"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "safety_constraints": {
+          "items": {
+            "$ref": "#/$defs/SafetyConstraint"
+          },
+          "title": "Safety Constraints",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "enum": [
+            "1.0"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "slice_diagnostics": {
+          "title": "Slice Diagnostics",
+          "type": "object"
+        },
+        "source_claim_validation": {
+          "title": "Source Claim Validation",
+          "type": "object"
+        },
+        "stage_status": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Stage Status",
+          "type": "object"
+        },
+        "strategy_hints": {
+          "items": {
+            "type": "object"
+          },
+          "title": "Strategy Hints",
+          "type": "array"
+        },
+        "table_profiles": {
+          "items": {
+            "type": "object"
+          },
+          "title": "Table Profiles",
+          "type": "array"
+        },
+        "target_diagnostics": {
+          "title": "Target Diagnostics",
+          "type": "object"
+        },
+        "testable_hypotheses": {
+          "items": {
+            "$ref": "#/$defs/EdaTestableHypothesis"
+          },
+          "title": "Testable Hypotheses",
+          "type": "array"
+        },
+        "validation_evidence": {
+          "title": "Validation Evidence",
+          "type": "object"
+        },
+        "validation_requirements": {
+          "items": {
+            "$ref": "#/$defs/ValidationRequirement"
+          },
+          "title": "Validation Requirements",
+          "type": "array"
+        },
+        "visual_diagnostics": {
+          "title": "Visual Diagnostics",
+          "type": "object"
+        },
+        "visual_diagnostics_role": {
+          "default": "evidence_rendering",
+          "title": "Visual Diagnostics Role",
+          "type": "string"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "competition_id",
+        "created_at",
+        "run_id"
+      ],
+      "title": "EdaEvidencePack",
+      "type": "object"
+    },
+    "EdaRisk": {
+      "additionalProperties": false,
+      "properties": {
+        "applies_to": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Applies To",
+          "type": "array"
+        },
+        "confidence": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "finding": {
+          "title": "Finding",
+          "type": "string"
+        },
+        "impact": {
+          "title": "Impact",
+          "type": "string"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "mitigation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mitigation"
+        },
+        "related_actions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Related Actions",
+          "type": "array"
+        },
+        "risk_id": {
+          "minLength": 1,
+          "title": "Risk Id",
+          "type": "string"
+        },
+        "risk_intent": {
+          "default": "",
+          "title": "Risk Intent",
+          "type": "string"
+        },
+        "risk_type": {
+          "enum": [
+            "schema",
+            "metric",
+            "validation",
+            "leakage",
+            "drift",
+            "missingness",
+            "high_cardinality",
+            "target",
+            "baseline",
+            "relationship",
+            "data_quality",
+            "submission",
+            "feature_engineering",
+            "leaderboard",
+            "notebook_source",
+            "unsupported"
+          ],
+          "title": "Risk Type",
+          "type": "string"
+        },
+        "severity": {
+          "enum": [
+            "info",
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "confirmed",
+            "suspected",
+            "mitigated_by_policy",
+            "not_testable",
+            "skipped",
+            "resolved",
+            "informational"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "risk_id",
+        "risk_type",
+        "severity",
+        "status",
+        "confidence",
+        "title",
+        "finding",
+        "impact"
+      ],
+      "title": "EdaRisk",
+      "type": "object"
+    },
+    "EdaTestableHypothesis": {
+      "additionalProperties": false,
+      "properties": {
+        "baseline_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Baseline Ref"
+        },
+        "evidence_origin": {
+          "default": "reasoning_inference",
+          "title": "Evidence Origin",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "expected_evidence": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Expected Evidence",
+          "type": "array"
+        },
+        "hypothesis_id": {
+          "minLength": 1,
+          "title": "Hypothesis Id",
+          "type": "string"
+        },
+        "priority_signal": {
+          "enum": [
+            "important",
+            "optional"
+          ],
+          "title": "Priority Signal",
+          "type": "string"
+        },
+        "reliability": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Reliability",
+          "type": "string"
+        },
+        "required_controls": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Controls",
+          "type": "array"
+        },
+        "scope": {
+          "title": "Scope",
+          "type": "string"
+        },
+        "statement": {
+          "title": "Statement",
+          "type": "string"
+        },
+        "status": {
+          "const": "untested",
+          "default": "untested",
+          "enum": [
+            "untested"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "trigger_finding": {
+          "title": "Trigger Finding",
+          "type": "string"
+        },
+        "why_unresolved": {
+          "title": "Why Unresolved",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hypothesis_id",
+        "scope",
+        "statement",
+        "trigger_finding",
+        "why_unresolved",
+        "priority_signal",
+        "reliability"
+      ],
+      "title": "EdaTestableHypothesis",
+      "type": "object"
+    },
+    "EvidenceReferenceConflict": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Canonical Paths",
+          "type": "array"
+        },
+        "conflict_type": {
+          "enum": [
+            "duplicate_identity",
+            "cross_namespace_collision",
+            "semantic_alias_collision",
+            "exact_duplicate_registration",
+            "deprecated_alias"
+          ],
+          "title": "Conflict Type",
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "namespaces": {
+          "items": {
+            "enum": [
+              "eda_evidence",
+              "reasoning_evidence",
+              "source_claim",
+              "hypothesis",
+              "synthetic_inference",
+              "risk",
+              "validation_requirement",
+              "safety_constraint"
+            ],
+            "type": "string"
+          },
+          "title": "Namespaces",
+          "type": "array"
+        },
+        "ref": {
+          "minLength": 1,
+          "title": "Ref",
+          "type": "string"
+        },
+        "severity": {
+          "enum": [
+            "warning",
+            "error"
+          ],
+          "title": "Severity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref",
+        "namespaces",
+        "canonical_paths",
+        "conflict_type",
+        "severity",
+        "message"
+      ],
+      "title": "EvidenceReferenceConflict",
+      "type": "object"
+    },
+    "EvidenceReferenceEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "available": {
+          "default": true,
+          "title": "Available",
+          "type": "boolean"
+        },
+        "canonical_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Canonical Path"
+        },
+        "metadata": {
+          "title": "Metadata",
+          "type": "object"
+        },
+        "namespace": {
+          "enum": [
+            "eda_evidence",
+            "reasoning_evidence",
+            "source_claim",
+            "hypothesis",
+            "synthetic_inference",
+            "risk",
+            "validation_requirement",
+            "safety_constraint"
+          ],
+          "title": "Namespace",
+          "type": "string"
+        },
+        "ref": {
+          "minLength": 1,
+          "title": "Ref",
+          "type": "string"
+        },
+        "reference_kind": {
+          "enum": [
+            "direct_path",
+            "semantic_ref",
+            "contract_ref"
+          ],
+          "title": "Reference Kind",
+          "type": "string"
+        },
+        "semantic_identity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Identity"
+        },
+        "source_component": {
+          "minLength": 1,
+          "title": "Source Component",
+          "type": "string"
+        },
+        "value_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value Type"
+        }
+      },
+      "required": [
+        "ref",
+        "namespace",
+        "reference_kind",
+        "source_component"
+      ],
+      "title": "EvidenceReferenceEntry",
+      "type": "object"
+    },
+    "EvidenceReferenceManifest": {
+      "additionalProperties": false,
+      "properties": {
+        "conflicts": {
+          "items": {
+            "$ref": "#/$defs/EvidenceReferenceConflict"
+          },
+          "title": "Conflicts",
+          "type": "array"
+        },
+        "contract_family": {
+          "const": "evidence_reference_manifest",
+          "default": "evidence_reference_manifest",
+          "enum": [
+            "evidence_reference_manifest"
+          ],
+          "title": "Contract Family",
+          "type": "string"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/EvidenceReferenceEntry"
+          },
+          "title": "Entries",
+          "type": "array"
+        },
+        "generated_at_stage": {
+          "const": "eda_publication_boundary",
+          "default": "eda_publication_boundary",
+          "enum": [
+            "eda_publication_boundary"
+          ],
+          "title": "Generated At Stage",
+          "type": "string"
+        },
+        "hash_policy_version": {
+          "default": "1.0",
+          "title": "Hash Policy Version",
+          "type": "string"
+        },
+        "manifest_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Manifest Hash",
+          "type": "string"
+        },
+        "manifest_version": {
+          "default": "1.0",
+          "title": "Manifest Version",
+          "type": "string"
+        },
+        "origin": {
+          "default": "eda_publication",
+          "enum": [
+            "eda_publication",
+            "legacy_migration"
+          ],
+          "title": "Origin",
+          "type": "string"
+        },
+        "pack_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Pack Hash",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "enum": [
+            "1.0"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pack_hash",
+        "manifest_hash"
+      ],
+      "title": "EvidenceReferenceManifest",
+      "type": "object"
+    },
+    "ExperimentItem": {
+      "additionalProperties": false,
+      "properties": {
+        "cost": {
+          "title": "Cost",
+          "type": "string"
+        },
+        "dependencies": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Dependencies",
+          "type": "array"
+        },
+        "evidence_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "expected_gain": {
+          "title": "Expected Gain",
+          "type": "string"
+        },
+        "experiment": {
+          "minLength": 1,
+          "title": "Experiment",
+          "type": "string"
+        },
+        "experiment_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Experiment Id"
+        },
+        "priority": {
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ],
+          "title": "Priority",
+          "type": "string"
+        },
+        "risk": {
+          "title": "Risk",
+          "type": "string"
+        },
+        "source_hypothesis_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Source Hypothesis Ids",
+          "type": "array"
+        },
+        "why": {
+          "title": "Why",
+          "type": "string"
+        }
+      },
+      "required": [
+        "priority",
+        "experiment",
+        "why",
+        "cost",
+        "expected_gain",
+        "risk"
+      ],
+      "title": "ExperimentItem",
+      "type": "object"
+    },
+    "ExperimentPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "contract_family": {
+          "const": "experiment_plan",
+          "default": "experiment_plan",
+          "enum": [
+            "experiment_plan"
+          ],
+          "title": "Contract Family",
+          "type": "string"
+        },
+        "experiments": {
+          "items": {
+            "$ref": "#/$defs/ExperimentItem"
+          },
+          "title": "Experiments",
+          "type": "array"
+        },
+        "schema_version": {
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "title": "ExperimentPlan",
+      "type": "object"
+    },
+    "HypothesisResult": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "title": "Category",
+          "type": "string"
+        },
+        "confidence_after_eda": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence After Eda",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "finding": {
+          "title": "Finding",
+          "type": "string"
+        },
+        "hypothesis_id": {
+          "minLength": 1,
+          "title": "Hypothesis Id",
+          "type": "string"
+        },
+        "impact_on_strategy": {
+          "title": "Impact On Strategy",
+          "type": "string"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "confirmed",
+            "partially_confirmed",
+            "rejected",
+            "not_testable",
+            "skipped"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hypothesis_id",
+        "category",
+        "status",
+        "confidence_after_eda",
+        "finding",
+        "impact_on_strategy"
+      ],
+      "title": "HypothesisResult",
+      "type": "object"
+    },
+    "LeaderboardAuditResult": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "contract_family": {
+          "const": "leaderboard_audit_result",
+          "default": "leaderboard_audit_result",
+          "enum": [
+            "leaderboard_audit_result"
+          ],
+          "title": "Contract Family",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "public_lb_trust": {
+          "title": "Public Lb Trust",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "enum": [
+            "1.0"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "shake_up_risk": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Shake Up Risk",
+          "type": "string"
+        },
+        "submission_selection_rule": {
+          "title": "Submission Selection Rule",
+          "type": "string"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "confidence",
+        "shake_up_risk",
+        "submission_selection_rule",
+        "public_lb_trust"
+      ],
+      "title": "LeaderboardAuditResult",
+      "type": "object"
+    },
+    "LeakageRiskResult": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "contract_family": {
+          "const": "leakage_risk_result",
+          "default": "leakage_risk_result",
+          "enum": [
+            "leakage_risk_result"
+          ],
+          "title": "Contract Family",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "possible_issues": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Possible Issues",
+          "type": "array"
+        },
+        "recommended_checks": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Recommended Checks",
+          "type": "array"
+        },
+        "risk_level": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Risk Level",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "enum": [
+            "1.0"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "confidence",
+        "risk_level"
+      ],
+      "title": "LeakageRiskResult",
+      "type": "object"
+    },
+    "MetricResult": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "contract_family": {
+          "const": "metric_result",
+          "default": "metric_result",
+          "enum": [
+            "metric_result"
+          ],
+          "title": "Contract Family",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "metric_explanation": {
+          "title": "Metric Explanation",
+          "type": "string"
+        },
+        "needs_calibration": {
+          "title": "Needs Calibration",
+          "type": "boolean"
+        },
+        "rank_averaging_useful": {
+          "title": "Rank Averaging Useful",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "enum": [
+            "1.0"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "surrogate_loss_suggestion": {
+          "title": "Surrogate Loss Suggestion",
+          "type": "string"
+        },
+        "threshold_search_needed": {
+          "title": "Threshold Search Needed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "confidence",
+        "metric_explanation",
+        "needs_calibration",
+        "rank_averaging_useful",
+        "threshold_search_needed",
+        "surrogate_loss_suggestion"
+      ],
+      "title": "MetricResult",
+      "type": "object"
+    },
+    "PlanData": {
+      "properties": {
+        "arxiv_queries": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Arxiv Queries",
+          "type": "array"
+        },
+        "domain": {
+          "title": "Domain",
+          "type": "string"
+        },
+        "github_queries": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Github Queries",
+          "type": "array"
+        },
+        "kaggle_queries": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Kaggle Queries",
+          "type": "array"
+        },
+        "key_techniques": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Key Techniques",
+          "type": "array"
+        },
+        "metric": {
+          "title": "Metric",
+          "type": "string"
+        },
+        "similar_competitions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Similar Competitions",
+          "type": "array"
+        },
+        "task_type": {
+          "title": "Task Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_type",
+        "metric",
+        "domain"
+      ],
+      "title": "PlanData",
+      "type": "object"
+    },
+    "PublishedEdaEvidenceBundle": {
+      "additionalProperties": false,
+      "properties": {
+        "bundle_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Bundle Hash",
+          "type": "string"
+        },
+        "contract_family": {
+          "const": "published_eda_evidence_bundle",
+          "default": "published_eda_evidence_bundle",
+          "enum": [
+            "published_eda_evidence_bundle"
+          ],
+          "title": "Contract Family",
+          "type": "string"
+        },
+        "evidence_manifest": {
+          "$ref": "#/$defs/EvidenceReferenceManifest"
+        },
+        "evidence_pack": {
+          "$ref": "#/$defs/EdaEvidencePack"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "manifest_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Manifest Hash",
+          "type": "string"
+        },
+        "pack_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Pack Hash",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "enum": [
+            "1.0"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "evidence_pack",
+        "evidence_manifest",
+        "pack_hash",
+        "manifest_hash",
+        "bundle_hash"
+      ],
+      "title": "PublishedEdaEvidenceBundle",
+      "type": "object"
+    },
+    "RecommendedNextAction": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "title": "Action",
+          "type": "string"
+        },
+        "applies_to": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Applies To",
+          "type": "array"
+        },
+        "evidence_refs": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "priority": {
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ],
+          "title": "Priority",
+          "type": "string"
+        },
+        "risk": {
+          "anyOf": [
+            {
+              "enum": [
+                "low",
+                "medium",
+                "high"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Risk"
+        },
+        "source_categories": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Categories",
+          "type": "array"
+        },
+        "why": {
+          "title": "Why",
+          "type": "string"
+        }
+      },
+      "required": [
+        "priority",
+        "action",
+        "why"
+      ],
+      "title": "RecommendedNextAction",
+      "type": "object"
+    },
+    "ResearchHypotheses": {
+      "additionalProperties": false,
+      "properties": {
+        "competition_id": {
+          "minLength": 1,
+          "title": "Competition Id",
+          "type": "string"
+        },
+        "contract_family": {
+          "const": "research_hypotheses",
+          "default": "research_hypotheses",
+          "enum": [
+            "research_hypotheses"
+          ],
+          "title": "Contract Family",
+          "type": "string"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        },
+        "eda_tasks": {
+          "items": {
+            "type": "object"
+          },
+          "title": "Eda Tasks",
+          "type": "array"
+        },
+        "hypotheses": {
+          "items": {
+            "$ref": "#/$defs/ResearchHypothesis"
+          },
+          "title": "Hypotheses",
+          "type": "array"
+        },
+        "models_used": {
+          "title": "Models Used",
+          "type": "object"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "enum": [
+            "1.0"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "scout_limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Scout Limitations",
+          "type": "array"
+        },
+        "structured_findings": {
+          "items": {
+            "type": "object"
+          },
+          "title": "Structured Findings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "competition_id"
+      ],
+      "title": "ResearchHypotheses",
+      "type": "object"
+    },
+    "ResearchHypothesis": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "enum": [
+            "schema",
+            "metric",
+            "validation",
+            "leakage",
+            "relationship",
+            "drift",
+            "baseline",
+            "feature",
+            "notebook",
+            "leaderboard",
+            "data_quality"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "claim": {
+          "minLength": 1,
+          "title": "Claim",
+          "type": "string"
+        },
+        "confidence_before_eda": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence Before Eda",
+          "type": "string"
+        },
+        "expected_eda_checks": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Expected Eda Checks",
+          "type": "array"
+        },
+        "hypothesis_id": {
+          "minLength": 1,
+          "title": "Hypothesis Id",
+          "type": "string"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "priority": {
+          "default": "P1",
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ],
+          "title": "Priority",
+          "type": "string"
+        },
+        "rationale": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rationale"
+        },
+        "source_refs": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "status": {
+          "default": "needs_eda",
+          "enum": [
+            "needs_eda",
+            "supported_by_source",
+            "analogous_only",
+            "not_testable"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hypothesis_id",
+        "category",
+        "claim",
+        "confidence_before_eda"
+      ],
+      "title": "ResearchHypothesis",
+      "type": "object"
+    },
+    "RetrievedDocument": {
+      "properties": {
+        "competition_id": {
+          "title": "Competition Id",
+          "type": "string"
+        },
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "metadata": {
+          "title": "Metadata",
+          "type": "object"
+        },
+        "rrf_score": {
+          "title": "Rrf Score",
+          "type": "number"
+        },
+        "score": {
+          "title": "Score",
+          "type": "number"
+        },
+        "source": {
+          "enum": [
+            "kaggle",
+            "arxiv",
+            "papers_with_code",
+            "papers_with_code_legacy",
+            "huggingface_papers",
+            "github"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "format": "uri",
+              "maxLength": 2083,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        }
+      },
+      "required": [
+        "id",
+        "competition_id",
+        "source",
+        "title",
+        "content",
+        "score",
+        "rrf_score"
+      ],
+      "title": "RetrievedDocument",
+      "type": "object"
+    },
+    "SafetyConstraint": {
+      "additionalProperties": false,
+      "properties": {
+        "blocking": {
+          "default": true,
+          "title": "Blocking",
+          "type": "boolean"
+        },
+        "evidence_origin": {
+          "default": "dataset_measurement",
+          "title": "Evidence Origin",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "rule": {
+          "title": "Rule",
+          "type": "string"
+        },
+        "safety_constraint_id": {
+          "minLength": 1,
+          "title": "Safety Constraint Id",
+          "type": "string"
+        },
+        "scope": {
+          "title": "Scope",
+          "type": "string"
+        },
+        "severity": {
+          "default": "mandatory",
+          "enum": [
+            "advisory",
+            "mandatory",
+            "blocking"
+          ],
+          "title": "Severity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "safety_constraint_id",
+        "scope",
+        "rule",
+        "reason"
+      ],
+      "title": "SafetyConstraint",
+      "type": "object"
+    },
+    "SkepticalReview": {
+      "additionalProperties": false,
+      "properties": {
+        "approved_experiment_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Approved Experiment Ids",
+          "type": "array"
+        },
+        "confidence": {
+          "default": "medium",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "contract_family": {
+          "const": "skeptical_review",
+          "default": "skeptical_review",
+          "enum": [
+            "skeptical_review"
+          ],
+          "title": "Contract Family",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "rejected_experiment_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Rejected Experiment Ids",
+          "type": "array"
+        },
+        "reviewed_experiment_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Reviewed Experiment Ids",
+          "type": "array"
+        },
+        "revised_sections": {
+          "title": "Revised Sections",
+          "type": "object"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "enum": [
+            "1.0"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "too_generic": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Too Generic",
+          "type": "array"
+        },
+        "unnecessary_experiments": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unnecessary Experiments",
+          "type": "array"
+        },
+        "unsupported_claims": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unsupported Claims",
+          "type": "array"
+        }
+      },
+      "title": "SkepticalReview",
+      "type": "object"
+    },
+    "ValidationPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "group_column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Column"
+        },
+        "method": {
+          "minLength": 1,
+          "title": "Method",
+          "type": "string"
+        },
+        "n_splits": {
+          "anyOf": [
+            {
+              "minimum": 2,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "N Splits"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "shuffle": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Shuffle"
+        },
+        "split_column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Split Column"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "title": "ValidationPolicy",
+      "type": "object"
+    },
+    "ValidationRequirement": {
+      "additionalProperties": false,
+      "properties": {
+        "condition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Condition"
+        },
+        "evidence_origin": {
+          "default": "statistical_diagnostic",
+          "title": "Evidence Origin",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "mandatory": {
+          "default": true,
+          "title": "Mandatory",
+          "type": "boolean"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "rule": {
+          "title": "Rule",
+          "type": "string"
+        },
+        "status": {
+          "default": "required",
+          "enum": [
+            "recommended",
+            "required",
+            "conditional"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "validation_requirement_id": {
+          "minLength": 1,
+          "title": "Validation Requirement Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "validation_requirement_id",
+        "rule",
+        "reason"
+      ],
+      "title": "ValidationRequirement",
+      "type": "object"
+    },
+    "ValidationResult": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "contract_family": {
+          "const": "validation_result",
+          "default": "validation_result",
+          "enum": [
+            "validation_result"
+          ],
+          "title": "Contract Family",
+          "type": "string"
+        },
+        "do_not_use": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Do Not Use",
+          "type": "array"
+        },
+        "evidence_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "failure_modes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Failure Modes",
+          "type": "array"
+        },
+        "likely_split": {
+          "title": "Likely Split",
+          "type": "string"
+        },
+        "policy_enforced": {
+          "default": false,
+          "title": "Policy Enforced",
+          "type": "boolean"
+        },
+        "policy_notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Policy Notes",
+          "type": "array"
+        },
+        "primary_validation": {
+          "$ref": "#/$defs/ValidationPolicy"
+        },
+        "reasoning": {
+          "title": "Reasoning",
+          "type": "string"
+        },
+        "recommended_cv": {
+          "title": "Recommended Cv",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "enum": [
+            "1.0"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "secondary_validation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ValidationPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "validation_risk": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Validation Risk",
+          "type": "string"
+        }
+      },
+      "required": [
+        "confidence",
+        "recommended_cv",
+        "validation_risk",
+        "likely_split",
+        "reasoning",
+        "primary_validation"
+      ],
+      "title": "ValidationResult",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "allowed_experiment_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Allowed Experiment Ids",
+      "type": "array"
+    },
+    "allowed_hypothesis_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Allowed Hypothesis Ids",
+      "type": "array"
+    },
+    "allowed_risk_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Allowed Risk Ids",
+      "type": "array"
+    },
+    "allowed_safety_constraint_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Allowed Safety Constraint Ids",
+      "type": "array"
+    },
+    "allowed_validation_requirement_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Allowed Validation Requirement Ids",
+      "type": "array"
+    },
+    "approved_experiments": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Approved Experiments",
+      "type": "array"
+    },
+    "competition_desc": {
+      "title": "Competition Desc",
+      "type": "string"
+    },
+    "contract_family": {
+      "const": "final_synthesis_context",
+      "default": "final_synthesis_context",
+      "title": "Contract Family",
+      "type": "string"
+    },
+    "domain_patterns": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Domain Patterns",
+      "type": "array"
+    },
+    "eda_summary_text": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Eda Summary Text"
+    },
+    "experiment_plan": {
+      "$ref": "#/$defs/ExperimentPlan"
+    },
+    "leaderboard": {
+      "$ref": "#/$defs/LeaderboardAuditResult"
+    },
+    "leakage": {
+      "$ref": "#/$defs/LeakageRiskResult"
+    },
+    "limitations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Limitations",
+      "type": "array"
+    },
+    "metric": {
+      "$ref": "#/$defs/MetricResult"
+    },
+    "optional_stage_failure_messages": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Optional Stage Failure Messages",
+      "type": "array"
+    },
+    "plan_data": {
+      "$ref": "#/$defs/PlanData"
+    },
+    "published_eda_bundle": {
+      "$ref": "#/$defs/PublishedEdaEvidenceBundle"
+    },
+    "rejected_experiment_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Rejected Experiment Ids",
+      "type": "array"
+    },
+    "research_hypotheses": {
+      "$ref": "#/$defs/ResearchHypotheses"
+    },
+    "retrieved_documents": {
+      "items": {
+        "$ref": "#/$defs/RetrievedDocument"
+      },
+      "title": "Retrieved Documents",
+      "type": "array"
+    },
+    "review": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SkepticalReview"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "unresolved_hypotheses": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Unresolved Hypotheses",
+      "type": "array"
+    },
+    "validation": {
+      "$ref": "#/$defs/ValidationResult"
+    }
+  },
+  "required": [
+    "competition_desc",
+    "contract_family",
+    "leaderboard",
+    "leakage",
+    "metric",
+    "plan_data",
+    "published_eda_bundle",
+    "research_hypotheses",
+    "schema_version",
+    "validation"
+  ],
+  "title": "FinalSynthesisContext",
+  "type": "object"
+}

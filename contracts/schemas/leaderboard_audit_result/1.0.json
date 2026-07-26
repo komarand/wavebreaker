@@ -1,0 +1,68 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "confidence": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "Confidence",
+      "type": "string"
+    },
+    "contract_family": {
+      "const": "leaderboard_audit_result",
+      "default": "leaderboard_audit_result",
+      "title": "Contract Family",
+      "type": "string"
+    },
+    "evidence_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Evidence Ids",
+      "type": "array"
+    },
+    "public_lb_trust": {
+      "title": "Public Lb Trust",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "shake_up_risk": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "Shake Up Risk",
+      "type": "string"
+    },
+    "submission_selection_rule": {
+      "title": "Submission Selection Rule",
+      "type": "string"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    }
+  },
+  "required": [
+    "confidence",
+    "contract_family",
+    "public_lb_trust",
+    "schema_version",
+    "shake_up_risk",
+    "submission_selection_rule"
+  ],
+  "title": "LeaderboardAuditResult",
+  "type": "object"
+}

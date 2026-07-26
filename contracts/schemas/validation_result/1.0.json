@@ -1,0 +1,185 @@
+{
+  "$defs": {
+    "ValidationPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "group_column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Column"
+        },
+        "method": {
+          "minLength": 1,
+          "title": "Method",
+          "type": "string"
+        },
+        "n_splits": {
+          "anyOf": [
+            {
+              "minimum": 2,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "N Splits"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "shuffle": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Shuffle"
+        },
+        "split_column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Split Column"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "title": "ValidationPolicy",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "confidence": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "Confidence",
+      "type": "string"
+    },
+    "contract_family": {
+      "const": "validation_result",
+      "default": "validation_result",
+      "title": "Contract Family",
+      "type": "string"
+    },
+    "do_not_use": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Do Not Use",
+      "type": "array"
+    },
+    "evidence_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Evidence Ids",
+      "type": "array"
+    },
+    "failure_modes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Failure Modes",
+      "type": "array"
+    },
+    "likely_split": {
+      "title": "Likely Split",
+      "type": "string"
+    },
+    "policy_enforced": {
+      "default": false,
+      "title": "Policy Enforced",
+      "type": "boolean"
+    },
+    "policy_notes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Policy Notes",
+      "type": "array"
+    },
+    "primary_validation": {
+      "$ref": "#/$defs/ValidationPolicy"
+    },
+    "reasoning": {
+      "title": "Reasoning",
+      "type": "string"
+    },
+    "recommended_cv": {
+      "title": "Recommended Cv",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "secondary_validation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ValidationPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "validation_risk": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "Validation Risk",
+      "type": "string"
+    }
+  },
+  "required": [
+    "confidence",
+    "contract_family",
+    "likely_split",
+    "primary_validation",
+    "reasoning",
+    "recommended_cv",
+    "schema_version",
+    "validation_risk"
+  ],
+  "title": "ValidationResult",
+  "type": "object"
+}

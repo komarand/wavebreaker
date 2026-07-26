@@ -11,6 +11,7 @@ from kaggle_researcher.contracts.artifacts import (
 from kaggle_researcher.contracts.eda import EdaTaskPlan
 from kaggle_researcher.contracts.experiments import ExperimentPlan
 from kaggle_researcher.contracts.registries import build_contract_registries
+from kaggle_researcher.contracts.evidence_manifest import publish_eda_evidence_bundle
 from kaggle_researcher.contracts.review import SkepticalReview
 from kaggle_researcher.contracts.synthesis_context import build_final_synthesis_context
 from kaggle_researcher.contracts.validation import (
@@ -75,8 +76,15 @@ async def synthesize_for_test(
         tuple(retrieved_documents),
         tuple(domain_patterns),
     )
+    published = publish_eda_evidence_bundle(eda_evidence_pack)
     eda = EdaStageResult(
-        eda_evidence_pack, Path("eda_evidence_pack.json"), Path("eda_summary.md")
+        published.evidence_pack,
+        Path("eda_evidence_pack.json"),
+        Path("eda_summary.md"),
+        published.evidence_manifest,
+        Path("evidence_reference_manifest.json"),
+        published,
+        Path("published_eda_evidence_bundle.json"),
     )
     reasoning = ReasoningStageResult(
         metric, validation, leakage, leaderboard, experiments, review
@@ -85,7 +93,7 @@ async def synthesize_for_test(
     context = build_final_synthesis_context(
         competition_desc=competition_desc,
         research=research,
-        eda=eda,
+        published_eda_bundle=published,
         reasoning=reasoning,
         registries=registries,
         eda_summary_text=eda_summary_text,

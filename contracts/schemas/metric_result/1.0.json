@@ -1,0 +1,66 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "confidence": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "Confidence",
+      "type": "string"
+    },
+    "contract_family": {
+      "const": "metric_result",
+      "default": "metric_result",
+      "title": "Contract Family",
+      "type": "string"
+    },
+    "evidence_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Evidence Ids",
+      "type": "array"
+    },
+    "metric_explanation": {
+      "title": "Metric Explanation",
+      "type": "string"
+    },
+    "needs_calibration": {
+      "title": "Needs Calibration",
+      "type": "boolean"
+    },
+    "rank_averaging_useful": {
+      "title": "Rank Averaging Useful",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "surrogate_loss_suggestion": {
+      "title": "Surrogate Loss Suggestion",
+      "type": "string"
+    },
+    "threshold_search_needed": {
+      "title": "Threshold Search Needed",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "confidence",
+    "contract_family",
+    "metric_explanation",
+    "needs_calibration",
+    "rank_averaging_useful",
+    "schema_version",
+    "surrogate_loss_suggestion",
+    "threshold_search_needed"
+  ],
+  "title": "MetricResult",
+  "type": "object"
+}

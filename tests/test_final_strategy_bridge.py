@@ -7,7 +7,13 @@ from kaggle_researcher.contracts.final_strategy_protocol import (
     PromptFingerprint,
     StrategySelectionDraft,
 )
-from kaggle_researcher.reasoning.final_strategy_bridge import freeze_strategy_selection
+import pytest
+
+from kaggle_researcher.reasoning.final_strategy_bridge import (
+    StrategyBridgeError,
+    freeze_strategy_selection,
+    validate_skeleton_integrity,
+)
 from kaggle_researcher.reasoning.final_strategy_context import FinalStrategySelectionContext
 from tests.test_final_synthesizer import _eda_pack, _plan, _research_hypotheses
 
@@ -165,3 +171,82 @@ def test_bridge_preserves_source_hypothesis_eda_action_provenance() -> None:
     assert skeleton.source_to_hypothesis_links[0]["source_ref"] == "retrieved-1"
     assert skeleton.hypothesis_to_eda_links[0]["hypothesis_id"] == "val_001"
     assert skeleton.action_provenance[0]["eda_result_refs"] == ["validation_evidence.primary_validation"]
+
+
+def test_bridge_places_remaining_p2_ideas_in_backlog() -> None:
+    baseline = _experiment("baseline", "baseline_reproduction", "Reproduce recorded baseline")
+    p2 = _experiment("idea", "model_comparison", "Optional distinct model comparison")
+    p2["priority"] = "P2"
+    draft = StrategySelectionDraft.model_validate({
+        "contract_family": "strategy_selection_draft",
+        "schema_version": "2.0",
+        "selected_actions": [_action()],
+        "feature_experiment_families": [],
+        "candidate_experiments": [baseline, p2],
+        "proposed_core_experiment_ids": ["baseline", "idea"],
+        "proposed_backlog_experiment_ids": [],
+        "section_plan": _sections(),
+        "limitations": [],
+    })
+    skeleton, _ = freeze_strategy_selection(
+        draft,
+        synthesis_context=_synthesis_context(),
+        selection_context=_context(baseline=True),
+        selection_status="llm_success",
+        selection_prompt_fingerprint=_fingerprint(),
+    )
+    assert [item["name"] for item in skeleton.core_experiments] == [
+        "Reproduce recorded baseline"
+    ]
+    assert [item["name"] for item in skeleton.experiment_backlog] == [
+        "Optional distinct model comparison"
+    ]
+
+
+def test_bridge_rejects_unknown_section_client_key() -> None:
+    sections = _sections()
+    sections[0]["selected_action_keys"] = ["invented"]
+    draft = StrategySelectionDraft.model_validate({
+        "contract_family": "strategy_selection_draft",
+        "schema_version": "2.0",
+        "selected_actions": [_action()],
+        "feature_experiment_families": [],
+        "candidate_experiments": [],
+        "proposed_core_experiment_ids": [],
+        "proposed_backlog_experiment_ids": [],
+        "section_plan": sections,
+        "limitations": [],
+    })
+    with pytest.raises(StrategyBridgeError, match="unknown selection client-key"):
+        freeze_strategy_selection(
+            draft,
+            synthesis_context=_synthesis_context(),
+            selection_context=_context(),
+            selection_status="llm_success",
+            selection_prompt_fingerprint=_fingerprint(),
+        )
+
+
+def test_skeleton_hash_detects_nested_mutation() -> None:
+    draft = StrategySelectionDraft.model_validate({
+        "contract_family": "strategy_selection_draft",
+        "schema_version": "2.0",
+        "selected_actions": [_action()],
+        "feature_experiment_families": [],
+        "candidate_experiments": [],
+        "proposed_core_experiment_ids": [],
+        "proposed_backlog_experiment_ids": [],
+        "section_plan": _sections(),
+        "limitations": [],
+    })
+    skeleton, _ = freeze_strategy_selection(
+        draft,
+        synthesis_context=_synthesis_context(),
+        selection_context=_context(),
+        selection_status="llm_success",
+        selection_prompt_fingerprint=_fingerprint(),
+    )
+    validate_skeleton_integrity(skeleton)
+    skeleton.actions[0]["priority"] = "P2"
+    with pytest.raises(StrategyBridgeError, match="no longer matches"):
+        validate_skeleton_integrity(skeleton)

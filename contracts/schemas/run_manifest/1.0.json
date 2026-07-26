@@ -1,0 +1,559 @@
+{
+  "$defs": {
+    "ArtifactPointer": {
+      "additionalProperties": false,
+      "properties": {
+        "contract_family": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Contract Family"
+        },
+        "relative_path": {
+          "title": "Relative Path",
+          "type": "string"
+        },
+        "schema_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Schema Version"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        },
+        "size_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Size Bytes"
+        }
+      },
+      "required": [
+        "relative_path"
+      ],
+      "title": "ArtifactPointer",
+      "type": "object"
+    },
+    "FinalOutputManifest": {
+      "additionalProperties": false,
+      "properties": {
+        "final_report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactPointer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "final_strategy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactPointer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "final_synthesis_diagnostics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactPointer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "FinalOutputManifest",
+      "type": "object"
+    },
+    "ManifestConfigSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "competition_description": {
+          "default": "",
+          "title": "Competition Description",
+          "type": "string"
+        },
+        "competition_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Competition Url"
+        },
+        "disable_progress": {
+          "default": false,
+          "title": "Disable Progress",
+          "type": "boolean"
+        },
+        "download_dataset": {
+          "default": true,
+          "title": "Download Dataset",
+          "type": "boolean"
+        },
+        "enable_baseline": {
+          "default": false,
+          "title": "Enable Baseline",
+          "type": "boolean"
+        },
+        "enable_baseline_ablations": {
+          "default": false,
+          "title": "Enable Baseline Ablations",
+          "type": "boolean"
+        },
+        "enable_interaction_diagnostics": {
+          "default": false,
+          "title": "Enable Interaction Diagnostics",
+          "type": "boolean"
+        },
+        "enable_p1_modules": {
+          "default": false,
+          "title": "Enable P1 Modules",
+          "type": "boolean"
+        },
+        "enable_slice_diagnostics": {
+          "default": false,
+          "title": "Enable Slice Diagnostics",
+          "type": "boolean"
+        },
+        "enable_source_claim_validation": {
+          "default": false,
+          "title": "Enable Source Claim Validation",
+          "type": "boolean"
+        },
+        "enable_visual_diagnostics": {
+          "default": false,
+          "title": "Enable Visual Diagnostics",
+          "type": "boolean"
+        },
+        "fail_fast": {
+          "default": false,
+          "title": "Fail Fast",
+          "type": "boolean"
+        },
+        "force_rerun_stages": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Force Rerun Stages",
+          "type": "array"
+        },
+        "local_dataset_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Dataset Path"
+        },
+        "output_root": {
+          "default": "runs",
+          "title": "Output Root",
+          "type": "string"
+        },
+        "profile": {
+          "default": "standard",
+          "title": "Profile",
+          "type": "string"
+        }
+      },
+      "title": "ManifestConfigSnapshot",
+      "type": "object"
+    },
+    "ManifestMigrationRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "applied_at": {
+          "format": "date-time",
+          "title": "Applied At",
+          "type": "string"
+        },
+        "applied_migrations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Applied Migrations",
+          "type": "array"
+        },
+        "source_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Version"
+        },
+        "target_version": {
+          "default": "1.0",
+          "title": "Target Version",
+          "type": "string"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_version",
+        "applied_at"
+      ],
+      "title": "ManifestMigrationRecord",
+      "type": "object"
+    },
+    "RunStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "completed",
+        "partial",
+        "failed",
+        "cancelled"
+      ],
+      "title": "RunStatus",
+      "type": "string"
+    },
+    "StageErrorRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Contract"
+        },
+        "error_type": {
+          "title": "Error Type",
+          "type": "string"
+        },
+        "invalid_fields": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Invalid Fields",
+          "type": "array"
+        },
+        "invalid_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Invalid Ids",
+          "type": "array"
+        },
+        "message": {
+          "maxLength": 2000,
+          "title": "Message",
+          "type": "string"
+        },
+        "recoverable": {
+          "default": false,
+          "title": "Recoverable",
+          "type": "boolean"
+        },
+        "suggested_rerun_stage": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Suggested Rerun Stage"
+        }
+      },
+      "required": [
+        "error_type",
+        "message"
+      ],
+      "title": "StageErrorRecord",
+      "type": "object"
+    },
+    "StageManifestEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "contract_versions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Contract Versions",
+          "type": "object"
+        },
+        "duration_sec": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Sec"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StageErrorRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finished At"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ArtifactPointer"
+          },
+          "title": "Inputs",
+          "type": "object"
+        },
+        "invalidations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Invalidations",
+          "type": "array"
+        },
+        "migrations_applied": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Migrations Applied",
+          "type": "array"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ArtifactPointer"
+          },
+          "title": "Outputs",
+          "type": "object"
+        },
+        "reused": {
+          "default": false,
+          "title": "Reused",
+          "type": "boolean"
+        },
+        "stage_id": {
+          "minLength": 1,
+          "title": "Stage Id",
+          "type": "string"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Started At"
+        },
+        "status": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/StageStatus"
+            }
+          ],
+          "default": "pending"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "stage_id"
+      ],
+      "title": "StageManifestEntry",
+      "type": "object"
+    },
+    "StageStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "completed",
+        "reused",
+        "skipped",
+        "partial",
+        "failed",
+        "stale"
+      ],
+      "title": "StageStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "competition_id": {
+      "title": "Competition Id",
+      "type": "string"
+    },
+    "config": {
+      "$ref": "#/$defs/ManifestConfigSnapshot"
+    },
+    "contract_family": {
+      "const": "run_manifest",
+      "default": "run_manifest",
+      "title": "Contract Family",
+      "type": "string"
+    },
+    "final_outputs": {
+      "$ref": "#/$defs/FinalOutputManifest"
+    },
+    "finished_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Finished At"
+    },
+    "migrations": {
+      "items": {
+        "$ref": "#/$defs/ManifestMigrationRecord"
+      },
+      "title": "Migrations",
+      "type": "array"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "stages": {
+      "additionalProperties": {
+        "$ref": "#/$defs/StageManifestEntry"
+      },
+      "title": "Stages",
+      "type": "object"
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Started At"
+    },
+    "status": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/RunStatus"
+        }
+      ],
+      "default": "pending"
+    }
+  },
+  "required": [
+    "competition_id",
+    "contract_family",
+    "run_id",
+    "schema_version",
+    "stages"
+  ],
+  "title": "RunManifest",
+  "type": "object"
+}

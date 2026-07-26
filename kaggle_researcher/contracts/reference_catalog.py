@@ -8,7 +8,7 @@ from pydantic import ConfigDict, Field
 
 from kaggle_researcher.contracts.base import ContractModel
 from kaggle_researcher.contracts.eda import EdaEvidencePack
-from kaggle_researcher.contracts.evidence import generate_allowed_evidence_refs
+from kaggle_researcher.contracts.evidence_manifest import EvidenceReferenceManifest
 from kaggle_researcher.contracts.research import ResearchHypotheses
 
 
@@ -185,6 +185,7 @@ class ReferenceCatalog(FrozenCatalogModel):
 def build_final_strategy_reference_catalog(
     eda_evidence_pack: EdaEvidencePack,
     *,
+    evidence_manifest: EvidenceReferenceManifest,
     research_hypotheses: ResearchHypotheses | None = None,
     source_claim_ids: Iterable[str] = (),
     retrieved_documents: Iterable[Any] = (),
@@ -193,7 +194,12 @@ def build_final_strategy_reference_catalog(
 
     entries: list[ReferenceCatalogEntry] = []
     diagnostics: list[ReferenceCatalogDiagnostic] = []
-    evidence_refs = set(generate_allowed_evidence_refs(eda_evidence_pack))
+    evidence_refs = {
+        entry.ref for entry in evidence_manifest.entries
+        if entry.available
+        and entry.namespace == "eda_evidence"
+        and entry.reference_kind in {"direct_path", "semantic_ref"}
+    }
     source_metadata: dict[str, tuple[str | None, str | None]] = {}
     for document in retrieved_documents:
         document_id = str(

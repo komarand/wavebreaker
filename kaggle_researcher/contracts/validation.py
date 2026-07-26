@@ -47,12 +47,16 @@ class ValidationResult(ReasoningBaseResult):
 
 
 class LeakageRiskResult(ReasoningBaseResult):
+    contract_family: Literal["leakage_risk_result"] = "leakage_risk_result"
+    schema_version: Literal["1.0"] = "1.0"
     risk_level: ConfidenceLevel
     possible_issues: list[str] = Field(default_factory=list)
     recommended_checks: list[str] = Field(default_factory=list)
 
 
 class MetricResult(ReasoningBaseResult):
+    contract_family: Literal["metric_result"] = "metric_result"
+    schema_version: Literal["1.0"] = "1.0"
     metric_explanation: str
     needs_calibration: StrictBool
     rank_averaging_useful: StrictBool
@@ -61,6 +65,8 @@ class MetricResult(ReasoningBaseResult):
 
 
 class LeaderboardAuditResult(ReasoningBaseResult):
+    contract_family: Literal["leaderboard_audit_result"] = "leaderboard_audit_result"
+    schema_version: Literal["1.0"] = "1.0"
     shake_up_risk: ConfidenceLevel
     submission_selection_rule: str
     public_lb_trust: str

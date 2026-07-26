@@ -106,6 +106,9 @@ from kaggle_researcher.contracts.hypothesis_reference_migration import (
     migrate_hypothesis_references,
 )
 from kaggle_researcher.contracts.migration import (
+    CONTRACT_MIGRATIONS,
+    ContractMigration,
+    ContractMigrationGraph,
     EdaTaskPlanMigrationResult,
     HypothesisMigrationResult,
     MigrationResult,
@@ -146,6 +149,9 @@ from kaggle_researcher.contracts.versions import (
 
 __all__ = [
     "CURRENT_CONTRACT_VERSIONS", "CURRENT_SCHEMA_VERSION", "ContractFamily",
+    "CONTRACT_MIGRATIONS", "CONTRACT_REGISTRY", "ContractHeader",
+    "ContractIngestResult", "ContractMigration", "ContractMigrationGraph",
+    "ContractRepairProvider", "MigrationPolicy", "RepairPolicy", "ingest_contract",
     "CANONICAL_BLOCKING_MODULES", "CATEGORY_ALLOWED_MODULES",
     "CompositeReferenceResolutionDiagnostics",
     "ContractModel", "EdaEvidencePack", "EdaStageResult", "EdaTask", "EdaTaskPlan",
@@ -209,4 +215,13 @@ def __getattr__(name: str):
     if name in {"ExperimentPlanningContext", "FinalSynthesisContext"}:
         from kaggle_researcher.contracts import synthesis_context
         return getattr(synthesis_context, name)
+    if name in {
+        "ContractIngestResult", "ContractRepairProvider", "MigrationPolicy",
+        "RepairPolicy", "ingest_contract",
+    }:
+        from kaggle_researcher.contracts import ingest
+        return getattr(ingest, name)
+    if name in {"CONTRACT_REGISTRY", "ContractHeader"}:
+        from kaggle_researcher.contracts import registry
+        return getattr(registry, name)
     raise AttributeError(name)

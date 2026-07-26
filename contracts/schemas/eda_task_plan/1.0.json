@@ -1,0 +1,154 @@
+{
+  "$defs": {
+    "EdaTask": {
+      "additionalProperties": false,
+      "properties": {
+        "blocking": {
+          "default": false,
+          "title": "Blocking",
+          "type": "boolean"
+        },
+        "dependencies": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Dependencies",
+          "type": "array"
+        },
+        "expected_outputs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Expected Outputs",
+          "type": "array"
+        },
+        "module": {
+          "minLength": 1,
+          "title": "Module",
+          "type": "string"
+        },
+        "params": {
+          "title": "Params",
+          "type": "object"
+        },
+        "priority": {
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ],
+          "title": "Priority",
+          "type": "string"
+        },
+        "related_hypothesis_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Related Hypothesis Ids",
+          "type": "array"
+        },
+        "task_id": {
+          "minLength": 1,
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "module",
+        "priority"
+      ],
+      "title": "EdaTask",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "blocking_tasks": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Blocking Tasks",
+      "type": "array"
+    },
+    "competition_id": {
+      "minLength": 1,
+      "title": "Competition Id",
+      "type": "string"
+    },
+    "contract_family": {
+      "const": "eda_task_plan",
+      "default": "eda_task_plan",
+      "title": "Contract Family",
+      "type": "string"
+    },
+    "dataset": {
+      "title": "Dataset",
+      "type": "object"
+    },
+    "eda_tasks": {
+      "items": {
+        "$ref": "#/$defs/EdaTask"
+      },
+      "title": "Eda Tasks",
+      "type": "array"
+    },
+    "hypothesis_index": {
+      "additionalProperties": {
+        "items": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "title": "Hypothesis Index",
+      "type": "object"
+    },
+    "metric": {
+      "title": "Metric",
+      "type": "object"
+    },
+    "recommended_human_checklist": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Recommended Human Checklist",
+      "type": "array"
+    },
+    "recommended_module_sequence": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Recommended Module Sequence",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_type": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Task Type"
+    }
+  },
+  "required": [
+    "competition_id",
+    "contract_family",
+    "schema_version"
+  ],
+  "title": "EdaTaskPlan",
+  "type": "object"
+}

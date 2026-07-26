@@ -1,0 +1,115 @@
+{
+  "$defs": {
+    "ExperimentItem": {
+      "additionalProperties": false,
+      "properties": {
+        "cost": {
+          "title": "Cost",
+          "type": "string"
+        },
+        "dependencies": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Dependencies",
+          "type": "array"
+        },
+        "evidence_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "expected_gain": {
+          "title": "Expected Gain",
+          "type": "string"
+        },
+        "experiment": {
+          "minLength": 1,
+          "title": "Experiment",
+          "type": "string"
+        },
+        "experiment_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Experiment Id"
+        },
+        "priority": {
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ],
+          "title": "Priority",
+          "type": "string"
+        },
+        "risk": {
+          "title": "Risk",
+          "type": "string"
+        },
+        "source_hypothesis_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Source Hypothesis Ids",
+          "type": "array"
+        },
+        "why": {
+          "title": "Why",
+          "type": "string"
+        }
+      },
+      "required": [
+        "priority",
+        "experiment",
+        "why",
+        "cost",
+        "expected_gain",
+        "risk"
+      ],
+      "title": "ExperimentItem",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "contract_family": {
+      "const": "experiment_plan",
+      "default": "experiment_plan",
+      "title": "Contract Family",
+      "type": "string"
+    },
+    "experiments": {
+      "items": {
+        "$ref": "#/$defs/ExperimentItem"
+      },
+      "title": "Experiments",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "contract_family",
+    "schema_version"
+  ],
+  "title": "ExperimentPlan",
+  "type": "object"
+}

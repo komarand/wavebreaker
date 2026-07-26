@@ -21,9 +21,7 @@ from kaggle_researcher.contracts.final_strategy_compilation import (
 from kaggle_researcher.contracts.final_synthesis_diagnostics import (
     FinalSynthesisDiagnostics,
 )
-from kaggle_researcher.contracts.reference_catalog import (
-    build_final_strategy_reference_catalog,
-)
+from tests.contracts.factories import build_final_strategy_reference_catalog
 from kaggle_researcher.reasoning.final_synthesizer import (
     REQUIRED_SECTION_IDS,
     FinalStrategyResult,

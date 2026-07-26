@@ -11,6 +11,7 @@ from pydantic import BaseModel, ValidationError
 from kaggle_researcher.contracts.eda import EdaTaskPlan
 from kaggle_researcher.contracts.errors import (
     ArtifactContractError,
+    ContractError,
     ContractIssue,
     ContractValidationError,
 )
@@ -18,8 +19,6 @@ from kaggle_researcher.contracts.experiments import ExperimentItem, ExperimentPl
 from kaggle_researcher.contracts.migration import (
     EdaTaskPlanMigrationResult,
     HypothesisMigrationResult,
-    migrate_eda_task_plan_payload,
-    migrate_research_hypotheses_payload,
 )
 from kaggle_researcher.contracts.research import ResearchHypotheses
 from kaggle_researcher.contracts.review import SkepticalReview
@@ -49,6 +48,11 @@ class EdaStageResult:
     evidence_pack: BaseModel
     evidence_pack_path: Path
     summary_path: Path
+    evidence_manifest: BaseModel | None = None
+    evidence_manifest_path: Path | None = None
+    published_bundle: BaseModel | None = None
+    published_bundle_path: Path | None = None
+    publication_migration_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -68,18 +72,83 @@ class FinalStageResult:
     report_path: Path | None
 
 
+def _ingest_contract_path(path: Path, **kwargs: Any) -> Any:
+    from kaggle_researcher.contracts.ingest import ingest_contract
+
+    try:
+        raw = Path(path).read_bytes()
+        return ingest_contract(raw, **kwargs)
+    except ContractError as exc:
+        if exc.stage != "json_parse":
+            raise
+        cause_text = str(exc.__cause__ or "")
+        detail = (
+            "duplicate JSON keys"
+            if "duplicate JSON object key" in cause_text
+            else "invalid serialized contract"
+        )
+        raise ArtifactContractError(
+            f"Could not read contract artifact {Path(path).name}: {detail}",
+            issues=exc.issues,
+            stage="artifact_ingest",
+            contract=kwargs.get("expected_family"),
+        ) from exc
+    except OSError as exc:
+        raise ArtifactContractError(
+            f"Could not read contract artifact {Path(path).name}",
+            stage="artifact_ingest",
+            contract=kwargs.get("expected_family"),
+        ) from exc
+
+
 def load_research_hypotheses(path: Path) -> tuple[ResearchHypotheses, HypothesisMigrationResult]:
-    payload = _read_object(path)
-    migration = migrate_research_hypotheses_payload(payload)
-    return _validate(ResearchHypotheses, migration.value, "research_hypotheses"), migration
+    from kaggle_researcher.contracts.ingest import (
+        MigrationPolicy,
+        RepairPolicy,
+    )
+
+    result = _ingest_contract_path(
+        Path(path),
+        expected_family="research_hypotheses",
+        source_kind="external_artifact",
+        migration_policy=MigrationPolicy.ALLOW,
+        repair_policy=RepairPolicy.NORMALIZE,
+    )
+    migration = HypothesisMigrationResult(
+        result.contract.model_dump(mode="python"),
+        None if result.original_version == "unversioned" else result.original_version,
+        result.final_version,
+        bool(result.migrations_applied or result.warnings),
+        list(result.migrations_applied),
+        list(result.warnings),
+    )
+    return ResearchHypotheses.model_validate(result.contract), migration
 
 
 def load_eda_task_plan(
     path: Path, *, hypotheses: ResearchHypotheses, validate_bundle: bool = True
 ) -> tuple[EdaTaskPlan, EdaTaskPlanMigrationResult]:
-    payload = _read_object(path)
-    migration = migrate_eda_task_plan_payload(payload)
-    plan = _validate(EdaTaskPlan, migration.value, "eda_task_plan")
+    from kaggle_researcher.contracts.ingest import (
+        MigrationPolicy,
+        RepairPolicy,
+    )
+
+    result = _ingest_contract_path(
+        Path(path),
+        expected_family="eda_task_plan",
+        source_kind="external_artifact",
+        migration_policy=MigrationPolicy.ALLOW,
+        repair_policy=RepairPolicy.NORMALIZE,
+    )
+    plan = EdaTaskPlan.model_validate(result.contract)
+    migration = EdaTaskPlanMigrationResult(
+        plan.model_dump(mode="python"),
+        None if result.original_version == "unversioned" else result.original_version,
+        result.final_version,
+        bool(result.migrations_applied or result.warnings),
+        list(result.migrations_applied),
+        list(result.warnings),
+    )
     if validate_bundle:
         validate_research_artifact_bundle(hypotheses, plan)
     return plan, migration
@@ -125,8 +194,114 @@ def validate_research_artifact_bundle(
 
 
 def load_eda_evidence_pack(path: Path) -> BaseModel:
-    from kaggle_researcher.eda.schemas import EdaEvidencePack
-    return _validate(EdaEvidencePack, _read_object(path), "eda_evidence_pack")
+    from kaggle_researcher.contracts.ingest import (
+        MigrationPolicy,
+        RepairPolicy,
+    )
+    return _ingest_contract_path(
+        Path(path),
+        expected_family="eda_evidence_pack",
+        source_kind="external_artifact",
+        migration_policy=MigrationPolicy.ALLOW,
+        repair_policy=RepairPolicy.FORBID,
+    ).contract
+
+
+def load_evidence_reference_manifest(path: Path) -> BaseModel:
+    from kaggle_researcher.contracts.ingest import (
+        MigrationPolicy,
+        RepairPolicy,
+    )
+    return _ingest_contract_path(
+        Path(path),
+        expected_family="evidence_reference_manifest",
+        source_kind="external_artifact",
+        migration_policy=MigrationPolicy.FORBID,
+        repair_policy=RepairPolicy.FORBID,
+    ).contract
+
+
+def load_published_eda_evidence_bundle(path: Path) -> BaseModel:
+    from kaggle_researcher.contracts.evidence_manifest import validate_published_eda_bundle
+    from kaggle_researcher.contracts.ingest import (
+        MigrationPolicy,
+        RepairPolicy,
+    )
+    bundle = _ingest_contract_path(
+        Path(path),
+        expected_family="published_eda_evidence_bundle",
+        source_kind="external_artifact",
+        migration_policy=MigrationPolicy.FORBID,
+        repair_policy=RepairPolicy.FORBID,
+    ).contract
+    validate_published_eda_bundle(bundle)
+    return bundle
+
+
+def load_eda_publication_bundle(directory: Path) -> tuple[BaseModel, tuple[str, ...]]:
+    """Prefer the atomic bundle; migrate legacy artifacts only after hash verification."""
+    from kaggle_researcher.contracts.errors import (
+        ContractIssue,
+        EvidenceManifestBuildError,
+        EvidenceManifestPackMismatchError,
+    )
+    from kaggle_researcher.contracts.evidence_manifest import (
+        EvidenceConflictPolicy,
+        publish_eda_evidence_bundle,
+    )
+    from kaggle_researcher.contracts.hashing import sha256_contract
+
+    directory = Path(directory)
+    bundle_path = directory / "published_eda_evidence_bundle.json"
+    if bundle_path.is_file():
+        return load_published_eda_evidence_bundle(bundle_path), ()
+
+    pack_path = directory / "eda_evidence_pack.json"
+    manifest_path = directory / "evidence_reference_manifest.json"
+    pack = load_eda_evidence_pack(pack_path)
+    if not manifest_path.is_file():
+        migrated = publish_eda_evidence_bundle(
+            pack,
+            conflict_policy=EvidenceConflictPolicy.DEGRADED,
+            manifest_origin="legacy_migration",
+            migration_warnings=(
+                "Generated an in-memory evidence manifest from a frozen legacy EDA pack; "
+                "origin=legacy_migration.",
+            ),
+        )
+        return migrated, (
+            "Migrated legacy eda_evidence_pack.json to an in-memory published EDA bundle.",
+        )
+
+    manifest = load_evidence_reference_manifest(manifest_path)
+    migrated = publish_eda_evidence_bundle(
+        pack, conflict_policy=EvidenceConflictPolicy.DEGRADED
+    )
+    actual_pack_hash = sha256_contract(pack)
+    if manifest.pack_hash != actual_pack_hash:
+        raise EvidenceManifestPackMismatchError(
+            expected_hash=manifest.pack_hash,
+            actual_hash=actual_pack_hash,
+            manifest_hash=manifest.manifest_hash,
+            manifest_schema_version=manifest.schema_version,
+            bundle_schema_version=migrated.schema_version,
+        )
+    if manifest.manifest_hash != migrated.manifest_hash:
+        raise EvidenceManifestBuildError(
+            "Separate evidence manifest does not match the canonical manifest for its pack",
+            issues=(ContractIssue(
+                "evidence_reference_manifest.manifest_hash",
+                manifest.manifest_hash,
+                migrated.manifest_hash,
+                "independently stored manifest differs from deterministic publication",
+            ),),
+            stage="eda_publication_migration",
+            contract="evidence_reference_manifest",
+        )
+    return migrated, (
+        "Verified and migrated separate eda_evidence_pack.json and "
+        "evidence_reference_manifest.json to an in-memory published EDA bundle.",
+    )
 
 
 def load_validation_result(path: Path) -> ValidationResult:
@@ -149,12 +324,35 @@ def load_skeptical_review(path: Path) -> SkepticalReview:
 
 
 def load_final_strategy(path: Path) -> BaseModel:
-    from kaggle_researcher.reasoning.final_synthesizer import FinalStrategyResult
     from kaggle_researcher.contracts.final_strategy import (
-        upgrade_legacy_final_strategy_synthesis_status,
+        normalize_legacy_final_strategy_payload,
     )
-    payload = upgrade_legacy_final_strategy_synthesis_status(_read_object(path))
-    return _validate(FinalStrategyResult, payload, "final_strategy")
+    from kaggle_researcher.contracts.ingest import (
+        MigrationPolicy,
+        RepairPolicy,
+    )
+    return _ingest_contract_path(
+        Path(path),
+        expected_family="final_strategy",
+        source_kind="external_artifact",
+        migration_policy=MigrationPolicy.ALLOW,
+        repair_policy=RepairPolicy.NORMALIZE,
+        normalizer=normalize_legacy_final_strategy_payload,
+    ).contract
+
+
+def load_final_synthesis_context(path: Path) -> BaseModel:
+    from kaggle_researcher.contracts.ingest import (
+        MigrationPolicy,
+        RepairPolicy,
+    )
+    return _ingest_contract_path(
+        Path(path),
+        expected_family="final_synthesis_context",
+        source_kind="external_artifact",
+        migration_policy=MigrationPolicy.ALLOW,
+        repair_policy=RepairPolicy.FORBID,
+    ).contract
 
 
 def write_research_hypotheses_atomic(path: Path, value: ResearchHypotheses) -> None:
@@ -273,6 +471,10 @@ def write_json_atomic(path: Path, value: Any) -> None:
 def validate_contract_definitions() -> dict[str, Any]:
     """Offline self-check for the canonical registry and compatibility aliases."""
     from kaggle_researcher.contracts.final_strategy import FinalStrategyResult
+    from kaggle_researcher.contracts.evidence_manifest import (
+        EvidenceReferenceManifest,
+        PublishedEdaEvidenceBundle,
+    )
     from kaggle_researcher.contracts.manifest import RunManifest
     from kaggle_researcher.contracts.review import SkepticalReview
     from kaggle_researcher.contracts.versions import CURRENT_CONTRACT_VERSIONS
@@ -286,6 +488,8 @@ def validate_contract_definitions() -> dict[str, Any]:
         "research_hypotheses": ResearchHypotheses,
         "eda_task_plan": EdaTaskPlan,
         "eda_evidence_pack": EdaEvidencePack,
+        "evidence_reference_manifest": EvidenceReferenceManifest,
+        "published_eda_evidence_bundle": PublishedEdaEvidenceBundle,
         "validation_result": ValidationResult,
         "experiment_plan": ExperimentPlan,
         "skeptical_review": SkepticalReview,
@@ -309,8 +513,9 @@ def validate_contract_definitions() -> dict[str, Any]:
 
 __all__ = [
     "EdaStageResult", "FinalStageResult", "ReasoningStageResult", "ResearchStageResult",
-    "load_eda_evidence_pack", "load_eda_task_plan", "load_experiment_plan",
-    "load_final_strategy", "load_research_hypotheses", "load_skeptical_review",
+    "load_eda_evidence_pack", "load_eda_task_plan", "load_evidence_reference_manifest",
+    "load_published_eda_evidence_bundle", "load_eda_publication_bundle", "load_experiment_plan",
+    "load_final_strategy", "load_final_synthesis_context", "load_research_hypotheses", "load_skeptical_review",
     "load_validation_result", "validate_contract_definitions", "validate_research_artifact_bundle",
     "write_eda_evidence_pack", "write_eda_task_plan_atomic", "write_experiment_plan",
     "write_final_strategy", "write_research_hypotheses_atomic",

@@ -55,6 +55,7 @@ class SelectedActionDraft(ContractModel):
     rejected_hypothesis_ids: list[str] = Field(default_factory=list)
     safety_constraint_ids: list[str] = Field(default_factory=list)
     validation_requirement_ids: list[str] = Field(default_factory=list)
+    approved_experiment_ids: list[str] = Field(default_factory=list)
     feature_metadata: dict[str, Any] | None = None
     dependencies: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
@@ -127,6 +128,7 @@ class SectionPlanDraft(ContractModel):
 
 
 class StrategySelectionDraft(ContractModel):
+    contract_family: Literal["strategy_selection_draft"] = "strategy_selection_draft"
     schema_version: Literal["2.0"] = "2.0"
     selected_actions: list[SelectedActionDraft]
     feature_experiment_families: list[FeatureExperimentFamilyDraft] = Field(default_factory=list)
@@ -156,6 +158,10 @@ class StrategySelectionDraft(ContractModel):
 
 
 class StrategySkeleton(ContractModel):
+    model_config = {**ContractModel.model_config, "frozen": True}
+
+    contract_family: Literal["strategy_skeleton"] = "strategy_skeleton"
+    schema_version: Literal["2.0"] = "2.0"
     skeleton_schema_version: Literal["2.0"] = "2.0"
     skeleton_id: str
     skeleton_hash: str
@@ -212,6 +218,7 @@ class SectionSummaryWording(ContractModel):
 
 
 class StrategyRenderingDraft(ContractModel):
+    contract_family: Literal["strategy_rendering_draft"] = "strategy_rendering_draft"
     schema_version: Literal["2.0"] = "2.0"
     skeleton_id: str
     skeleton_hash: str

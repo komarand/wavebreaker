@@ -1,0 +1,65 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "confidence": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "Confidence",
+      "type": "string"
+    },
+    "contract_family": {
+      "const": "leakage_risk_result",
+      "default": "leakage_risk_result",
+      "title": "Contract Family",
+      "type": "string"
+    },
+    "evidence_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Evidence Ids",
+      "type": "array"
+    },
+    "possible_issues": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Possible Issues",
+      "type": "array"
+    },
+    "recommended_checks": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Recommended Checks",
+      "type": "array"
+    },
+    "risk_level": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "Risk Level",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "confidence",
+    "contract_family",
+    "risk_level",
+    "schema_version"
+  ],
+  "title": "LeakageRiskResult",
+  "type": "object"
+}

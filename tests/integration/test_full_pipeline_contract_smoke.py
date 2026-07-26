@@ -33,6 +33,91 @@ class JsonClient:
         return self.response
 
 
+class FinalProtocolClient:
+    def __init__(self, *, hypothesis_id: str, approved_experiment_id: str) -> None:
+        self.hypothesis_id = hypothesis_id
+        self.approved_experiment_id = approved_experiment_id
+
+    async def chat_json(self, **kwargs: Any) -> dict[str, Any]:
+        prompt = json.loads(kwargs["user_prompt"])
+        if "selection_context" in prompt or "invalid_draft" in prompt:
+            context = prompt.get("selection_context") or {}
+            sections = (
+                context.get("required_section_ids")
+                or prompt.get("allowed_catalogs", {}).get("required_section_ids")
+                or []
+            )
+            return {
+                "contract_family": "strategy_selection_draft",
+                "schema_version": "2.0",
+                "selected_actions": [{
+                    "client_action_key": "run_approved_baseline",
+                    "action_kind": "baseline_reproduction",
+                    "action": "Run the reviewer-approved baseline on fixed folds.",
+                    "priority": "P0",
+                    "confidence": "high",
+                    "reason": "The approved experiment supplies the validation anchor.",
+                    "primary_evidence_refs": ["validation_evidence.primary_validation"],
+                    "supporting_evidence_refs": [],
+                    "limitation_evidence_refs": [],
+                    "source_refs": [],
+                    "motivating_hypothesis_ids": [self.hypothesis_id],
+                    "safety_hypothesis_ids": [],
+                    "validation_context_ids": [],
+                    "rejected_hypothesis_ids": [],
+                    "safety_constraint_ids": prompt.get(
+                        "allowed_safety_constraint_ids", []
+                    ),
+                    "validation_requirement_ids": prompt.get(
+                        "allowed_validation_requirement_ids", []
+                    ),
+                    "approved_experiment_ids": [self.approved_experiment_id],
+                    "feature_metadata": None,
+                    "dependencies": [],
+                    "limitations": [],
+                }],
+                "feature_experiment_families": [],
+                "candidate_experiments": [],
+                "proposed_core_experiment_ids": [],
+                "proposed_backlog_experiment_ids": [],
+                "section_plan": [
+                    {
+                        "section_id": section,
+                        "selected_action_keys": ["run_approved_baseline"],
+                        "selected_family_keys": [],
+                        "selected_experiment_keys": [],
+                        "summary_intent": "Execute the frozen approved plan.",
+                    }
+                    for section in sections
+                ],
+                "limitations": [],
+            }
+        immutable = prompt["immutable_strategy_payload"]
+        return {
+            "contract_family": "strategy_rendering_draft",
+            "schema_version": "2.0",
+            "skeleton_id": prompt.get("skeleton_id") or prompt["required_identity"]["skeleton_id"],
+            "skeleton_hash": prompt.get("skeleton_hash") or prompt["required_identity"]["skeleton_hash"],
+            "executive_summary": "Execute the frozen reviewer-approved validation plan.",
+            "action_wording": [
+                {
+                    "action_id": item["action_id"],
+                    "display_action": item["action"],
+                    "display_reason": item["reason"],
+                }
+                for item in immutable["actions"]
+            ],
+            "experiment_wording": [],
+            "family_wording": [],
+            "section_summaries": [
+                {"section_id": item["section_id"], "summary": item["summary"]}
+                for item in immutable["section_structure"]
+            ],
+            "limitation_wording": [],
+            "uncertainty_summary": "Claims remain bounded to the published evidence.",
+        }
+
+
 @pytest.mark.asyncio
 async def test_real_internal_pipeline_boundaries_without_network_or_llm(tmp_path: Path) -> None:
     fixture = Path("tests/fixtures/eda/iid_binary_tiny")
@@ -159,25 +244,6 @@ async def test_real_internal_pipeline_boundaries_without_network_or_llm(tmp_path
         }),
     )
 
-    strategy_payload = json.loads(
-        Path("tests/fixtures/reasoning/final_strategy_valid.json").read_text(encoding="utf-8")
-    )
-    strategy_payload["competition_id"] = "iid_binary_tiny"
-    strategy_payload["acknowledged_risk_ids"] = [
-        item.risk_id for item in evidence_pack.eda_risks if item.severity == "critical"
-    ]
-    strategy_payload["selected_validation_requirement_ids"] = [
-        item.validation_requirement_id for item in evidence_pack.validation_requirements
-        if item.mandatory or item.status == "required"
-    ]
-    strategy_payload["enforced_safety_constraint_ids"] = [
-        item.safety_constraint_id for item in evidence_pack.safety_constraints
-        if item.blocking or item.severity == "blocking"
-    ]
-    # Exercise the bounded legacy repair at the real Final Synthesizer boundary.
-    strategy_payload["actions"][0]["experiment_ids"] = [eda_hypothesis_id]
-    strategy_payload["actions"][0]["related_hypothesis_ids"] = [eda_hypothesis_id]
-    strategy_payload["actions"][0]["hypothesis_ids"] = [eda_hypothesis_id]
     reasoning_outputs = {
         "metric": metric.model_dump(mode="json"),
         "validation": validation.model_dump(mode="json"),
@@ -195,7 +261,10 @@ async def test_real_internal_pipeline_boundaries_without_network_or_llm(tmp_path
         eda_evidence_pack=evidence_pack,
         reasoning_outputs=reasoning_outputs,
         eda_summary_text=eda_result.summary_path.read_text(encoding="utf-8"),
-        client=JsonClient(strategy_payload),
+        client=FinalProtocolClient(
+            hypothesis_id=eda_hypothesis_id,
+            approved_experiment_id=experiments[0].experiment_id,
+        ),
         model="mock-model",
     )
     rendered = render_final_strategy(strategy)
@@ -207,7 +276,9 @@ async def test_real_internal_pipeline_boundaries_without_network_or_llm(tmp_path
     ]
     assert linked_actions
     assert eda_hypothesis_id in linked_actions[0].hypothesis_ids
-    assert strategy.reference_repairs[0]["original_id"] == eda_hypothesis_id
+    assert strategy.synthesis_status == "llm_success"
+    assert strategy.rendering_status == "llm_success"
+    assert strategy.reference_repairs == []
 
     run_dir = tmp_path / "full-run"
     for directory in (run_dir / "research", run_dir / "eda", run_dir / "reasoning", run_dir / "final"):

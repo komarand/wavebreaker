@@ -1,0 +1,260 @@
+{
+  "$defs": {
+    "PromptFingerprint": {
+      "additionalProperties": false,
+      "properties": {
+        "context_policy_version": {
+          "title": "Context Policy Version",
+          "type": "string"
+        },
+        "fingerprint": {
+          "title": "Fingerprint",
+          "type": "string"
+        },
+        "output_schema_version": {
+          "title": "Output Schema Version",
+          "type": "string"
+        },
+        "prompt_name": {
+          "title": "Prompt Name",
+          "type": "string"
+        },
+        "prompt_version": {
+          "title": "Prompt Version",
+          "type": "string"
+        },
+        "system_prompt_hash": {
+          "title": "System Prompt Hash",
+          "type": "string"
+        },
+        "user_template_hash": {
+          "title": "User Template Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "prompt_name",
+        "prompt_version",
+        "system_prompt_hash",
+        "user_template_hash",
+        "output_schema_version",
+        "context_policy_version",
+        "fingerprint"
+      ],
+      "title": "PromptFingerprint",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "action_provenance": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Action Provenance",
+      "type": "array"
+    },
+    "actions": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Actions",
+      "type": "array"
+    },
+    "client_key_map": {
+      "additionalProperties": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "title": "Client Key Map",
+      "type": "object"
+    },
+    "competition_id": {
+      "title": "Competition Id",
+      "type": "string"
+    },
+    "contract_family": {
+      "const": "strategy_skeleton",
+      "default": "strategy_skeleton",
+      "title": "Contract Family",
+      "type": "string"
+    },
+    "core_experiments": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Core Experiments",
+      "type": "array"
+    },
+    "dependency_graph": {
+      "additionalProperties": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "title": "Dependency Graph",
+      "type": "object"
+    },
+    "evidence_catalog": {
+      "title": "Evidence Catalog",
+      "type": "object"
+    },
+    "experiment_backlog": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Experiment Backlog",
+      "type": "array"
+    },
+    "experiment_budget": {
+      "title": "Experiment Budget",
+      "type": "object"
+    },
+    "feature_experiment_families": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Feature Experiment Families",
+      "type": "array"
+    },
+    "hypothesis_to_eda_links": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Hypothesis To Eda Links",
+      "type": "array"
+    },
+    "limitations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Limitations",
+      "type": "array"
+    },
+    "metric": {
+      "title": "Metric",
+      "type": "object"
+    },
+    "recommended_validation": {
+      "enum": [
+        "stratified_kfold",
+        "kfold",
+        "group_kfold",
+        "stratified_group_kfold",
+        "temporal_holdout",
+        "temporal_cv",
+        "ranking_group_cv",
+        "custom_required"
+      ],
+      "title": "Recommended Validation",
+      "type": "string"
+    },
+    "safety_constraint_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Safety Constraint Ids",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "2.0",
+      "default": "2.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "section_structure": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Section Structure",
+      "type": "array"
+    },
+    "selection_prompt_fingerprint": {
+      "$ref": "#/$defs/PromptFingerprint"
+    },
+    "skeleton_hash": {
+      "title": "Skeleton Hash",
+      "type": "string"
+    },
+    "skeleton_id": {
+      "title": "Skeleton Id",
+      "type": "string"
+    },
+    "skeleton_schema_version": {
+      "const": "2.0",
+      "default": "2.0",
+      "enum": [
+        "2.0"
+      ],
+      "title": "Skeleton Schema Version",
+      "type": "string"
+    },
+    "source_to_hypothesis_links": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Source To Hypothesis Links",
+      "type": "array"
+    },
+    "synthesis_selection_status": {
+      "enum": [
+        "llm_success",
+        "repaired_success",
+        "degraded_fallback",
+        "failed"
+      ],
+      "title": "Synthesis Selection Status",
+      "type": "string"
+    },
+    "task_type": {
+      "title": "Task Type",
+      "type": "string"
+    },
+    "validation_requirement_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Validation Requirement Ids",
+      "type": "array"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    }
+  },
+  "required": [
+    "action_provenance",
+    "actions",
+    "competition_id",
+    "contract_family",
+    "core_experiments",
+    "dependency_graph",
+    "evidence_catalog",
+    "experiment_backlog",
+    "experiment_budget",
+    "feature_experiment_families",
+    "hypothesis_to_eda_links",
+    "limitations",
+    "metric",
+    "recommended_validation",
+    "safety_constraint_ids",
+    "schema_version",
+    "section_structure",
+    "selection_prompt_fingerprint",
+    "skeleton_hash",
+    "skeleton_id",
+    "source_to_hypothesis_links",
+    "synthesis_selection_status",
+    "task_type",
+    "validation_requirement_ids",
+    "warnings"
+  ],
+  "title": "StrategySkeleton",
+  "type": "object"
+}

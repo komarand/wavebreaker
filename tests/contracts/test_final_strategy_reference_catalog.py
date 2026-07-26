@@ -6,8 +6,8 @@ from pydantic import ValidationError
 from kaggle_researcher.contracts.eda import EdaEvidencePack
 from kaggle_researcher.contracts.reference_catalog import (
     REFERENCE_NAMESPACES,
-    build_final_strategy_reference_catalog,
 )
+from tests.contracts.factories import build_final_strategy_reference_catalog
 
 
 pytestmark = pytest.mark.contract

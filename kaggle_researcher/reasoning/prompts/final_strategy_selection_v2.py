@@ -19,17 +19,20 @@ SELECTION_USER_TEMPLATE = "strategy_selection_context + output_schema + exact al
 FINAL_STRATEGY_SELECTION_SYSTEM_PROMPT = """You are the Strategy Selection component of an automated Kaggle research system.
 You do not write the final report. Select the smallest safe, evidence-grounded strategy from the validated catalogs.
 Return exactly one JSON object matching StrategySelectionDraft. Do not output Markdown, code fences, commentary, or chain-of-thought.
+Always include contract_family="strategy_selection_draft" and schema_version="2.0".
 Use only exact IDs from the allowed catalogs. Never invent, rewrite, abbreviate, or approximate an ID. Do not generate final stable action, family, or experiment IDs; use unique client keys.
 Respect strategy_limits. Select at most 15 actions, 8 core experiments, 12 backlog experiments, and 8 first-48-hour experiments unless the supplied limits are stricter.
 Use one precise primary evidence ref where possible, no more than three supporting refs, and no more than two limitation refs. Do not reproduce all EDA evidence or attach unrelated broad evidence roots.
 Preserve source -> hypothesis -> EDA -> strategy provenance. Use source refs only when the hypothesis catalog explicitly owns them. EDA-only and deterministic safety actions need no source.
+Attach approved_experiment_ids to actions only from the approved experiment catalog; never restore rejected or unknown experiment IDs.
 Assign hypotheses by semantic role. Do not attach one broad hypothesis union to every action.
 Group related feature representations into controlled experiment families, and only when the actual input columns exist. Do not hard-code competition-specific features.
 Use canonical available model_family_ids only. Never compare aliases of the same canonical family or use task-incompatible models.
 Keep the selected metric, validation, schema roles, safety constraints, and validation requirements immutable.
 When completed baseline evidence exists, baseline reproduction is the first modeling experiment. Threshold selection is downstream OOF-only postprocessing after provisional model selection and OOF prediction generation; never use test labels.
-Rank contract steps, baseline, stable low-cost feature families, distinct model comparisons, and OOF postprocessing. Put lower-priority supported work in backlog.
+Rank contract steps, baseline, stable low-cost feature families, distinct model comparisons, and OOF postprocessing. Put lower-priority supported work, including remaining P2 ideas, in backlog.
 Use every required section ID exactly once in section_plan. summary_intent is a plan, not polished prose.
+Before returning, silently self-check all IDs, budgets, dependencies, evidence minimality, section coverage, baseline order, and OOF threshold constraints.
 Do not predict score gains or add fields absent from the schema. Return JSON only."""
 
 
@@ -50,6 +53,9 @@ def build_selection_prompt(
         "allowed_validation_requirement_ids": [
             item.get("validation_requirement_id")
             for item in payload["validation_requirement_catalog"]
+        ],
+        "allowed_approved_experiment_ids": [
+            item["experiment_id"] for item in payload["approved_experiment_catalog"]
         ],
         "required_section_ids": payload["required_section_ids"],
         "output_schema": StrategySelectionDraft.model_json_schema(),
@@ -87,6 +93,9 @@ def build_selection_repair_prompt(
             "model_family_ids": [item["canonical_family_id"] for item in payload["model_catalog"]],
             "safety_constraint_ids": [item.get("safety_constraint_id") for item in payload["safety_constraint_catalog"]],
             "validation_requirement_ids": [item.get("validation_requirement_id") for item in payload["validation_requirement_catalog"]],
+            "approved_experiment_ids": [
+                item["experiment_id"] for item in payload["approved_experiment_catalog"]
+            ],
             "required_section_ids": payload["required_section_ids"],
         },
         "output_schema": StrategySelectionDraft.model_json_schema(),

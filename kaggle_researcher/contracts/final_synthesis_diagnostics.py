@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 ValidationStage = Literal[
+    "internal_contract_validation",
     "llm_parse",
     "llm_schema_validation",
     "llm_reference_validation",
@@ -107,6 +108,18 @@ class FinalSynthesisDiagnostics(DiagnosticsModel):
     bridge: BridgeDiagnostic | None = None
     prompt_fingerprints: dict[str, dict[str, Any]] = Field(default_factory=dict)
     provider_failures: list[dict[str, str]] = Field(default_factory=list)
+    evidence_manifest_version: str | None = None
+    pack_hash: str | None = None
+    manifest_hash: str | None = None
+    bundle_hash: str | None = None
+    allowed_ref_count: int = 0
+    conflicting_ref_count: int = 0
+    unavailable_ref_count: int = 0
+    prompt_manifest_hash: str | None = None
+    validator_manifest_hash: str | None = None
+    manifest_parity_succeeded: bool = False
+    actual_pack_hash: str | None = None
+    internal_contract_failure: dict[str, Any] | None = None
 
 
 __all__ = [

@@ -36,9 +36,15 @@ class ProtocolClient:
         if "selection_context" in prompt or "invalid_draft" in prompt:
             return deepcopy(self.selection)
         if self.invalid_rendering:
-            return {"schema_version": "2.0", "skeleton_id": "changed", "skeleton_hash": "changed"}
+            return {
+                "contract_family": "strategy_rendering_draft",
+                "schema_version": "2.0",
+                "skeleton_id": "changed",
+                "skeleton_hash": "changed",
+            }
         immutable = prompt["immutable_strategy_payload"]
         return {
+            "contract_family": "strategy_rendering_draft",
             "schema_version": "2.0",
             "skeleton_id": prompt["skeleton_id"],
             "skeleton_hash": prompt["skeleton_hash"],
@@ -74,6 +80,7 @@ class ProtocolClient:
 
 def _selection() -> dict[str, Any]:
     return {
+        "contract_family": "strategy_selection_draft",
         "schema_version": "2.0",
         "selected_actions": [{
             "client_action_key": "lock_validation", "action_kind": "validation_setup",

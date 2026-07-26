@@ -7,9 +7,7 @@ from kaggle_researcher.contracts.composite_reference_resolution import (
     resolve_final_strategy_composite_references,
 )
 from kaggle_researcher.contracts.eda import EdaEvidencePack
-from kaggle_researcher.contracts.reference_catalog import (
-    build_final_strategy_reference_catalog,
-)
+from tests.contracts.factories import build_final_strategy_reference_catalog
 
 
 TRACEBACK_REFS = (
@@ -179,4 +177,3 @@ def test_risk_is_not_rewritten_to_risk_register_path() -> None:
 
     assert "eda_risk_register.risk_leakage_001" not in migrated["evidence_refs"]
     assert "eda_risks.risk_leakage_001" not in migrated["evidence_refs"]
-

@@ -1,0 +1,180 @@
+{
+  "$defs": {
+    "ResearchHypothesis": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "enum": [
+            "schema",
+            "metric",
+            "validation",
+            "leakage",
+            "relationship",
+            "drift",
+            "baseline",
+            "feature",
+            "notebook",
+            "leaderboard",
+            "data_quality"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "claim": {
+          "minLength": 1,
+          "title": "Claim",
+          "type": "string"
+        },
+        "confidence_before_eda": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence Before Eda",
+          "type": "string"
+        },
+        "expected_eda_checks": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Expected Eda Checks",
+          "type": "array"
+        },
+        "hypothesis_id": {
+          "minLength": 1,
+          "title": "Hypothesis Id",
+          "type": "string"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "priority": {
+          "default": "P1",
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ],
+          "title": "Priority",
+          "type": "string"
+        },
+        "rationale": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rationale"
+        },
+        "source_refs": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "status": {
+          "default": "needs_eda",
+          "enum": [
+            "needs_eda",
+            "supported_by_source",
+            "analogous_only",
+            "not_testable"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hypothesis_id",
+        "category",
+        "claim",
+        "confidence_before_eda"
+      ],
+      "title": "ResearchHypothesis",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "competition_id": {
+      "minLength": 1,
+      "title": "Competition Id",
+      "type": "string"
+    },
+    "contract_family": {
+      "const": "research_hypotheses",
+      "default": "research_hypotheses",
+      "title": "Contract Family",
+      "type": "string"
+    },
+    "created_at": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Created At"
+    },
+    "eda_tasks": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Eda Tasks",
+      "type": "array"
+    },
+    "hypotheses": {
+      "items": {
+        "$ref": "#/$defs/ResearchHypothesis"
+      },
+      "title": "Hypotheses",
+      "type": "array"
+    },
+    "models_used": {
+      "title": "Models Used",
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "scout_limitations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Scout Limitations",
+      "type": "array"
+    },
+    "structured_findings": {
+      "items": {
+        "type": "object"
+      },
+      "title": "Structured Findings",
+      "type": "array"
+    }
+  },
+  "required": [
+    "competition_id",
+    "contract_family",
+    "schema_version"
+  ],
+  "title": "ResearchHypotheses",
+  "type": "object"
+}

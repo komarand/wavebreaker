@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +28,10 @@ from kaggle_researcher.contracts.registries import build_contract_registries
 from kaggle_researcher.contracts.research import ResearchHypotheses, ResearchHypothesis
 from kaggle_researcher.contracts.review import SkepticalReview
 from kaggle_researcher.contracts.synthesis_context import build_final_synthesis_context
+from kaggle_researcher.contracts.evidence_manifest import (
+    EvidenceConflictPolicy,
+    publish_eda_evidence_bundle,
+)
 from kaggle_researcher.contracts.validation import (
     LeaderboardAuditResult,
     LeakageRiskResult,
@@ -102,6 +106,15 @@ def _stage_bundle(*, shared_constraint_id: str = "safe-1"):
         (),
     )
     eda = EdaStageResult(pack, Path("eda.json"), Path("eda.md"))
+    published = publish_eda_evidence_bundle(
+        pack, conflict_policy=EvidenceConflictPolicy.DEGRADED
+    )
+    eda = replace(
+        eda,
+        evidence_pack=published.evidence_pack,
+        evidence_manifest=published.evidence_manifest,
+        published_bundle=published,
+    )
     reasoning = ReasoningStageResult(
         MetricResult(
             confidence="high", metric_explanation="Ranking.", needs_calibration=False,
@@ -155,6 +168,7 @@ def _validate(strategy: FinalStrategyResult, bundle) -> None:
         reasoning.review,
         strategy,
         hypotheses=research.hypotheses,
+        evidence_manifest=eda.evidence_manifest,
     )
 
 
@@ -224,7 +238,8 @@ def test_legacy_generic_reference_migration_rejects_ambiguity() -> None:
 def test_prepared_context_contains_every_exact_namespace_allowlist() -> None:
     research, eda, reasoning, registries = _stage_bundle()
     context = build_final_synthesis_context(
-        competition_desc="demo", research=research, eda=eda, reasoning=reasoning,
+        competition_desc="demo", research=research,
+        published_eda_bundle=publish_eda_evidence_bundle(eda.evidence_pack), reasoning=reasoning,
         registries=registries, eda_summary_text="# EDA",
         optional_stage_failures=[SimpleNamespace(message="Optional audit unavailable.")],
     )
@@ -246,6 +261,7 @@ def test_optional_stage_failure_must_be_preserved_structurally() -> None:
             strategy,
             hypotheses=research.hypotheses,
             optional_stage_failures=["Optional audit unavailable."],
+            evidence_manifest=eda.evidence_manifest,
         )
 
     strategy.limitations.append("Optional audit unavailable.")
@@ -256,6 +272,7 @@ def test_optional_stage_failure_must_be_preserved_structurally() -> None:
         strategy,
         hypotheses=research.hypotheses,
         optional_stage_failures=["Optional audit unavailable."],
+        evidence_manifest=eda.evidence_manifest,
     )
 
 

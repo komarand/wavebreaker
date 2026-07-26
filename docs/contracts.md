@@ -13,8 +13,8 @@ in `research.py`, `eda.py`, `validation.py`, `experiments.py`, `review.py`, and
 and `synthesis_context.py`.
 
 Every versioned JSON object includes `contract_family` and `schema_version`.
-Missing versions are legacy input, `1.0` is current, and unknown future versions
-fail without repair. Version strings are centralized in `versions.py`.
+Missing versions are legacy input. Current versions are selected per family in
+`versions.py`; unknown future versions fail without repair.
 
 The canonical runtime inventory lives in `kaggle_researcher/contracts/registry.py`.
 This document summarizes the producer-consumer boundaries that the contract test
@@ -31,7 +31,7 @@ suite exercises. Pytest remains the source of truth.
 | `LeaderboardAuditResult` | Leaderboard Auditor | synthesis | internal | none | evidence IDs | null collections only |
 | `ExperimentPlan` | Experiment Planner | reviewer, synthesis | 1.0 | none after planner canonicalization | experiment IDs, source hypothesis IDs, evidence IDs | legacy list wrapper plus explicit evidence aliases |
 | `ReviewResult` | Skeptical Reviewer | synthesis | 1.0 | none | evidence IDs, reviewed/approved/rejected experiment IDs | unversioned compatibility input and null collections |
-| `FinalStrategyResult` | Final Strategy | report, validator | 1.0 | task type, recommended validation | evidence, hypothesis, source, approved experiment IDs | deterministic repair then fallback |
+| `FinalStrategyResult` | Final Strategy | report, validator | 2.0 | task type, recommended validation | evidence, hypothesis, source, approved experiment IDs | v1 read compatibility; unversioned legacy to 2.0 |
 | run manifest | full-run orchestrator | resume, summary | 1.0 | stage error/timestamps | typed stage IDs and artifact pointers | recognized unversioned manifests to 1.0 |
 | final report | report renderer | validator, human reader | n/a | n/a | rendered from validated strategy | none |
 
@@ -45,6 +45,13 @@ suite exercises. Pytest remains the source of truth.
 - `experiment`: assigned deterministically at the Experiment Planner boundary. `source_hypothesis_ids` preserve provenance without reusing hypothesis identity. Reviewer and Final Strategy consume only planner IDs.
 - `risk`, `validation_requirement`, and `safety_constraint`: distinct EDA-owned namespaces consumed structurally by Final Strategy.
 - `stage` and module-local IDs remain in their owning artifacts and are not merged into the evidence namespace.
+
+`EvidenceReferenceManifest` is the immutable reference-space snapshot. It is built
+exactly once at the EDA publication boundary and embedded with the frozen
+`EdaEvidencePack` in `PublishedEdaEvidenceBundle`. Downstream code may project typed
+registries from that manifest, but may not call `generate_allowed_evidence_refs`,
+`generate_semantic_evidence_refs`, infer a namespace with `namespace_for`, traverse
+the evidence registry directly, or rebuild an evidence registry from the pack.
 
 `EvidenceRegistry` performs exact lookup in explicitly allowed namespaces. Approved
 nested paths such as `baseline_evidence.metric_value` and
@@ -103,7 +110,9 @@ remain available on the exception and in logs.
 Prepared `ExperimentPlanningContext` and `FinalSynthesisContext` models expose
 exact allowlists and only the evidence, constraints, requirements, limitations,
 and approved decisions required by an LLM stage. Raw artifact dumps and
-deprecated projections are not authoritative prompt context.
+deprecated projections are not authoritative prompt context. Final synthesis embeds
+the complete published bundle; prompt and validator diagnostics must record the same
+`pack_hash`, `manifest_hash`, and `bundle_hash`.
 
 ## Producer and consumer responsibilities
 
@@ -122,6 +131,88 @@ relative paths, contract family, size, and SHA-256. Supported legacy manifests
 are backed up and migrated atomically; unknown versions, aliases, external paths,
 and integrity mismatches fail. See `contract_cleanup_audit.md` for the lifecycle
 and remaining compatibility inventory.
+
+## Evidence publication and hash policy
+
+The EDA publisher freezes a validated pack, creates sorted direct, semantic, and
+contract reference entries, records conflicts, and computes hashes using canonical
+JSON policy `1.0`. `pack_hash` identifies the frozen EDA payload; `manifest_hash`
+identifies manifest content and its pack hash; `bundle_hash` identifies the family,
+version, pack hash, and manifest hash. No timestamp participates in these identities.
+
+Strict publication rejects blocking conflicts. Degraded publication retains a
+structured conflict, marks ambiguous entries unavailable, and adds warnings and
+limitations; it never silently selects an owner. Consumers validate the embedded
+pack, all three hashes, schema versions, deterministic ordering, namespace ownership,
+and path resolution before use. A mismatch is an internal contract failure: stop the
+stage, preserve diagnostics, and rerun EDA publication. Do not regenerate references
+downstream to make the mismatch disappear.
+
+The removed downstream paths are classified as follows:
+
+| Removed path | Classification | Replacement |
+| --- | --- | --- |
+| Final synthesis bundle fallback to `generate_allowed_evidence_refs` | deprecated recomputation | manifest entries |
+| Final Strategy reference-catalog fallback to pack traversal | deprecated recomputation | required manifest argument |
+| full-run validator `build_evidence_registry(pack)` | snapshot divergence risk | registry projection from loaded manifest |
+| registry-builder fallback when EDA has no manifest | implicit legacy handling | explicit ingest migration first |
+| Final Synthesizer `registries.evidence.ids(...)` traversal | downstream registry coupling | context manifest plus retrieved source IDs |
+| `namespace_for` inference during legacy migration | implicit namespace ownership | exact typed registry sets |
+
+`tests/contracts/test_no_downstream_evidence_recomputation.py` enforces this boundary.
+
+## Ingest and legacy migration boundary
+
+All external serialized contracts enter through the contract registry and shared
+ingest pipeline: strict header dispatch, registered migration, narrow normalization,
+model validation, diagnostics, then hashing. Producers do not call compatibility
+adapters.
+
+- A legacy `EdaEvidencePack` without a manifest is frozen and converted in memory to
+  a bundle whose manifest has `origin="legacy_migration"`; a warning is attached.
+- A legacy `FinalSynthesisContext` with a frozen pack receives that in-memory bundle.
+  Missing/unverifiable snapshots, differing pack/manifest hashes, and mixed
+  competition runs are rejected.
+- Version-1 monolithic Final Strategy artifacts remain readable. Unversioned strategy
+  artifacts migrate to 2.0, and action-level `evidence_bindings` move to the top-level
+  `evidence_catalog` with a warning.
+- Compatibility reads never write, rename, or update the source artifact. Canonical
+  output is written only by an explicit producer/writer operation.
+
+## Two-call Final Strategy protocol
+
+Call 1 returns `StrategySelectionDraft`. Deterministic compilation validates and
+freezes a versioned `StrategySkeleton`, including its ID, content hash, prompt
+fingerprint, action/experiment identity maps, evidence catalog, and dependency graph.
+Call 2 receives that immutable skeleton and returns `StrategyRenderingDraft`; it may
+change wording only. The bridge rejects changed IDs, ordering, structure, evidence,
+dependencies, validation policy, or skeleton hash. If rendering fails, the stable
+selection remains available through deterministic fallback rather than a third
+strategic call.
+
+## Adding a contract version and exporting schemas
+
+To add a public version:
+
+1. Add or update the strict Pydantic model with literal `contract_family` and
+   `schema_version` fields.
+2. Register the exact family/version/model tuple in `contracts/registry.py` and select
+   the current version in `contracts/versions.py`.
+3. Register every supported migration edge; never reinterpret unknown versions.
+4. Add representative fixtures and producer/consumer boundary tests.
+5. Export and commit schemas with:
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe -m kaggle_researcher.contracts.export_schemas
+```
+
+The exporter calls `model_json_schema()` for every registered public family/version,
+pins the dispatch header to that exact version, rejects duplicate output paths, sorts
+JSON keys, and writes no timestamp. Schemas live under `contracts/schemas/`; the
+`final_strategy` family is published in the `final_strategy_result` directory. The CI
+drift test exports into a temporary directory and byte-compares it with committed
+files. It never regenerates committed files. On drift, run the command above, review
+the schema diff together with migration and fixture changes, then commit them.
 
 ## Running Contract Checks
 
@@ -145,9 +236,8 @@ strict public result boundary. Draft actions express support as typed
 legacy normalizer resolves old reference fields through `ReferenceCatalog`, preserves
 first-seen order, removes duplicates, and fails on unresolved or ambiguous IDs.
 
-P1.1 does not compile `FinalStrategyDraft` into `FinalStrategyResult`; that conversion
-belongs to the Strategy Compiler boundary. The public result schema and renderer remain
-unchanged.
+The selection draft is compiled into an immutable `StrategySkeleton`; the rendering
+draft is then merged into `FinalStrategyResult` only after skeleton-integrity checks.
 
 | Field | Namespace |
 | --- | --- |

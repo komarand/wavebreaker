@@ -1,0 +1,240 @@
+{
+  "$defs": {
+    "EvidenceReferenceConflict": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Canonical Paths",
+          "type": "array"
+        },
+        "conflict_type": {
+          "enum": [
+            "duplicate_identity",
+            "cross_namespace_collision",
+            "semantic_alias_collision",
+            "exact_duplicate_registration",
+            "deprecated_alias"
+          ],
+          "title": "Conflict Type",
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "namespaces": {
+          "items": {
+            "enum": [
+              "eda_evidence",
+              "reasoning_evidence",
+              "source_claim",
+              "hypothesis",
+              "synthetic_inference",
+              "risk",
+              "validation_requirement",
+              "safety_constraint"
+            ],
+            "type": "string"
+          },
+          "title": "Namespaces",
+          "type": "array"
+        },
+        "ref": {
+          "minLength": 1,
+          "title": "Ref",
+          "type": "string"
+        },
+        "severity": {
+          "enum": [
+            "warning",
+            "error"
+          ],
+          "title": "Severity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref",
+        "namespaces",
+        "canonical_paths",
+        "conflict_type",
+        "severity",
+        "message"
+      ],
+      "title": "EvidenceReferenceConflict",
+      "type": "object"
+    },
+    "EvidenceReferenceEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "available": {
+          "default": true,
+          "title": "Available",
+          "type": "boolean"
+        },
+        "canonical_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Canonical Path"
+        },
+        "metadata": {
+          "title": "Metadata",
+          "type": "object"
+        },
+        "namespace": {
+          "enum": [
+            "eda_evidence",
+            "reasoning_evidence",
+            "source_claim",
+            "hypothesis",
+            "synthetic_inference",
+            "risk",
+            "validation_requirement",
+            "safety_constraint"
+          ],
+          "title": "Namespace",
+          "type": "string"
+        },
+        "ref": {
+          "minLength": 1,
+          "title": "Ref",
+          "type": "string"
+        },
+        "reference_kind": {
+          "enum": [
+            "direct_path",
+            "semantic_ref",
+            "contract_ref"
+          ],
+          "title": "Reference Kind",
+          "type": "string"
+        },
+        "semantic_identity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Identity"
+        },
+        "source_component": {
+          "minLength": 1,
+          "title": "Source Component",
+          "type": "string"
+        },
+        "value_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value Type"
+        }
+      },
+      "required": [
+        "ref",
+        "namespace",
+        "reference_kind",
+        "source_component"
+      ],
+      "title": "EvidenceReferenceEntry",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "conflicts": {
+      "items": {
+        "$ref": "#/$defs/EvidenceReferenceConflict"
+      },
+      "title": "Conflicts",
+      "type": "array"
+    },
+    "contract_family": {
+      "const": "evidence_reference_manifest",
+      "default": "evidence_reference_manifest",
+      "title": "Contract Family",
+      "type": "string"
+    },
+    "entries": {
+      "items": {
+        "$ref": "#/$defs/EvidenceReferenceEntry"
+      },
+      "title": "Entries",
+      "type": "array"
+    },
+    "generated_at_stage": {
+      "const": "eda_publication_boundary",
+      "default": "eda_publication_boundary",
+      "enum": [
+        "eda_publication_boundary"
+      ],
+      "title": "Generated At Stage",
+      "type": "string"
+    },
+    "hash_policy_version": {
+      "default": "1.0",
+      "title": "Hash Policy Version",
+      "type": "string"
+    },
+    "manifest_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Manifest Hash",
+      "type": "string"
+    },
+    "manifest_version": {
+      "default": "1.0",
+      "title": "Manifest Version",
+      "type": "string"
+    },
+    "origin": {
+      "default": "eda_publication",
+      "enum": [
+        "eda_publication",
+        "legacy_migration"
+      ],
+      "title": "Origin",
+      "type": "string"
+    },
+    "pack_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Pack Hash",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "contract_family",
+    "manifest_hash",
+    "pack_hash",
+    "schema_version"
+  ],
+  "title": "EvidenceReferenceManifest",
+  "type": "object"
+}

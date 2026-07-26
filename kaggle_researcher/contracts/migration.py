@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Generic, Mapping, TypeVar
+from typing import Any, Callable, Generic, Mapping, TypeVar
 
 from kaggle_researcher.contracts.errors import (
     ArtifactContractError,
@@ -14,6 +14,7 @@ from kaggle_researcher.contracts.versions import CURRENT_SCHEMA_VERSION
 
 
 T = TypeVar("T")
+UNVERSIONED_SCHEMA_VERSION = "unversioned"
 
 
 @dataclass(frozen=True)
@@ -296,3 +297,282 @@ def _assert_current_fields(
             f"Current {contract} artifact contains unknown fields: {', '.join(unknown[:8])}",
             contract=contract.split(".", 1)[0],
         )
+
+
+MigrationFunction = Callable[[Mapping[str, Any]], Mapping[str, Any] | MigrationResult[Any]]
+MigrationValidator = Callable[[str, str, Mapping[str, Any]], None]
+
+
+@dataclass(frozen=True)
+class ContractMigration:
+    contract_family: str
+    from_version: str
+    to_version: str
+    function: MigrationFunction
+    migration_id: str
+    allow_downgrade: bool = False
+
+
+@dataclass(frozen=True)
+class MigrationStepDiagnostic:
+    migration_id: str
+    contract_family: str
+    from_version: str
+    to_version: str
+    changes: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class MigrationExecution:
+    payload: dict[str, Any]
+    diagnostics: tuple[MigrationStepDiagnostic, ...]
+
+    @property
+    def migrations_applied(self) -> list[str]:
+        values: list[str] = []
+        for diagnostic in self.diagnostics:
+            values.append(diagnostic.migration_id)
+            values.extend(diagnostic.changes)
+        return values
+
+    @property
+    def warnings(self) -> list[str]:
+        return [warning for item in self.diagnostics for warning in item.warnings]
+
+
+class ContractMigrationGraph:
+    """Explicit directed, cycle-free migration graph with deterministic routing."""
+
+    def __init__(self) -> None:
+        self._edges: dict[tuple[str, str, str], ContractMigration] = {}
+
+    def register(self, migration: ContractMigration) -> None:
+        key = (
+            migration.contract_family,
+            migration.from_version,
+            migration.to_version,
+        )
+        if key in self._edges:
+            raise ContractMigrationError(
+                f"Duplicate migration edge {key!r}", contract=migration.contract_family
+            )
+        self._edges[key] = migration
+        try:
+            self._assert_acyclic(migration.contract_family)
+            if (
+                not migration.allow_downgrade
+                and _version_key(migration.to_version) < _version_key(migration.from_version)
+            ):
+                raise ContractMigrationError(
+                    f"Migration {migration.migration_id!r} is an undeclared downgrade",
+                    contract=migration.contract_family,
+                )
+        except Exception:
+            del self._edges[key]
+            raise
+
+    def definitions(self) -> tuple[ContractMigration, ...]:
+        return tuple(
+            self._edges[key]
+            for key in sorted(self._edges)
+        )
+
+    def find_path(
+        self, contract_family: str, from_version: str, to_version: str
+    ) -> tuple[ContractMigration, ...]:
+        if from_version == to_version:
+            return ()
+        frontier: list[tuple[str, tuple[ContractMigration, ...]]] = [(from_version, ())]
+        visited = {from_version}
+        while frontier:
+            version, path = frontier.pop(0)
+            outgoing = sorted(
+                (
+                    migration for migration in self._edges.values()
+                    if migration.contract_family == contract_family
+                    and migration.from_version == version
+                ),
+                key=lambda item: (item.to_version, item.migration_id),
+            )
+            for migration in outgoing:
+                next_path = (*path, migration)
+                if migration.to_version == to_version:
+                    return next_path
+                if migration.to_version not in visited:
+                    visited.add(migration.to_version)
+                    frontier.append((migration.to_version, next_path))
+        raise ContractMigrationError(
+            f"No migration path for {contract_family} {from_version}->{to_version}",
+            contract=contract_family,
+        )
+
+    def apply(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        contract_family: str,
+        from_version: str,
+        to_version: str,
+        validator: MigrationValidator | None = None,
+    ) -> MigrationExecution:
+        current = deepcopy(dict(payload))
+        diagnostics: list[MigrationStepDiagnostic] = []
+        for migration in self.find_path(contract_family, from_version, to_version):
+            outcome = migration.function(deepcopy(current))
+            changes: tuple[str, ...] = ()
+            warnings: tuple[str, ...] = ()
+            if isinstance(outcome, MigrationResult):
+                current = deepcopy(dict(outcome.value))
+                changes = tuple(outcome.applied_migrations)
+                warnings = tuple(outcome.warnings)
+            elif isinstance(outcome, Mapping):
+                current = deepcopy(dict(outcome))
+            else:
+                raise ContractMigrationError(
+                    f"Migration {migration.migration_id!r} returned a non-object payload",
+                    contract=contract_family,
+                )
+            if (
+                current.get("contract_family") != contract_family
+                or current.get("schema_version") != migration.to_version
+            ):
+                raise ContractMigrationError(
+                    f"Migration {migration.migration_id!r} emitted an invalid target header",
+                    contract=contract_family,
+                )
+            if validator is not None:
+                validator(contract_family, migration.to_version, current)
+            diagnostics.append(MigrationStepDiagnostic(
+                migration.migration_id,
+                contract_family,
+                migration.from_version,
+                migration.to_version,
+                changes,
+                warnings,
+            ))
+        return MigrationExecution(current, tuple(diagnostics))
+
+    def _assert_acyclic(self, contract_family: str) -> None:
+        adjacency: dict[str, list[str]] = {}
+        for migration in self._edges.values():
+            if migration.contract_family == contract_family:
+                adjacency.setdefault(migration.from_version, []).append(migration.to_version)
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(version: str) -> None:
+            if version in visiting:
+                raise ContractMigrationError(
+                    f"Migration cycle detected for {contract_family}",
+                    contract=contract_family,
+                )
+            if version in visited:
+                return
+            visiting.add(version)
+            for target in sorted(adjacency.get(version, ())):
+                visit(target)
+            visiting.remove(version)
+            visited.add(version)
+
+        for version in sorted(adjacency):
+            visit(version)
+
+
+def _version_key(version: str) -> tuple[int, ...]:
+    if version == UNVERSIONED_SCHEMA_VERSION:
+        return (-1,)
+    try:
+        return tuple(int(part) for part in version.split("."))
+    except ValueError:
+        return (0, *tuple(ord(character) for character in version))
+
+
+CONTRACT_MIGRATIONS = ContractMigrationGraph()
+CONTRACT_MIGRATIONS.register(ContractMigration(
+    "research_hypotheses",
+    UNVERSIONED_SCHEMA_VERSION,
+    "1.0",
+    migrate_research_hypotheses_payload,
+    "research_hypotheses.legacy_unversioned_to_1_0",
+))
+CONTRACT_MIGRATIONS.register(ContractMigration(
+    "eda_task_plan",
+    UNVERSIONED_SCHEMA_VERSION,
+    "1.0",
+    migrate_eda_task_plan_payload,
+    "eda_task_plan.legacy_unversioned_to_1_0",
+))
+
+
+def _add_eda_evidence_pack_header(
+    payload: Mapping[str, Any],
+) -> MigrationResult[dict[str, Any]]:
+    migrated = deepcopy(dict(payload))
+    migrated["contract_family"] = "eda_evidence_pack"
+    migrated["schema_version"] = "1.0"
+    return MigrationResult(
+        migrated,
+        None,
+        "1.0",
+        True,
+        ["added canonical eda_evidence_pack contract header"],
+        [],
+    )
+
+
+CONTRACT_MIGRATIONS.register(ContractMigration(
+    "eda_evidence_pack",
+    UNVERSIONED_SCHEMA_VERSION,
+    "1.0",
+    _add_eda_evidence_pack_header,
+    "eda_evidence_pack.legacy_unversioned_to_1_0",
+))
+
+
+def _migrate_unversioned_final_strategy(
+    payload: Mapping[str, Any],
+) -> MigrationResult[dict[str, Any]]:
+    from kaggle_researcher.contracts.final_strategy import (
+        normalize_legacy_final_strategy_payload,
+    )
+
+    migrated = normalize_legacy_final_strategy_payload(payload)
+    migrated["contract_family"] = "final_strategy"
+    migrated["schema_version"] = "2.0"
+    return MigrationResult(
+        migrated,
+        None,
+        "2.0",
+        True,
+        ["added canonical final_strategy contract header and synthesis status"],
+        [],
+    )
+
+
+CONTRACT_MIGRATIONS.register(ContractMigration(
+    "final_strategy",
+    UNVERSIONED_SCHEMA_VERSION,
+    "2.0",
+    _migrate_unversioned_final_strategy,
+    "final_strategy.legacy_unversioned_to_2_0",
+))
+
+
+def _migrate_unversioned_final_synthesis_context(
+    payload: Mapping[str, Any],
+) -> MigrationResult[dict[str, Any]]:
+    from kaggle_researcher.contracts.synthesis_context import (
+        migrate_legacy_final_synthesis_context_payload,
+    )
+
+    return migrate_legacy_final_synthesis_context_payload(payload)
+
+
+CONTRACT_MIGRATIONS.register(ContractMigration(
+    "final_synthesis_context",
+    UNVERSIONED_SCHEMA_VERSION,
+    "1.0",
+    _migrate_unversioned_final_synthesis_context,
+    "final_synthesis_context.legacy_pack_to_immutable_bundle_1_0",
+))

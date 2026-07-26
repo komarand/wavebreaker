@@ -13,9 +13,7 @@ from kaggle_researcher.contracts.action_support import (
     compile_final_strategy_action_support,
 )
 from kaggle_researcher.contracts.eda import EdaEvidencePack
-from kaggle_researcher.contracts.reference_catalog import (
-    build_final_strategy_reference_catalog,
-)
+from tests.contracts.factories import build_final_strategy_reference_catalog
 from kaggle_researcher.contracts.research import ResearchHypotheses
 
 

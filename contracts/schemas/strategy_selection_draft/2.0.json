@@ -1,0 +1,665 @@
+{
+  "$defs": {
+    "CandidateExperimentDraft": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_rule": {
+          "title": "Acceptance Rule",
+          "type": "string"
+        },
+        "client_experiment_key": {
+          "title": "Client Experiment Key",
+          "type": "string"
+        },
+        "comparison_model_family_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Comparison Model Family Id"
+        },
+        "confidence": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "dependencies": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Dependencies",
+          "type": "array"
+        },
+        "estimated_cost": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Estimated Cost",
+          "type": "string"
+        },
+        "exact_change": {
+          "title": "Exact Change",
+          "type": "string"
+        },
+        "experiment_kind": {
+          "title": "Experiment Kind",
+          "type": "string"
+        },
+        "family_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Family Key"
+        },
+        "hypothesis": {
+          "title": "Hypothesis",
+          "type": "string"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "metric_name": {
+          "title": "Metric Name",
+          "type": "string"
+        },
+        "model_family_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Family Id"
+        },
+        "motivating_hypothesis_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Motivating Hypothesis Ids",
+          "type": "array"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "primary_evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Primary Evidence Refs",
+          "type": "array"
+        },
+        "priority": {
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ],
+          "title": "Priority",
+          "type": "string"
+        },
+        "risks": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Risks",
+          "type": "array"
+        },
+        "safety_hypothesis_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Safety Hypothesis Ids",
+          "type": "array"
+        },
+        "source_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "supporting_evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supporting Evidence Refs",
+          "type": "array"
+        },
+        "validation_context_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Validation Context Ids",
+          "type": "array"
+        },
+        "validation_strategy": {
+          "enum": [
+            "stratified_kfold",
+            "kfold",
+            "group_kfold",
+            "stratified_group_kfold",
+            "temporal_holdout",
+            "temporal_cv",
+            "ranking_group_cv",
+            "custom_required"
+          ],
+          "title": "Validation Strategy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "client_experiment_key",
+        "experiment_kind",
+        "name",
+        "priority",
+        "confidence",
+        "hypothesis",
+        "exact_change",
+        "validation_strategy",
+        "metric_name",
+        "acceptance_rule",
+        "estimated_cost",
+        "primary_evidence_refs",
+        "motivating_hypothesis_ids",
+        "risks"
+      ],
+      "title": "CandidateExperimentDraft",
+      "type": "object"
+    },
+    "ExperimentArmDraft": {
+      "additionalProperties": false,
+      "properties": {
+        "client_arm_key": {
+          "title": "Client Arm Key",
+          "type": "string"
+        },
+        "dependencies": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Dependencies",
+          "type": "array"
+        },
+        "exact_change": {
+          "title": "Exact Change",
+          "type": "string"
+        },
+        "fit_scope": {
+          "enum": [
+            "per_row",
+            "within_fold",
+            "oof_only",
+            "not_applicable"
+          ],
+          "title": "Fit Scope",
+          "type": "string"
+        },
+        "generated_features": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Generated Features",
+          "type": "array"
+        },
+        "leakage_risk": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Leakage Risk",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "client_arm_key",
+        "name",
+        "exact_change",
+        "fit_scope",
+        "leakage_risk"
+      ],
+      "title": "ExperimentArmDraft",
+      "type": "object"
+    },
+    "FeatureExperimentFamilyDraft": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_rule": {
+          "title": "Acceptance Rule",
+          "type": "string"
+        },
+        "baseline_arm": {
+          "$ref": "#/$defs/ExperimentArmDraft"
+        },
+        "candidate_arms": {
+          "items": {
+            "$ref": "#/$defs/ExperimentArmDraft"
+          },
+          "title": "Candidate Arms",
+          "type": "array"
+        },
+        "client_family_key": {
+          "title": "Client Family Key",
+          "type": "string"
+        },
+        "estimated_cost": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Estimated Cost",
+          "type": "string"
+        },
+        "hypothesis": {
+          "title": "Hypothesis",
+          "type": "string"
+        },
+        "input_columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Input Columns",
+          "type": "array"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "metric_name": {
+          "title": "Metric Name",
+          "type": "string"
+        },
+        "motivating_hypothesis_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Motivating Hypothesis Ids",
+          "type": "array"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "primary_evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Primary Evidence Refs",
+          "type": "array"
+        },
+        "priority": {
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ],
+          "title": "Priority",
+          "type": "string"
+        },
+        "risks": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Risks",
+          "type": "array"
+        },
+        "safety_hypothesis_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Safety Hypothesis Ids",
+          "type": "array"
+        },
+        "source_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "supporting_evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supporting Evidence Refs",
+          "type": "array"
+        },
+        "validation_strategy": {
+          "enum": [
+            "stratified_kfold",
+            "kfold",
+            "group_kfold",
+            "stratified_group_kfold",
+            "temporal_holdout",
+            "temporal_cv",
+            "ranking_group_cv",
+            "custom_required"
+          ],
+          "title": "Validation Strategy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "client_family_key",
+        "name",
+        "priority",
+        "input_columns",
+        "hypothesis",
+        "baseline_arm",
+        "candidate_arms",
+        "validation_strategy",
+        "metric_name",
+        "primary_evidence_refs",
+        "motivating_hypothesis_ids",
+        "risks",
+        "acceptance_rule",
+        "estimated_cost"
+      ],
+      "title": "FeatureExperimentFamilyDraft",
+      "type": "object"
+    },
+    "SectionPlanDraft": {
+      "additionalProperties": false,
+      "properties": {
+        "section_id": {
+          "title": "Section Id",
+          "type": "string"
+        },
+        "selected_action_keys": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Selected Action Keys",
+          "type": "array"
+        },
+        "selected_experiment_keys": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Selected Experiment Keys",
+          "type": "array"
+        },
+        "selected_family_keys": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Selected Family Keys",
+          "type": "array"
+        },
+        "summary_intent": {
+          "title": "Summary Intent",
+          "type": "string"
+        }
+      },
+      "required": [
+        "section_id",
+        "summary_intent"
+      ],
+      "title": "SectionPlanDraft",
+      "type": "object"
+    },
+    "SelectedActionDraft": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "title": "Action",
+          "type": "string"
+        },
+        "action_kind": {
+          "title": "Action Kind",
+          "type": "string"
+        },
+        "approved_experiment_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Approved Experiment Ids",
+          "type": "array"
+        },
+        "client_action_key": {
+          "title": "Client Action Key",
+          "type": "string"
+        },
+        "confidence": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "dependencies": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Dependencies",
+          "type": "array"
+        },
+        "feature_metadata": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Feature Metadata"
+        },
+        "limitation_evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitation Evidence Refs",
+          "type": "array"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "motivating_hypothesis_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Motivating Hypothesis Ids",
+          "type": "array"
+        },
+        "primary_evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Primary Evidence Refs",
+          "type": "array"
+        },
+        "priority": {
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ],
+          "title": "Priority",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "rejected_hypothesis_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Rejected Hypothesis Ids",
+          "type": "array"
+        },
+        "safety_constraint_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Safety Constraint Ids",
+          "type": "array"
+        },
+        "safety_hypothesis_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Safety Hypothesis Ids",
+          "type": "array"
+        },
+        "source_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "supporting_evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supporting Evidence Refs",
+          "type": "array"
+        },
+        "validation_context_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Validation Context Ids",
+          "type": "array"
+        },
+        "validation_requirement_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Validation Requirement Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "client_action_key",
+        "action_kind",
+        "action",
+        "priority",
+        "confidence",
+        "reason",
+        "primary_evidence_refs"
+      ],
+      "title": "SelectedActionDraft",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "candidate_experiments": {
+      "items": {
+        "$ref": "#/$defs/CandidateExperimentDraft"
+      },
+      "title": "Candidate Experiments",
+      "type": "array"
+    },
+    "contract_family": {
+      "const": "strategy_selection_draft",
+      "default": "strategy_selection_draft",
+      "title": "Contract Family",
+      "type": "string"
+    },
+    "feature_experiment_families": {
+      "items": {
+        "$ref": "#/$defs/FeatureExperimentFamilyDraft"
+      },
+      "title": "Feature Experiment Families",
+      "type": "array"
+    },
+    "limitations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Limitations",
+      "type": "array"
+    },
+    "proposed_backlog_experiment_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Proposed Backlog Experiment Ids",
+      "type": "array"
+    },
+    "proposed_core_experiment_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Proposed Core Experiment Ids",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "2.0",
+      "default": "2.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "section_plan": {
+      "items": {
+        "$ref": "#/$defs/SectionPlanDraft"
+      },
+      "title": "Section Plan",
+      "type": "array"
+    },
+    "selected_actions": {
+      "items": {
+        "$ref": "#/$defs/SelectedActionDraft"
+      },
+      "title": "Selected Actions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "candidate_experiments",
+    "contract_family",
+    "proposed_core_experiment_ids",
+    "schema_version",
+    "section_plan",
+    "selected_actions"
+  ],
+  "title": "StrategySelectionDraft",
+  "type": "object"
+}

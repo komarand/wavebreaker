@@ -13,9 +13,7 @@ from kaggle_researcher.contracts.action_support import (
 )
 from kaggle_researcher.contracts.eda import EdaEvidencePack
 from kaggle_researcher.contracts.final_strategy import FinalStrategyAction, FinalStrategyResult
-from kaggle_researcher.contracts.reference_catalog import (
-    build_final_strategy_reference_catalog,
-)
+from tests.contracts.factories import build_final_strategy_reference_catalog
 
 
 EVIDENCE_REF = "validation_evidence.primary_validation"

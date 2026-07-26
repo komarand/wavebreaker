@@ -1,0 +1,25 @@
+{
+  "schema_version": "2.0",
+  "protocol": "monolithic_legacy",
+  "initial_output_valid": false,
+  "repair_attempted": true,
+  "repair_succeeded": false,
+  "fallback_required": true,
+  "fallback_reason": "The initial output contained no usable actions; deterministic fallback actions were generated from registered evidence.",
+  "manifest_parity_succeeded": true,
+  "attempts": [
+    {
+      "attempt": "initial_llm",
+      "output_hash": "70cfef10d65037531a7f2dca57d8554b92d522cd7ca0b105ec0fbbc3eabbc405",
+      "issues": [
+        {
+          "stage": "llm_schema_validation",
+          "issue_type": "missing_usable_actions",
+          "field_path": "actions",
+          "message": "No usable LLM action remained; deterministic fallback actions were generated.",
+          "expected_contract": "at least one valid FinalStrategyAction"
+        }
+      ]
+    }
+  ]
+}

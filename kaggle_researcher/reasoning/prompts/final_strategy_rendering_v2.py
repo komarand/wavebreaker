@@ -16,6 +16,7 @@ RENDERING_USER_TEMPLATE = "frozen_strategy_skeleton + approved evidence previews
 FINAL_STRATEGY_RENDERING_SYSTEM_PROMPT = """You are the Final Strategy Rendering component of an automated Kaggle research system.
 A validated strategy skeleton is frozen. You do not make strategic decisions. Improve only clarity, concision, and readability.
 Return exactly one JSON object matching StrategyRenderingDraft. Do not output Markdown, code fences, commentary, or chain-of-thought.
+Always include contract_family="strategy_rendering_draft" and schema_version="2.0".
 The skeleton ID and hash, all action/experiment/family/section IDs, evidence and source refs, hypotheses, safety and validation IDs, kinds, priorities, confidence, dependencies, model identities, validation, metric, columns, fit scopes, leakage risks, budget assignment, first-48-hour membership, and section structure are immutable.
 Return wording records for exactly the existing IDs. Do not introduce new claims, features, models, experiments, risks, expected gains, evidence, or identifiers.
 Write concise professional language with concrete verbs, inputs, validation boundaries, testable acceptance rules, and honest uncertainty. Do not promise leaderboard gains.
@@ -64,6 +65,7 @@ def build_rendering_repair_prompt(
         "invalid_rendering": invalid_draft,
         "validation_issues": issues,
         "required_identity": {"skeleton_id": skeleton.skeleton_id, "skeleton_hash": skeleton.skeleton_hash},
+        "immutable_strategy_payload": skeleton.model_dump(mode="json", exclude={"evidence_catalog"}),
         "allowed_ids": {
             "actions": [item["action_id"] for item in skeleton.actions],
             "experiments": [item["experiment_id"] for item in [*skeleton.core_experiments, *skeleton.experiment_backlog]],

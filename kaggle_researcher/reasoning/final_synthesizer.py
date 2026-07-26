@@ -40,9 +40,14 @@ from kaggle_researcher.contracts.composite_reference_resolution import (
 )
 from kaggle_researcher.contracts.evidence import (
     EvidencePathResolutionError,
-    build_evidence_registry,
-    generate_allowed_evidence_refs,
     resolve_evidence_ref,
+)
+from kaggle_researcher.contracts.errors import (
+    EvidenceManifestBuildError,
+    EvidenceManifestPackMismatchError,
+)
+from kaggle_researcher.contracts.evidence_manifest import (
+    validate_published_eda_evidence_bundle,
 )
 from kaggle_researcher.contracts.experiments import (
     CrossNamespaceReferenceError,
@@ -115,6 +120,27 @@ from kaggle_researcher.schemas import PlanData, RetrievedDocument
 logger = logging.getLogger(__name__)
 
 
+def _validate_synthesis_evidence_boundary(context: FinalSynthesisContext) -> None:
+    validate_published_eda_evidence_bundle(context.published_eda_bundle)
+    if context.evidence_manifest.schema_version != "1.0":
+        raise EvidenceManifestBuildError(
+            "Unsupported evidence manifest schema at Final Synthesizer boundary",
+            stage="final_synthesis_pre_llm",
+            contract="evidence_reference_manifest",
+        )
+    blocking_refs = {
+        conflict.ref for conflict in context.evidence_manifest.conflicts
+        if conflict.severity == "error"
+    }
+    exposed = set(context.allowed_eda_result_refs)
+    if blocking_refs & exposed:
+        raise EvidenceManifestBuildError(
+            "Blocking evidence conflicts were exposed to Final Synthesizer",
+            stage="final_synthesis_pre_llm",
+            contract="evidence_reference_manifest",
+        )
+
+
 async def synthesize_final_strategy(
     *,
     context: FinalSynthesisContext,
@@ -131,8 +157,22 @@ async def synthesize_final_strategy(
             attempt="initial_llm",
             model=model,
         )],
+        evidence_manifest_version=context.evidence_manifest.manifest_version,
+        pack_hash=context.pack_hash,
+        manifest_hash=context.manifest_hash,
+        bundle_hash=context.bundle_hash,
+        allowed_ref_count=len(context.allowed_eda_result_refs),
+        conflicting_ref_count=len({
+            conflict.ref for conflict in context.evidence_manifest.conflicts
+            if conflict.severity == "error"
+        }),
+        unavailable_ref_count=sum(
+            not entry.available for entry in context.evidence_manifest.entries
+        ),
     )
     try:
+        _validate_synthesis_evidence_boundary(context)
+        diagnostics.prompt_manifest_hash = context.manifest_hash
         result = await _synthesize_final_strategy_impl(
             context=context,
             registries=registries,
@@ -141,6 +181,9 @@ async def synthesize_final_strategy(
             diagnostics_dir=diagnostics_dir,
             synthesis_diagnostics=diagnostics,
         )
+        # Detect any accidental mutation performed by postprocessing or fallback
+        # helpers before returning a strategy artifact.
+        validate_published_eda_evidence_bundle(context.published_eda_bundle)
         if diagnostics.protocol == "two_call":
             return result
         _refresh_diagnostics_summary(diagnostics)
@@ -150,7 +193,21 @@ async def synthesize_final_strategy(
             diagnostics_dir=diagnostics_dir,
         )
     except Exception as exc:
-        if isinstance(exc, FinalStrategySchemaValidationError):
+        if isinstance(exc, EvidenceManifestBuildError):
+            diagnostics.internal_contract_failure = exc.as_manifest_error()
+            if isinstance(exc, EvidenceManifestPackMismatchError):
+                diagnostics.actual_pack_hash = exc.actual_pack_hash
+            _record_issue(
+                diagnostics,
+                "initial_llm",
+                ValidationIssue(
+                    stage="internal_contract_validation",
+                    issue_type=type(exc).__name__,
+                    message=_bounded_message(str(exc)),
+                    expected_contract="PublishedEdaEvidenceBundle hash parity",
+                ),
+            )
+        elif isinstance(exc, FinalStrategySchemaValidationError):
             attempt_name = (
                 "deterministic_repair" if diagnostics.repair_attempted else "initial_llm"
             )
@@ -177,6 +234,11 @@ async def synthesize_final_strategy(
             )
         raise
     finally:
+        diagnostics.manifest_parity_succeeded = bool(
+            diagnostics.prompt_manifest_hash
+            and diagnostics.validator_manifest_hash
+            and diagnostics.prompt_manifest_hash == diagnostics.validator_manifest_hash
+        )
         _refresh_diagnostics_summary(diagnostics)
         write_final_synthesis_diagnostics(diagnostics_dir, diagnostics)
 
@@ -196,14 +258,17 @@ async def _synthesize_final_strategy_impl(
     retrieved_documents = context.retrieved_documents
     research_hypotheses = context.research_hypotheses
     eda_evidence_pack = context.eda_evidence_pack
+    allowed_eda_refs = set(context.allowed_eda_result_refs)
     eda_summary_text = context.eda_summary_text
     try:
         reference_catalog = build_final_strategy_reference_catalog(
             eda_evidence_pack,
+            evidence_manifest=context.evidence_manifest,
             research_hypotheses=research_hypotheses,
             source_claim_ids=[document.id for document in retrieved_documents],
             retrieved_documents=retrieved_documents,
         )
+        synthesis_diagnostics.validator_manifest_hash = context.manifest_hash
     except FinalStrategyCompilationError:
         raise
     except Exception as exc:
@@ -236,6 +301,7 @@ async def _synthesize_final_strategy_impl(
                 research_hypotheses=research_hypotheses,
                 reference_catalog=reference_catalog,
                 diagnostics_dir=diagnostics_dir,
+                allowed_eda_refs=allowed_eda_refs,
             )
             result = FinalStrategyResult.model_validate(grounded)
             _apply_eda_grounding(result, eda_evidence_pack, research_hypotheses)
@@ -300,6 +366,7 @@ async def _synthesize_final_strategy_impl(
         reference_catalog=reference_catalog,
         diagnostics_dir=diagnostics_dir,
         synthesis_diagnostics=synthesis_diagnostics,
+        allowed_eda_refs=allowed_eda_refs,
     )
     result = postprocess_final_strategy_result(
         result,
@@ -325,10 +392,8 @@ async def _synthesize_final_strategy_impl(
             for repair in repaired_references.applied_repairs
         ]
         result.reference_repairs = [*experiment_repairs, *result.reference_repairs]
-    allowed_eda_refs = set(generate_allowed_evidence_refs(eda_evidence_pack))
-    evidence_registry = registries.evidence
     _derive_eda_result_refs(result, allowed_eda_refs)
-    issues = _final_reference_issues(result, registries)
+    issues = _final_reference_issues(result, context, registries)
     if issues:
         _record_reference_issues(
             synthesis_diagnostics,
@@ -407,7 +472,7 @@ async def _synthesize_final_strategy_impl(
         repaired_references = repair_final_experiment_references(result, experiment_registry)
         result = repaired_references.result
         _derive_eda_result_refs(result, allowed_eda_refs)
-        remaining_issues = _final_reference_issues(result, registries)
+        remaining_issues = _final_reference_issues(result, context, registries)
         if remaining_issues:
             _record_reference_issues(
                 synthesis_diagnostics, "deterministic_repair", remaining_issues
@@ -428,6 +493,7 @@ async def _synthesize_final_strategy_impl(
         reference_catalog=reference_catalog,
         diagnostics_dir=diagnostics_dir,
         write_support_artifact=False,
+        allowed_eda_refs=allowed_eda_refs,
     )
     _synchronize_payload_eda_result_refs(final_payload, allowed_eda_refs)
     result = FinalStrategyResult.model_validate(final_payload)
@@ -456,6 +522,7 @@ async def _synthesize_final_strategy_impl(
         hypotheses=research_hypotheses,
         source_ids=[document.id for document in retrieved_documents],
         optional_stage_failures=context.optional_stage_failure_messages,
+        evidence_manifest=context.evidence_manifest,
     )
     if not synthesis_diagnostics.fallback_required:
         effective = _attempt_diagnostic(
@@ -633,27 +700,89 @@ def _reference_issue_remains(payload: dict[str, Any], issue: Any) -> int:
 
 
 def _final_reference_issues(
-    result: FinalStrategyResult, registries: ContractRegistries
+    result: FinalStrategyResult,
+    context: FinalSynthesisContext,
+    registries: ContractRegistries,
 ) -> list[ReferenceIssue]:
     issues: list[ReferenceIssue] = []
-    allowed_evidence = {
-        *registries.evidence.ids("eda_evidence"),
-        *registries.evidence.ids("source_claim"),
-        *registries.evidence.ids("synthetic_inference"),
-    }
-    allowed_eda = set(registries.evidence.ids("eda_evidence"))
-    source_ids = set(registries.evidence.ids("source_claim"))
+    source_ids = {document.id for document in context.retrieved_documents}
 
-    def actual(value: str) -> str | None:
-        try:
-            return registries.namespace_for(value)
-        except Exception:
-            return "ambiguous"
+    def evidence_issue(
+        field_path: str, value: str, *, allow_synthetic: bool = False
+    ) -> ReferenceIssue | None:
+        if allow_synthetic and value == "final_synthesizer.repaired":
+            return None
+        if value in FORBIDDEN_CONTEXT_LABELS:
+            return ReferenceIssue(
+                field_path, "eda_evidence", value, "context_label",
+                "context_label_not_reference",
+            )
+        conflicts = [
+            conflict for conflict in context.evidence_manifest.conflicts
+            if conflict.ref == value and conflict.severity == "error"
+        ]
+        if conflicts:
+            return ReferenceIssue(
+                field_path, "eda_evidence", value,
+                ",".join(conflicts[0].namespaces), "manifest_conflict",
+            )
+        matches = [
+            entry for entry in context.evidence_manifest.entries if entry.ref == value
+        ]
+        if not matches:
+            return ReferenceIssue(
+                field_path, "eda_evidence", value, None, "unknown_reference"
+            )
+        available = [entry for entry in matches if entry.available]
+        if not available:
+            return ReferenceIssue(
+                field_path, "eda_evidence", value,
+                matches[0].namespace, "unavailable_reference",
+            )
+        namespace_matches = [
+            entry for entry in available if entry.namespace == "eda_evidence"
+        ]
+        if not namespace_matches:
+            return ReferenceIssue(
+                field_path, "eda_evidence", value,
+                available[0].namespace, "namespace_mismatch",
+            )
+        if not any(
+            entry.reference_kind in {"direct_path", "semantic_ref"}
+            for entry in namespace_matches
+        ):
+            return ReferenceIssue(
+                field_path, "eda_evidence", value,
+                namespace_matches[0].namespace, "reference_kind_mismatch",
+            )
+        return None
+
+    def catalog_namespace(value: str) -> str | None:
+        matches = []
+        for namespace, identifiers in (
+            ("source", source_ids),
+            ("hypothesis", set(registries.hypotheses.by_id)),
+            ("risk", set(registries.risks.by_id)),
+            ("validation_requirement", set(registries.validation_requirements.by_id)),
+            ("safety_constraint", set(registries.safety_constraints.by_id)),
+            ("experiment", set(registries.experiments.by_id)),
+        ):
+            if value in identifiers:
+                matches.append(namespace)
+        return matches[0] if len(matches) == 1 else "multiple_catalogs" if matches else None
 
     for path, action in _iter_actions_with_paths(result):
+        for field, values, allow_synthetic in (
+            ("evidence_refs", action.evidence_refs, True),
+            ("eda_result_refs", action.eda_result_refs, False),
+        ):
+            for value in values:
+                issue = evidence_issue(
+                    f"{path}.{field}", str(value), allow_synthetic=allow_synthetic
+                )
+                if issue is not None:
+                    issues.append(issue)
         checks = (
-            ("evidence_refs", action.evidence_refs, allowed_evidence, "evidence"),
-            ("eda_result_refs", action.eda_result_refs, allowed_eda, "eda_evidence"),
             ("source_refs", action.source_refs, source_ids, "source"),
             ("hypothesis_ids", set(action.hypothesis_ids) | set(action.related_hypothesis_ids), set(registries.hypotheses.by_id), "hypothesis"),
             ("risk_ids", action.risk_ids, set(registries.risks.by_id), "risk"),
@@ -663,30 +792,25 @@ def _final_reference_issues(
         for field, values, allowed, expected in checks:
             for value in values:
                 if value not in allowed:
-                    is_context_label = str(value) in FORBIDDEN_CONTEXT_LABELS
                     issues.append(ReferenceIssue(
                         f"{path}.{field}", expected, str(value),
-                        "context_label" if is_context_label else actual(str(value)),
-                        "context_label_not_reference" if is_context_label
-                        else "cross_namespace" if actual(str(value)) else "unknown",
+                        catalog_namespace(str(value)),
+                        "namespace_mismatch" if catalog_namespace(str(value)) else "unknown_reference",
                     ))
         for value in action.experiment_ids:
             if value not in registries.experiments.approved_ids:
-                namespace = "rejected_experiment" if value in registries.experiments.rejected_ids else actual(str(value))
+                namespace = "rejected_experiment" if value in registries.experiments.rejected_ids else catalog_namespace(str(value))
                 issues.append(ReferenceIssue(
                     f"{path}.experiment_ids", "approved_experiment", str(value), namespace,
                     "rejected_experiment" if namespace == "rejected_experiment" else "unknown_or_unapproved_experiment",
                 ))
     for index, section in enumerate(result.sections):
         for value in section.evidence_refs:
-            if value not in allowed_evidence:
-                is_context_label = str(value) in FORBIDDEN_CONTEXT_LABELS
-                issues.append(ReferenceIssue(
-                    f"sections[{index}].evidence_refs", "evidence", str(value),
-                    "context_label" if is_context_label else actual(str(value)),
-                    "context_label_not_reference" if is_context_label
-                    else "cross_namespace" if actual(str(value)) else "unknown",
-                ))
+            issue = evidence_issue(
+                f"sections[{index}].evidence_refs", str(value), allow_synthetic=True
+            )
+            if issue is not None:
+                issues.append(issue)
     return issues
 
 
@@ -858,6 +982,7 @@ def _build_final_synthesizer_prompt(
         "approved_experiments": context_payload["approved_experiments"],
         "allowed_evidence_refs": context_payload["allowed_evidence_refs"],
         "allowed_eda_result_refs": context_payload["allowed_eda_result_refs"],
+        "evidence_manifest_metadata": context_payload["evidence_manifest_metadata"],
         "allowed_risk_ids": context_payload["allowed_risk_ids"],
         "allowed_validation_requirement_ids": context_payload["allowed_validation_requirement_ids"],
         "allowed_safety_constraint_ids": context_payload["allowed_safety_constraint_ids"],
@@ -1012,6 +1137,7 @@ def _result_from_payload(
     reference_catalog: ReferenceCatalog,
     diagnostics_dir: Path | None = None,
     synthesis_diagnostics: FinalSynthesisDiagnostics | None = None,
+    allowed_eda_refs: set[str] | None = None,
 ) -> FinalStrategyResult:
     normalized = (
         compile_final_strategy_draft(payload, reference_catalog)
@@ -1045,6 +1171,7 @@ def _result_from_payload(
         reference_catalog=reference_catalog,
         diagnostics_dir=diagnostics_dir,
         write_normalized_payload=True,
+        allowed_eda_refs=allowed_eda_refs,
     )
     evidence_resolution_issues = _collect_evidence_resolution_issues(evidence_report)
     deterministic_action_fallback = bool(evidence_report.fallback_action_ids)
@@ -1082,6 +1209,7 @@ def _result_from_payload(
             research_hypotheses=research_hypotheses,
             reference_catalog=reference_catalog,
             diagnostics_dir=diagnostics_dir,
+            allowed_eda_refs=allowed_eda_refs,
         )
         result = FinalStrategyResult.model_validate(fallback)
         _apply_eda_grounding(result, eda_evidence_pack, research_hypotheses)
@@ -1151,6 +1279,7 @@ def _result_from_payload(
             research_hypotheses=research_hypotheses,
             reference_catalog=reference_catalog,
             diagnostics_dir=diagnostics_dir,
+            allowed_eda_refs=allowed_eda_refs,
         )
         result = FinalStrategyResult.model_validate(repaired)
         if synthesis_diagnostics is not None:
@@ -1199,6 +1328,7 @@ def _result_from_payload(
         research_hypotheses=research_hypotheses,
         reference_catalog=reference_catalog,
         diagnostics_dir=diagnostics_dir,
+        allowed_eda_refs=allowed_eda_refs,
     )
     result = FinalStrategyResult.model_validate(fallback)
     _apply_eda_grounding(result, eda_evidence_pack, research_hypotheses)
@@ -1214,6 +1344,7 @@ def _ground_and_compile_strategy_payload(
     diagnostics_dir: Path | None,
     write_normalized_payload: bool = False,
     write_support_artifact: bool = True,
+    allowed_eda_refs: set[str] | None = None,
 ) -> tuple[
     dict[str, Any],
     FinalStrategyActionEvidenceReport,
@@ -1291,10 +1422,15 @@ def _ground_and_compile_strategy_payload(
         eda_evidence_pack=eda_evidence_pack,
         reference_catalog=reference_catalog,
     )
-    _synchronize_payload_eda_result_refs(
-        compiled,
-        set(generate_allowed_evidence_refs(eda_evidence_pack)),
+    effective_allowed_refs = (
+        allowed_eda_refs
+        if allowed_eda_refs is not None
+        else {
+            entry.canonical_ref for entry in reference_catalog.entries
+            if entry.namespace == "evidence" and entry.evidence_backed
+        }
     )
+    _synchronize_payload_eda_result_refs(compiled, effective_allowed_refs)
     if write_support_artifact:
         _write_action_support_report(
             diagnostics_dir,

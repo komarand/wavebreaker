@@ -1,0 +1,57 @@
+{
+  "competition_id": "iid_binary_tiny",
+  "task_type": "binary_classification",
+  "metric": {
+    "name": "roc_auc"
+  },
+  "recommended_validation": "stratified_kfold",
+  "sections": [
+    {
+      "section_id": "executive_summary",
+      "title": "Executive Summary",
+      "summary": "Strategy guidance tied to EDA evidence.",
+      "evidence_refs": [
+        "validation_evidence.primary_validation"
+      ],
+      "related_hypothesis_ids": [
+        "val_001"
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "action_id": "action_validation",
+      "priority": "P0",
+      "action": "Use StratifiedKFold for model comparison.",
+      "reason": "EDA selected stratified folds for the iid binary target.",
+      "evidence_refs": [
+        "validation_evidence.primary_validation"
+      ],
+      "related_hypothesis_ids": [
+        "val_001"
+      ],
+      "source_claim": "Retrieved source describes iid binary classification.",
+      "source_refs": [
+        "retrieved-1"
+      ],
+      "eda_result_refs": [
+        "validation_evidence.primary_validation"
+      ],
+      "validation_strategy": "stratified_kfold",
+      "confidence": "high"
+    }
+  ],
+  "source_to_hypothesis_links": [
+    {
+      "source_ref": "retrieved-1",
+      "source_claim": "Retrieved source describes iid binary classification.",
+      "hypothesis_id": "val_001"
+    }
+  ],
+  "hypothesis_to_eda_links": [
+    {
+      "hypothesis_id": "val_001",
+      "eda_result_ref": "validation_evidence.primary_validation"
+    }
+  ]
+}

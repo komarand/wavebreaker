@@ -8,12 +8,17 @@ from typing import Any
 from pydantic import ValidationError
 
 from kaggle_researcher.contracts.eda_task_plan import load_eda_task_plan
-from kaggle_researcher.contracts.artifacts import load_experiment_plan, load_final_strategy
+from kaggle_researcher.contracts.artifacts import (
+    load_eda_publication_bundle,
+    load_experiment_plan,
+    load_final_strategy,
+)
 from kaggle_researcher.contracts.evidence import (
     ReferenceResolutionError,
-    build_evidence_registry,
+    build_evidence_registry_from_manifest,
     resolve_evidence_reference,
 )
+from kaggle_researcher.contracts.evidence_manifest import EvidenceReferenceManifest
 from kaggle_researcher.contracts.experiments import ExperimentPlan
 from kaggle_researcher.contracts.registries import ExperimentRegistry
 from kaggle_researcher.contracts.manifest import (
@@ -73,12 +78,14 @@ def validate_final_strategy_references(
     experiment_ids: set[str] | None = None,
     approved_experiment_ids: set[str] | None = None,
     rejected_experiment_ids: set[str] | None = None,
+    evidence_manifest: EvidenceReferenceManifest,
 ) -> None:
     source_ids = source_ids or set()
     experiment_ids = experiment_ids or set()
     approved_experiment_ids = approved_experiment_ids if approved_experiment_ids is not None else experiment_ids
     rejected_experiment_ids = rejected_experiment_ids or set()
-    registry = build_evidence_registry(
+    registry = build_evidence_registry_from_manifest(
+        evidence_manifest,
         evidence_pack,
         source_ids=source_ids,
         hypothesis_ids=hypothesis_ids,
@@ -167,12 +174,11 @@ def validate_full_run_artifacts(run_dir: Path) -> None:
         ], suggested_rerun_stage="research_scout") from exc
 
     try:
-        evidence_pack = EdaEvidencePack.model_validate_json(
-            (run_dir / "eda" / "eda_evidence_pack.json").read_text(encoding="utf-8")
-        )
+        published_bundle, _ = load_eda_publication_bundle(run_dir / "eda")
+        evidence_pack = published_bundle.evidence_pack
     except (OSError, ValueError, ValidationError, json.JSONDecodeError) as exc:
         raise ArtifactContractValidationError([
-            ContractIssue("eda_evidence_pack", "eda/eda_evidence_pack.json", str(exc))
+            ContractIssue("published_eda_evidence_bundle", "eda", str(exc))
         ], suggested_rerun_stage="eda_engine") from exc
 
     if evidence_pack.competition_id != hypotheses.competition_id:
@@ -274,6 +280,7 @@ def validate_full_run_artifacts(run_dir: Path) -> None:
                     if experiment_registry is not None else set()
                 ),
                 rejected_experiment_ids=rejected_experiment_ids,
+                evidence_manifest=published_bundle.evidence_manifest,
             )
         except ArtifactContractValidationError as exc:
             issues.extend(exc.issues)

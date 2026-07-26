@@ -8,10 +8,10 @@ from kaggle_researcher.contracts.errors import (
 )
 from kaggle_researcher.contracts.experiments import FORBIDDEN_CONTEXT_LABELS, ExperimentPlan
 from kaggle_researcher.contracts.final_strategy import FinalStrategyResult
+from kaggle_researcher.contracts.evidence_manifest import EvidenceReferenceManifest
 from kaggle_researcher.contracts.final_strategy_evidence import (
     validate_action_evidence_consistency,
 )
-from kaggle_researcher.contracts.references import generate_allowed_evidence_refs
 from kaggle_researcher.contracts.registries import (
     ExperimentRegistry,
     HypothesisRegistry,
@@ -71,11 +71,17 @@ def validate_final_synthesis_bundle(
     hypotheses: ResearchHypotheses,
     source_ids: Iterable[str] = (),
     optional_stage_failures: Iterable[Any] = (),
+    evidence_manifest: EvidenceReferenceManifest,
 ) -> None:
     hypothesis_ids = set(HypothesisRegistry.from_contracts(hypotheses, evidence_pack).by_id)
     experiment_registry = ExperimentRegistry.from_contract(experiments, review)
-    allowed_evidence = set(generate_allowed_evidence_refs(evidence_pack)) | set(source_ids) | {"final_synthesizer.repaired"}
-    allowed_eda_evidence = set(generate_allowed_evidence_refs(evidence_pack))
+    allowed_eda_evidence = {
+        entry.ref for entry in evidence_manifest.entries
+        if entry.available
+        and entry.namespace == "eda_evidence"
+        and entry.reference_kind in {"direct_path", "semantic_ref"}
+    }
+    allowed_evidence = allowed_eda_evidence | set(source_ids) | {"final_synthesizer.repaired"}
     allowed_sources = set(source_ids)
     risk_registry = RiskRegistry.from_contract(evidence_pack)
     requirement_registry = ValidationRequirementRegistry.from_contract(evidence_pack)
