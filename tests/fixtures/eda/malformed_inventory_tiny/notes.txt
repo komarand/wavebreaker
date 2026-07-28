@@ -1,0 +1,1 @@
+This unsupported file is deliberately present to characterize safe partial inventory.

@@ -237,6 +237,59 @@ intentionally not provided.
 - A date column alone is diagnostic, not enough to force temporal validation.
 - Gini Stability is supported, but generic tabular behavior is not Home Credit-specific.
 
+## Offline v5 Characterization
+
+These commands exercise the Phase 0 fixture baseline without Kaggle
+credentials, external network access, dataset downloads, or an external LLM
+call. Non-network tests have a socket-level outbound-connection guard in
+`tests/conftest.py`.
+
+Start each command from the repository root. Remove credentials explicitly so
+the invocation also characterizes a clean checkout:
+
+```powershell
+Remove-Item Env:KAGGLE_USERNAME,Env:KAGGLE_KEY,Env:DEEPSEEK_API_KEY -ErrorAction SilentlyContinue
+$env:RUN_NETWORK_TESTS = "0"
+```
+
+Full Research → EDA → Reasoning → Final Synthesis pipeline from stored fixtures:
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe -m pytest `
+  tests\integration\test_full_pipeline_contract_smoke.py::test_real_internal_pipeline_boundaries_without_network_or_llm `
+  -m "not network" -q
+```
+
+Stage-level characterization from stored inputs:
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe -m pytest `
+  tests\integration\test_offline_characterization.py `
+  tests\contracts\test_research_to_eda_bridge_integration.py `
+  tests\test_research_scout_generic.py `
+  tests\eda\test_eda_generic_fixture_matrix.py `
+  tests\test_metric_specialist.py `
+  tests\test_validation_architect.py `
+  tests\test_leakage_risk_analyst.py `
+  tests\test_leaderboard_auditor.py `
+  tests\test_experiment_planner.py `
+  tests\test_skeptical_reviewer.py `
+  tests\integration\test_full_pipeline_contract_smoke.py `
+  -m "not network" -q
+```
+
+The durable stage/case mapping is
+`tests/fixtures/offline_characterization_manifest.json`. If a required fixture
+is removed, `tests/integration/test_offline_characterization.py` fails with
+`missing offline characterization fixture: <path>`.
+
+Full offline and integration verification:
+
+```powershell
+E:\wavebreaker\.venv-win\Scripts\python.exe -m pytest tests\ -m "not network" -q
+E:\wavebreaker\.venv-win\Scripts\python.exe -m pytest tests\integration -q
+```
+
 ## Regression Checks
 
 ```powershell

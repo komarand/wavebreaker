@@ -1,0 +1,7 @@
+{
+  "metric_name": "competition_weighted_utility",
+  "task_type": "binary_classification",
+  "expected_family": "unknown",
+  "local_metric_available": false,
+  "needs_custom_implementation": true
+}

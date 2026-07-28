@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "full_pipeline": {
+    "pytest_node_id": "tests/integration/test_full_pipeline_contract_smoke.py::test_real_internal_pipeline_boundaries_without_network_or_llm",
+    "fixture_paths": [
+      "tests/fixtures/eda/iid_binary_tiny",
+      "tests/fixtures/final_synthesis.py"
+    ]
+  },
+  "stages": [
+    {
+      "stage_id": "input_validation",
+      "pytest_node_ids": [
+        "tests/contracts/test_research_to_eda_bridge_integration.py::test_reasoner_files_load_and_validate_without_starting_eda_modules"
+      ],
+      "fixture_paths": [
+        "tests/fixtures/contracts/research_to_eda/valid/iid_binary/research_hypotheses.json",
+        "tests/fixtures/contracts/research_to_eda/valid/iid_binary/eda_task_plan.json"
+      ]
+    },
+    {
+      "stage_id": "research_scout",
+      "pytest_node_ids": [
+        "tests/test_research_scout_generic.py::test_fallback_output_includes_p0_hypotheses"
+      ],
+      "fixture_paths": [
+        "tests/fixtures/offline_pipeline.py"
+      ]
+    },
+    {
+      "stage_id": "eda_engine",
+      "pytest_node_ids": [
+        "tests/eda/test_eda_generic_fixture_matrix.py::test_iid_binary_selects_stratified_kfold_even_with_date_column"
+      ],
+      "fixture_paths": [
+        "tests/fixtures/eda/iid_binary_tiny"
+      ]
+    },
+    {
+      "stage_id": "reasoning_context",
+      "pytest_node_ids": [
+        "tests/test_metric_specialist.py::test_analyze_metric_validates_mock_response_into_metric_result",
+        "tests/test_validation_architect.py::test_design_validation_validates_mock_response_into_validation_result",
+        "tests/test_leakage_risk_analyst.py::test_analyze_leakage_risk_validates_mock_response_into_result",
+        "tests/test_leaderboard_auditor.py::test_audit_leaderboard_risk_validates_mock_response_into_result"
+      ],
+      "fixture_paths": [
+        "tests/fixtures/offline_pipeline.py"
+      ]
+    },
+    {
+      "stage_id": "experiment_planner",
+      "pytest_node_ids": [
+        "tests/test_experiment_planner.py::test_plan_experiments_validates_mock_response_and_sorts_by_priority"
+      ],
+      "fixture_paths": [
+        "tests/fixtures/offline_pipeline.py"
+      ]
+    },
+    {
+      "stage_id": "skeptical_reviewer",
+      "pytest_node_ids": [
+        "tests/test_skeptical_reviewer.py::test_review_validates_mock_response_and_preserves_draft_keys"
+      ],
+      "fixture_paths": [
+        "tests/fixtures/offline_pipeline.py"
+      ]
+    },
+    {
+      "stage_id": "final_strategy",
+      "pytest_node_ids": [
+        "tests/integration/test_full_pipeline_contract_smoke.py::test_real_internal_pipeline_boundaries_without_network_or_llm"
+      ],
+      "fixture_paths": [
+        "tests/fixtures/final_synthesis.py",
+        "tests/fixtures/eda/iid_binary_tiny"
+      ]
+    },
+    {
+      "stage_id": "final_report",
+      "pytest_node_ids": [
+        "tests/integration/test_full_pipeline_contract_smoke.py::test_real_internal_pipeline_boundaries_without_network_or_llm"
+      ],
+      "fixture_paths": [
+        "tests/fixtures/final_synthesis.py"
+      ]
+    },
+    {
+      "stage_id": "artifact_validation",
+      "pytest_node_ids": [
+        "tests/integration/test_full_pipeline_contract_smoke.py::test_real_internal_pipeline_boundaries_without_network_or_llm"
+      ],
+      "fixture_paths": [
+        "tests/fixtures/eda/iid_binary_tiny"
+      ]
+    }
+  ],
+  "dataset_cases": [
+    {
+      "case_id": "binary_iid_classification",
+      "fixture_path": "tests/fixtures/eda/iid_binary_tiny",
+      "pytest_node_id": "tests/eda/test_eda_generic_fixture_matrix.py::test_iid_binary_selects_stratified_kfold_even_with_date_column"
+    },
+    {
+      "case_id": "regression",
+      "fixture_path": "tests/fixtures/eda/regression_outliers_tiny",
+      "pytest_node_id": "tests/eda/test_eda_generic_fixture_matrix.py::test_regression_outliers_selects_kfold_and_profiles_outliers"
+    },
+    {
+      "case_id": "temporal_stability_classification",
+      "fixture_path": "tests/fixtures/eda/home_credit_tiny",
+      "pytest_node_id": "tests/eda/test_eda_generic_fixture_matrix.py::test_home_credit_fixture_still_runs"
+    },
+    {
+      "case_id": "grouped_classification",
+      "fixture_path": "tests/fixtures/eda/grouped_binary_tiny",
+      "pytest_node_id": "tests/eda/test_eda_generic_fixture_matrix.py::test_grouped_binary_selects_group_aware_validation"
+    },
+    {
+      "case_id": "panel_entity_time",
+      "fixture_path": "tests/fixtures/eda/panel_entity_time_tiny",
+      "pytest_node_id": "tests/integration/test_offline_characterization.py::test_panel_entity_time_fixture_runs_offline"
+    },
+    {
+      "case_id": "ranking_query_grouped",
+      "fixture_path": "tests/fixtures/eda/ranking_tiny",
+      "pytest_node_id": "tests/eda/test_eda_generic_fixture_matrix.py::test_ranking_metric_selects_query_group_validation"
+    },
+    {
+      "case_id": "multi_output_submission",
+      "fixture_path": "tests/fixtures/eda/multiclass_tiny",
+      "pytest_node_id": "tests/eda/test_eda_generic_fixture_matrix.py::test_multiclass_logloss_runs_and_uses_probabilistic_metric"
+    },
+    {
+      "case_id": "multi_table_relational",
+      "fixture_path": "tests/fixtures/eda/home_credit_tiny",
+      "pytest_node_id": "tests/eda/test_eda_integration_full_p1.py::test_home_credit_full_p1_offline_integration"
+    },
+    {
+      "case_id": "malformed_safe_partial_inventory",
+      "fixture_path": "tests/fixtures/eda/malformed_inventory_tiny",
+      "pytest_node_id": "tests/integration/test_offline_characterization.py::test_malformed_inventory_fixture_is_reported_without_crash"
+    },
+    {
+      "case_id": "unknown_custom_metric",
+      "fixture_path": "tests/fixtures/offline_characterization_unknown_metric.json",
+      "pytest_node_id": "tests/integration/test_offline_characterization.py::test_unknown_metric_fixture_requires_custom_implementation"
+    }
+  ]
+}

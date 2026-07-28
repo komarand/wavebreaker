@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import socket
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from kaggle_researcher.schemas import RetrievedDocument, SourceDocument
 
 
 FAKE_EMBEDDING_DIM = 1024
+LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
 class FakeSentenceTransformer:
@@ -129,6 +131,61 @@ def pg_dsn() -> str:
         "PG_DSN",
         "postgresql://researcher:researcher@localhost:5432/kaggle_research",
     )
+
+
+@pytest.fixture(autouse=True)
+def block_external_network_for_offline_tests(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail non-network tests at the socket boundary before an outbound connection."""
+
+    if request.node.get_closest_marker("network") is not None:
+        return
+
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+    original_create_connection = socket.create_connection
+
+    def reject_external(address: object) -> None:
+        if not isinstance(address, tuple) or not address:
+            return
+        if str(address[0]).lower() in LOOPBACK_HOSTS:
+            return
+        raise AssertionError(
+            f"external network access is forbidden for offline test "
+            f"{request.node.nodeid}: {address!r}"
+        )
+
+    def guarded_connect(
+        sock: socket.socket,
+        address: object,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        reject_external(address)
+        original_connect(sock, address, *args, **kwargs)
+
+    def guarded_connect_ex(
+        sock: socket.socket,
+        address: object,
+        *args: object,
+        **kwargs: object,
+    ) -> int:
+        reject_external(address)
+        return original_connect_ex(sock, address, *args, **kwargs)
+
+    def guarded_create_connection(
+        address: tuple[str, int],
+        *args: object,
+        **kwargs: object,
+    ) -> socket.socket:
+        reject_external(address)
+        return original_create_connection(address, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
+    monkeypatch.setattr(socket, "create_connection", guarded_create_connection)
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

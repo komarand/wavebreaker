@@ -1,12 +1,16 @@
 # KaggleResearcher v6 — Modular Monolith Specification
 
-**Document:** `docs/KAGGLE_RESEARCHER_V6_SPEC.md`
-**Status:** draft implementation specification
-**Version:** 0.2.5
-**Date:** 2026-07-24
-**Audience:** maintainers, Codex implementation agents, test authors
-**Architecturally supersedes:** v4 pipeline integration and v5 EDA integration model
-**Revision basis:** 0.2 plus five independent reviews — an architecture/migration review grounded in the `kaggle_eda` branch, and four successive contract-kernel implementability reviews. They are reconciled in Appendices B through E.
+**Document:** `docs/specs/KAGGLE_RESEARCHER_V6_SPEC.md`  
+**Status:** implementation-ready canonical specification  
+**Version:** 0.2.6  
+**Date:** 2026-07-26  
+**Audience:** maintainers, Codex implementation agents, test authors  
+**Architecturally supersedes:** v4 pipeline integration and v5 EDA integration model  
+**Revision basis:** 0.2 plus the architecture/migration review grounded in the `kaggle_eda` branch, four successive contract-kernel implementability reviews, and the v6 baseline audit. They are reconciled in Appendices B through F.
+
+This file is the sole normative v6 specification. Documents under `docs/archive/`,
+legacy EDA task files numbered 28–64, and older versioned copies are historical
+context only and cannot override this document.
 
 ---
 
@@ -445,6 +449,84 @@ class BlobArtifactRef(BaseModel):
 
 It is not used to build a recursive Merkle identity, and output float serialization is not promised to be byte-identical across platforms.
 
+#### 10.4.1 Canonical bytes
+
+Every field named `*_digest`, `*_fingerprint`, or `*_hash` has one normative
+preimage and one normative algorithm. Implementations may cache canonical bytes,
+but may not substitute a library's default serializer.
+
+`canonical_json_bytes(value)` is defined as follows:
+
+1. validate `value` against its declared public contract;
+2. dump the complete JSON representation with aliases enabled and with explicit
+   `null` values retained;
+3. normalize every string value and object key to Unicode NFC; reject an object
+   if two keys become equal after normalization;
+4. emit contract fields in their declared preimage order; emit arbitrary mapping
+   keys in ascending normalized UTF-8 byte order; preserve tuple/list order;
+5. unordered collections are forbidden in a digest preimage until the owning
+   contract has converted them to a tuple sorted by normalized UTF-8 bytes;
+6. emit booleans and null as the JSON literals `true`, `false`, and `null`;
+7. emit integers in base ten with no leading zero; reject non-finite floats and
+   serialize finite floats using the RFC 8785 / ECMAScript shortest
+   round-trippable JSON number form, with negative zero serialized as `0`;
+8. serialize datetimes in UTC as RFC 3339 with exactly six fractional digits
+   and the `Z` suffix; naive datetimes are invalid at a persistence boundary;
+9. use `separators=(",", ":")`, `ensure_ascii=False`, UTF-8, and no BOM or
+   trailing newline.
+
+The special `EvidenceKey` preimage in §11.3 declares its own member order
+(`name`, then `dimensions`) and uses the same scalar and UTF-8 rules.
+
+The core digest registry is normative:
+
+| Field | Preimage | Algorithm and encoding |
+|---|---|---|
+| `file_hash` | exact file bytes | BLAKE2b-256, 64 lowercase hex characters |
+| `schema_fingerprint` | canonical logical table schema: ordered fields of `{name, logical_type, nullable, metadata}`, with metadata keys byte-sorted | BLAKE2b-256 over canonical JSON bytes |
+| `evidence_fragment_digest` | complete validated `EvidenceFragment` | BLAKE2b-256 over canonical JSON bytes |
+| `plan_digest` | complete validated `PipelinePlan` with `plan_digest` omitted | BLAKE2b-256 over canonical JSON bytes |
+| `manifest_digest` | complete validated `RunManifest` with `manifest_digest` omitted | BLAKE2b-256 over canonical JSON bytes |
+| `snapshot_digest` | `{plan_digest, generation, node_states}` in that order | BLAKE2b-256 over canonical JSON bytes |
+| `input_snapshot_digest` | the `InputSnapshotPreimage` defined in §12.1 | BLAKE2b-256 over canonical JSON bytes |
+| `config_fingerprint` | `{module_id, cache_fingerprint_version, config}` in that order | BLAKE2b-256 over canonical JSON bytes |
+| `cache_fingerprint` | the complete cache preimage in §12.1 | BLAKE2b-256 over canonical JSON bytes |
+| `artifact_id` | `{run_id, node_id, attempt_id, kind, artifact_type, ordinal}` in that order | `"art_" + first 24 hex characters of BLAKE2b-128(canonical bytes)` |
+
+`ordinal` is the zero-based position of the artifact in the node's validated
+publication list. Reordering that list is therefore an artifact-identity change
+and must be deliberate.
+
+`dataset_fingerprint` is a typed discriminated contract rather than an
+underspecified string:
+
+```python
+class LocalDatasetFingerprint(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["local_files"] = "local_files"
+    files: tuple[DatasetFileFingerprint, ...]  # relative path byte-order
+    digest: str
+
+
+class DatasetFileFingerprint(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    relative_path: str
+    size_bytes: int
+    file_hash: str
+```
+
+Its `digest` is BLAKE2b-256 over canonical JSON bytes of `files`. Paths are
+relative to the validated dataset root, use `/` separators, contain no `.` or
+`..` segments, and are sorted by normalized UTF-8 byte order. Modification time
+is not an identity input. A future remote-dataset fingerprint requires a new
+discriminator value and an explicit contract version.
+
+No digest may be defined as "hash the object" or "hash the config" without the
+named preimage above. Adding a digest field requires adding one row to this
+registry in the same change.
+
 ### 10.5 Publication boundary
 
 A module publishes one node bundle containing:
@@ -488,6 +570,7 @@ class NodeManifest(BaseModel):
     schema_version: int
     run_id: str
     plan_id: str
+    plan_digest: str
     generation: int
     node_id: str
     attempt_id: str
@@ -509,18 +592,69 @@ class EvidenceFragment(BaseModel):
     schema_version: int
     run_id: str
     competition_id: str
+    plan_id: str
+    plan_digest: str
+    generation: int
     node_id: str
     attempt_id: str
     records: tuple[EvidenceRecord, ...]
 ```
 
-`status` is `prepared` and stays `prepared`: publication is expressed by adding the `PUBLISHED` marker, never by rewriting this file. `input_snapshot_digest` records which snapshot the attempt was computed against, which is what lets resume decide whether a checkpoint is still applicable and lets recovery detect an attempt computed against a snapshot that no longer exists. `evidence_fragment_digest` binds the manifest to its fragment so a torn or truncated fragment is detected rather than partially registered.
+`status` is `prepared` and stays `prepared`: publication is expressed by adding the `PUBLISHED` marker, never by rewriting this file. `plan_digest` prevents a bundle produced for a different plan body from being admitted merely because a reused `plan_id` matches. `input_snapshot_digest` records the exact typed input snapshot the attempt was computed against, which is what lets resume decide whether a checkpoint is still applicable and lets recovery detect an attempt computed against inputs that no longer exist. `evidence_fragment_digest` binds the manifest to its fragment so a torn or truncated fragment is detected rather than partially registered.
 
 ### 10.6 Attempts and canonical selection
 
 Bundles are immutable and a rerun publishes a new attempt, so a node may legitimately own several published bundles inside one run. Without a selection rule this collides with evidence identity: `evidence_id` is derived from the contract namespace, key, and dimensions (§11.3) and deliberately does **not** include the attempt, so a second successful attempt would publish a fragment carrying the same IDs, and rebuilding the catalog from all published bundles would fail duplicate detection. Immutability, catalog rebuild, and rerun are only mutually consistent once one attempt per node is declared canonical.
 
-The run manifest owns that declaration:
+The generation state owns that declaration. There is no second
+`active_attempts` mapping:
+
+```python
+class NodeGenerationState(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal[
+        "pending",
+        "running",
+        "success",
+        "failed",
+        "skipped",
+        "inactive",
+    ]
+    attempt_id: str | None = None
+    attempt_generation: int | None = None
+    quality: Literal["complete", "degraded"] | None = None
+    reason_code: str | None = None
+    blocked_by_node_ids: tuple[str, ...] = ()
+```
+
+Every plan node has exactly one state in every candidate or committed
+generation. The invariants are:
+
+- `success` requires `attempt_id`, `attempt_generation`, and `quality`; the
+  selected attempt must identify a valid published bundle for the same node and
+  plan digest, produced in `attempt_generation <=` the selecting generation;
+- a non-closure node may retain an attempt from an earlier generation; a newly
+  executed or invalidated node must select an attempt produced in the current
+  candidate generation;
+- `failed` means execution was attempted but no valid `ModuleResult` was
+  published; it has no `quality`, `attempt_id`, or `attempt_generation`;
+- `skipped` means the node was activated but intentionally not executed because
+  of dependency, policy, or budget; it requires `reason_code`;
+- `inactive` is valid only for `NodeSpec.activation="on_request"` when no granted
+  request activated the node in this generation;
+- `pending` and `running` occur only in a candidate and are forbidden in a
+  committed generation;
+- `blocked_by_node_ids` is non-empty only for a dependency-caused `skipped`
+  state and is sorted by normalized UTF-8 node ID;
+- only a `success` state contributes a bundle or evidence to a snapshot.
+
+`failed`, `skipped`, and `inactive` are not aliases for missing dictionary
+entries. Their explicit presence is what lets resume, reporting, and
+investigation distinguish a failed recompute from a node that was never
+requested.
+
+The run manifest owns the committed declaration:
 
 ```python
 class RunManifest(BaseModel):
@@ -529,25 +663,29 @@ class RunManifest(BaseModel):
     schema_version: int
     run: RunIdentity
     plan_id: str
+    plan_digest: str
     generation: int
-    active_attempts: Mapping[str, str]  # node_id -> attempt_id
+    node_states: Mapping[str, NodeGenerationState]
     manifest_digest: str
 ```
 
 `manifest_digest` is self-referential unless its input is stated, and "hash the manifest" is not an algorithm when the digest lives inside the manifest. The normative rule:
 
 ```text
-manifest_digest = blake2b(canonical_json(manifest without manifest_digest),
-                          digest_size=16).hexdigest()
+manifest_digest = blake2b(canonical_json_bytes(
+    manifest without manifest_digest
+), digest_size=32).hexdigest()
 ```
 
-using the same canonical JSON settings as §11.3 — fixed member order, `separators=(",", ":")`, `ensure_ascii=False`, NFC, UTF-8. The digest field is excluded from its own input; every other field is included.
+using §10.4.1. The digest field is excluded from its own input; every other field
+is included.
 
 Rules:
 
-- at most one attempt is active per node; exactly one exists for every successfully published node in the committed generation;
-- a node that has never run has no active attempt, which is a normal state and not an error;
-- the catalog is built **only** from published bundles whose attempt is the active attempt in the committed generation;
+- at most one attempt is active per node because each node has one state and only
+  `success` may name an attempt;
+- the catalog is built **only** from bundles selected by `success` states in the
+  committed generation;
 - superseded attempts remain physically stored and inspectable, but contribute no evidence and satisfy no reference;
 - retention treats superseded attempts as `ephemeral` unless the run is pinned (§19.1).
 
@@ -557,12 +695,27 @@ The commit protocol therefore is:
 
 1. compute the **dependency closure** of the invalidated nodes — the nodes themselves and everything transitively downstream;
 2. open a **candidate generation** numbered `generation + 1`;
-3. publish new attempts for all closure nodes, each inactive on publication, each joining the candidate snapshot as it succeeds;
-4. execute each closure node against the candidate snapshot, not against the committed one;
-5. commit by writing the new manifest and renaming it into place — one replacement, never a per-node edit;
-6. on failure at any point, the previous generation remains committed and fully consistent.
+3. initialize every invalidated closure node as `pending`, carrying forward no
+   old attempt for those nodes; non-closure nodes retain their prior terminal
+   state and successful attempt;
+4. publish new attempts for closure nodes; a valid published result changes its
+   state to `success`, while a terminal execution failure changes it to
+   `failed` or `skipped`;
+5. execute each closure node against a typed input snapshot derived from the
+   candidate, never from the committed generation directly;
+6. commit by writing the new manifest and renaming it into place — one
+   replacement, never a per-node edit;
+7. on a blocking failure, abandon the candidate; the previous generation
+   remains committed and fully consistent.
 
-An interrupted recompute leaves orphaned inactive attempts, which are garbage, not partial truth.
+An interrupted recompute leaves orphaned unpublished or unselected attempts,
+which are garbage, not partial truth. The previous successful attempt is not
+silently reused inside the failed candidate: it survives only as part of the
+previous committed generation. A resume of that failed candidate must retry the
+invalidated node or explicitly abandon the candidate; it may not treat the
+previous generation's attempt as a cache hit. User-facing status must report
+that the latest recompute failed even when an older committed generation remains
+available as last-known-good output.
 
 ### 10.7 Committed and candidate generations
 
@@ -577,20 +730,38 @@ class GenerationSnapshot(BaseModel):
     schema_version: int
     run: RunIdentity
     plan_id: str
+    plan_digest: str
     generation: int
     status: Literal["candidate", "committed"]
-    attempts: Mapping[str, str]   # node_id -> attempt_id
+    node_states: Mapping[str, NodeGenerationState]
     snapshot_digest: str
 ```
 
-- a **candidate snapshot** is the committed snapshot with the closure's new attempts substituted in; it is complete and internally consistent at every step, and it grows as closure nodes publish;
+- a **candidate snapshot** starts from the committed snapshot, removes the
+  closure's old attempt selections, and tracks all plan nodes through
+  `NodeGenerationState`; it grows as closure nodes publish;
 - closure nodes, Synthesis included, read the candidate snapshot; nothing outside the run observes it;
 - the **committed snapshot** is what presentation, exports, resume, and any external reader see;
 - commit is the single atomic act that turns the candidate into the committed snapshot.
 
-Gates split along the same line. The pre-commit gate validates a strategy against its `target_generation` — the candidate it was produced from — because at that moment the committed manifest still describes the previous generation and comparing against it would fail every legitimate run. Presentation validates against the committed generation, because a reader must never be served a strategy from an uncommitted snapshot. A candidate that never commits is discarded whole; there is no state in which half of it is observable.
+The full candidate `snapshot_digest` changes as node states change, so it is not
+the digest supplied to a running node. Each node receives a separate immutable
+`InputSnapshotPreimage` (§12.1), and its `NodeManifest.input_snapshot_digest`
+binds the result to those exact inputs. This removes the Synthesis self-reference:
+publishing the Synthesis attempt changes the full candidate snapshot but does
+not change the input digest against which the strategy was generated.
 
-`snapshot_digest` covers the canonical serialization of `attempts`, `generation`, and `plan_id`, so a stored view can be checked against the snapshot it claims to come from.
+Gates split along the same line. The pre-commit gate validates a strategy
+against its `target_generation` and the Synthesis node's
+`input_snapshot_digest`; it does not compare the strategy with the final
+candidate `snapshot_digest`. Presentation validates the committed generation,
+the selected Synthesis attempt, and the input digest recorded in that attempt's
+manifest. A candidate that never commits is discarded whole; there is no state
+in which half of it is observable.
+
+`snapshot_digest` uses the exact preimage and algorithm in §10.4.1. Candidate
+snapshots may be checkpointed for recovery; committed snapshots contain no
+`pending` or `running` state.
 
 `exports/` belongs to a generation. `evidence_catalog.json` records the `generation` and `manifest_digest` it was built from and is rebuilt when either differs from the committed manifest; a materialized view that disagrees with the manifest is stale by definition, never authoritative. Final exports — `final_strategy.json`, rendered reports, v5 exports — carry the generation they were produced from and are not valid for a later one. Presentation refuses to serve an export whose generation is behind the committed manifest rather than silently showing an older strategy.
 
@@ -662,6 +833,7 @@ class EvidenceRecord(BaseModel):
     evidence_id: str
     key: EvidenceKey
     domain: Literal["source", "dataset", "system"]
+    producer_node_id: str
     producer_module: str
     producer_implementation_version: str
     run_id: str
@@ -683,6 +855,14 @@ class EvidenceRecord(BaseModel):
 `domain` makes the claim rule in §23 machine-checkable. Without it, "source evidence cannot prove an unmeasured dataset fact" is a sentence no validator can enforce; with it, the gate is a comparison. `domain="source"` is external literature or competition discussion, `domain="dataset"` is measured from the actual data, `domain="system"` is about the run itself.
 
 `quality="derived"` requires a provenance edge: `derived_from_refs` must be non-empty and `derivation_method` must name a registered deterministic transform. Registration rejects a derived record with no parents, so the catalog forms an inspectable provenance graph rather than an unsourced assertion. `measured` records must have empty `derived_from_refs`.
+
+`producer_node_id` is mandatory provenance and is not part of evidence identity.
+It identifies the plan node instance that published the record. During fragment
+registration it must equal `EvidenceFragment.node_id`; `producer_module` and
+`producer_implementation_version` must equal the corresponding
+`NodeManifest` fields for the same attempt. This is what makes two differently
+configured instances of one module distinguishable without coupling
+`evidence_id` to an implementation.
 
 The locator describes where the catalog implementation can resolve the value. It may contain a JSON pointer or table selector internally. Claims never expose or cite that locator.
 
@@ -793,7 +973,8 @@ Registration fails if:
 - the source artifact is absent or unpublished;
 - the locator cannot resolve;
 - run or competition scope does not match;
-- required provenance is missing;
+- required provenance is missing or `producer_node_id`, module, implementation,
+  plan, generation, or attempt disagrees with the enclosing published bundle;
 - `quality="derived"` with empty `derived_from_refs` or an unregistered `derivation_method`;
 - `derived_from_refs` cites an ID absent from the same catalog.
 
@@ -903,6 +1084,7 @@ class NodeSpec(BaseModel):
     node_id: str
     module_id: str
     config: JsonValue
+    activation: Literal["always", "on_request"] = "always"
 
 
 class PipelinePlan(BaseModel):
@@ -910,12 +1092,13 @@ class PipelinePlan(BaseModel):
 
     schema_version: int
     plan_id: str
+    plan_digest: str
     nodes: tuple[NodeSpec, ...]
     edges: tuple[DependencyEdge, ...]
     input_bindings: tuple[PlanInputBinding, ...]
 ```
 
-A node is an instance of a module with its own configuration. The distinction is load-bearing and was implied throughout the document before being defined here: attempts are indexed by `node_id`, bundle paths use `node_id`, and configuration belongs to a node rather than to a module — otherwise one module could not appear twice in a plan with different settings, which profiling and leakage checks over different table groups plainly require. `plan_id` is the identity the run manifest commits against.
+A node is an instance of a module with its own configuration. The distinction is load-bearing and was implied throughout the document before being defined here: attempts are indexed by `node_id`, bundle paths use `node_id`, and configuration belongs to a node rather than to a module — otherwise one module could not appear twice in a plan with different settings, which profiling and leakage checks over different table groups plainly require. The run manifest commits to both the logical `plan_id` and the exact `plan_digest`.
 
 Ports must also be deliverable at runtime, not only comparable at preflight. `Module.run()` returns one `ModuleResult[OutputT]`, so a module with several output ports has no defined way to say which part of `OutputT` belongs to which port. Preflight would match ports that the runner then cannot actually connect. The MVP resolves this by construction:
 
@@ -940,25 +1123,101 @@ Input delivery needs the same treatment, and closing only the output side would 
 ```text
 Each InputPortSpec.name maps to an identically named field of InputT.
 
-one  + required   → payload
-one  + optional   → payload | None       (None means unresolved, never a sentinel value)
-many              → tuple[payload, ...], ordered by producer_node_id byte order
+one  + required   → exactly 1 source → payload
+one  + optional   → 0 or 1 source   → payload | None
+many + required   → 1 or more       → tuple[payload, ...]
+many + optional   → 0 or more       → tuple[payload, ...]
 ```
 
-Ordering `many` by `producer_node_id` rather than by plan order or completion order is what keeps the input deterministic under §20: completion order varies between runs, and plan order would make an unrelated plan edit change a module's input.
+`source` means a dependency edge or an external binding. A consumer port may use
+edges or bindings, but never a mixture of both. Duplicate edges and duplicate
+binding IDs are rejected. For edge-backed `many`, payloads are ordered by
+`(producer_node_id, producer_port)` normalized UTF-8 byte order. For
+binding-backed `many`, payloads are ordered by `binding_id` normalized UTF-8
+byte order. Plan order and completion order are never inputs to runtime
+delivery.
 
 Not every input has a producer node. Dataset paths, the run request, and competition metadata enter the plan from outside:
 
 ```python
-class PlanInputBinding(BaseModel):
+class RunRequestInputBinding(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    kind: Literal["run_request"] = "run_request"
+    binding_id: str
     consumer_node_id: str
     consumer_port: str
-    source: Literal["run_request", "dataset_path", "competition_brief", "config"]
+    source_contract: Literal["RunRequest"] = "RunRequest"
+    source_schema_version: int
+
+
+class DatasetRootInputBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["dataset_root"] = "dataset_root"
+    binding_id: str
+    consumer_node_id: str
+    consumer_port: str
+    source_contract: Literal["DatasetRootRef"] = "DatasetRootRef"
+    source_schema_version: int
+    dataset_role: Literal["primary"] = "primary"
+
+
+class CompetitionBriefInputBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["competition_brief"] = "competition_brief"
+    binding_id: str
+    consumer_node_id: str
+    consumer_port: str
+    source_contract: Literal["CompetitionBrief"] = "CompetitionBrief"
+    source_schema_version: int
+
+
+PlanInputBinding = Annotated[
+    RunRequestInputBinding
+    | DatasetRootInputBinding
+    | CompetitionBriefInputBinding,
+    Field(discriminator="kind"),
+]
 ```
 
-`PipelinePlan` carries `input_bindings: tuple[PlanInputBinding, ...]` alongside its edges. Preflight requires every required input port to be satisfied by exactly one edge or one binding; a port satisfied by both, or by neither, is a plan error. Modeling external inputs as bindings rather than as synthetic source nodes keeps the node set equal to the set of things that actually execute and produce attempts.
+The binding declares the exact public contract and version supplied at runtime.
+Preflight compares those fields with the consumer port exactly as it compares an
+output port. The runner resolves the corresponding validated object from the
+run's immutable input snapshot; the plan never carries a raw untyped path or
+free-form config binding. Module configuration is delivered only through
+`NodeSpec.config`.
+
+Preflight applies the cardinality matrix above after validating every edge and
+binding. An optional `many` port with no source receives `()`, while an optional
+`one` port with no source receives `None`. Modeling external inputs as bindings
+rather than synthetic nodes keeps the node set equal to executable things that
+produce attempts.
+
+#### 12.0.1 Plan identity and lifecycle
+
+`plan_id` is a run-local logical identifier; `plan_digest` is the integrity and
+content identity of the exact plan body. The digest uses §10.4.1 and excludes
+its own field.
+
+Plan lifecycle is deliberately immutable in the MVP:
+
+1. construct and validate the whole plan, including all `on_request` nodes;
+2. compute and insert `plan_digest`;
+3. run preflight against the exact plan;
+4. persist that exact body as `plan.json` before Dataset Intelligence IO or any
+   node attempt; the run root may already exist from Source Intelligence or
+   Research Scout, but it has no generation manifest until this step completes;
+5. bind both `plan_id` and `plan_digest` into every generation, manifest, node
+   bundle, and evidence fragment;
+6. reject resume, publication, or continuation if either value differs.
+
+Activating an `on_request` node changes generation state, not the plan body, so
+neither plan field changes. Editing a node, edge, binding, module config, port,
+or activation policy creates a different plan digest. In the MVP a different
+plan digest requires a new `run_id`; in-run plan migration is not supported.
+Replacing `plan.json` in place is forbidden.
 
 Three version numbers appear near a module output and mean different things. They are separate fields and are never derived from one another:
 
@@ -990,17 +1249,69 @@ Conflict resolution is one rule with no exceptions: the effective policy is the 
 
 ### 12.1 Configuration fingerprint
 
-Every module declares and receives its own typed config model. The node cache key is computed from:
+Every module declares and receives its own typed config model.
+`config_fingerprint` uses the registry in §10.4.1.
+
+Every node execution receives one input snapshot:
+
+```python
+class InputSnapshotItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    consumer_port: str
+    source_kind: Literal["edge", "binding"]
+    source_id: str
+    producer_node_id: str | None = None
+    producer_port: str | None = None
+    attempt_id: str | None = None
+    attempt_generation: int | None = None
+    contract: str
+    contract_schema_version: int
+    value_digest: str
+
+
+class InputSnapshotPreimage(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    plan_digest: str
+    consumer_node_id: str
+    inputs: tuple[InputSnapshotItem, ...]
+```
+
+For an edge, `source_id` is
+`"{producer_node_id}:{producer_port}"`, `attempt_id` and
+`attempt_generation` are required, and `value_digest` is the published result
+artifact's `file_hash`. For a binding,
+`source_id` is `binding_id`, producer fields are `None`, and `value_digest` is
+BLAKE2b-256 over canonical JSON bytes of the validated external contract.
+Dataset-reading bindings include the typed dataset fingerprint from §10.4.1 in
+that validated contract.
+
+Items are sorted first by consumer port and then by `source_id`, both in
+normalized UTF-8 byte order. `input_snapshot_digest` is computed from the whole
+preimage by §10.4.1. A node may read no upstream or external value absent from
+this list. Generation is deliberately excluded: the digest proves input
+identity, while `NodeManifest.generation` proves execution placement. Identical
+inputs under the same immutable plan may therefore produce a legitimate cache
+hit in a later generation.
+
+The node `cache_fingerprint` preimage is:
 
 ```text
-module_id
-cache_fingerprint_version
-typed module config
-accepted input contract versions
-input checkpoint hashes or upstream cache identities
-dataset fingerprint, only if the module reads dataset content
-relevant library versions, only where they affect semantics
+{
+  "module_id": ...,
+  "cache_fingerprint_version": ...,
+  "config_fingerprint": ...,
+  "input_snapshot_digest": ...,
+  "relevant_library_versions": [[name, version], ...]
+}
 ```
+
+Library pairs are present only when the module declares that a library affects
+semantics and are sorted by normalized UTF-8 package name. The fingerprint uses
+§10.4.1. Actual input contract versions and content hashes are already bound
+inside `input_snapshot_digest`; they are not reintroduced as a second source of
+truth.
 
 Changing Final Synthesis temperature must not invalidate profiling. Changing a leakage threshold must not invalidate file inventory. A module cannot read configuration outside its declared typed subset.
 
@@ -1232,9 +1543,14 @@ running
 success
 failed
 skipped
+inactive
 ```
 
-Degradation belongs to `ModuleResult.quality`, not the execution state machine. A node skipped because a required dependency failed records that dependency in its status details.
+These are the statuses in `NodeGenerationState` (§10.6). Degradation belongs to
+`ModuleResult.quality`, not the execution state machine. `inactive` is reserved
+for an `on_request` node that was not activated in this generation and is never
+used for a dependency failure. A node skipped because a required dependency
+failed records that dependency in `blocked_by_node_ids`.
 
 ### 18.3 Preflight
 
@@ -1245,10 +1561,13 @@ Before run-directory creation and dataset IO where feasible:
 3. validate Research → Dataset input;
 4. resolve requested capabilities and module providers;
 5. verify required contract versions and adapters;
-6. build and validate the static DAG;
+6. apply the exact `one`/`many`, required/optional cardinality matrix in §12,
+   reject mixed edge/binding sources, and build and validate the static DAG;
 7. validate module-specific configuration;
-8. check required credential presence without logging values;
-9. estimate resource policy and reject impossible requests.
+8. verify `plan_digest`, evidence namespace ownership, and the complete
+   `on_request` capability registry;
+9. check required credential presence without logging values;
+10. estimate resource policy and reject impossible requests.
 
 ### 18.4 Failure propagation
 
@@ -1258,6 +1577,13 @@ Before run-directory creation and dataset IO where feasible:
 - transient IO or provider errors may use a small module-declared retry count;
 - retry never changes input, configuration, or evidence semantics;
 - failed attempts cannot publish a visible bundle.
+
+An invalidated node's successful attempt from the prior committed generation is
+not a fallback inside the candidate. If its recompute fails, the candidate state
+is `failed`; downstream active nodes become `skipped` as dictated by edge
+policy. A candidate containing a blocking failure cannot commit. A candidate
+with only optional failures may commit only when all remaining required ports,
+quality gates, and Synthesis rules are satisfied.
 
 ### 18.5 Resume
 
@@ -1409,6 +1735,8 @@ Rules:
 class SynthesisContext(BaseModel):
     schema_version: int
     run: RunIdentity
+    plan_id: str
+    plan_digest: str
     target_generation: int
     input_snapshot_digest: str
     competition: CompetitionBrief
@@ -1419,6 +1747,7 @@ class SynthesisContext(BaseModel):
     constraints: tuple[StrategyConstraint, ...]
     diagnostics: tuple[Diagnostic, ...]
     upstream_issues: tuple[UpstreamIssue, ...]
+    investigation_decisions: tuple[InvestigationRequestDecision, ...]
     investigation_round: int
 ```
 
@@ -1426,7 +1755,12 @@ class SynthesisContext(BaseModel):
 
 The same single-source rule that governs evidence governs both: the prompt builder and the publication validator read the identical `constraints` and `upstream_issues` from the one validated context object. A constraint reaching the validator but not the prompt would make failure unavoidable and inexplicable to the model.
 
-`target_generation` and `input_snapshot_digest` are present because the strategy must declare the generation it belongs to and the pre-commit gate compares against that number (§10.7). Without them, Synthesis would be required to return a `generation` it was never told, and the validator would have nothing to compare beyond the committed manifest — which, during a candidate recompute, is exactly the wrong one. The digest additionally lets the gate reject a strategy produced against a snapshot that has since been superseded.
+`plan_id`, `plan_digest`, `target_generation`, and
+`input_snapshot_digest` are present because the strategy must declare exactly
+which immutable plan, generation, and Synthesis input snapshot it belongs to.
+The digest is the Synthesis node's `InputSnapshotPreimage` digest (§12.1), not
+the full candidate snapshot digest, which changes when the Synthesis attempt is
+published.
 
 The adapter builds the context once for a synthesis attempt. Prompt construction and response validation use that exact validated context.
 
@@ -1452,9 +1786,11 @@ class EvidenceCatalogView(BaseModel):
 
     schema_version: int
     run: RunIdentity
+    plan_id: str
+    plan_digest: str
     generation: int
     snapshot_status: Literal["candidate", "committed"]
-    snapshot_digest: str
+    input_snapshot_digest: str
     entries: tuple[EvidenceViewEntry, ...]
     excluded_ids: tuple[str, ...] = ()
 ```
@@ -1466,6 +1802,8 @@ Projection rules:
 - rendering is deterministic and byte-stable for identical input, so the same context produces the same prompt;
 - the view never contains locators, physical paths, run directories, or artifact filenames;
 - `allowed_refs` is exactly `{entry.evidence_id for entry in entries}` — the same view object that renders the prompt answers reference validation, per §11.6.
+- the view's run, plan, generation, and `input_snapshot_digest` exactly match
+  its owning `SynthesisContext`; a view cannot be reused across attempts.
 
 ### 22.1 Context bounding
 
@@ -1499,6 +1837,8 @@ class Claim(BaseModel):
     text: str
     evidence_refs: tuple[str, ...]
     assumptions: tuple[str, ...] = ()
+    validation_prerequisites: tuple[str, ...] = ()
+    missing_observation: str | None = None
     limitations: tuple[str, ...] = ()
 ```
 
@@ -1506,8 +1846,10 @@ Rules:
 
 - facts require direct supporting evidence;
 - inferences require evidence and make the inferential step explicit;
-- recommendations require evidence or clearly stated assumptions and validation prerequisites;
-- uncertainties may have no supporting evidence only when they identify the missing observation;
+- recommendations require evidence, or both non-empty `assumptions` and
+  `validation_prerequisites`;
+- uncertainties may have no supporting evidence only when
+  `missing_observation` is non-empty;
 - evidence references must resolve in the supplied catalog view;
 - a claim of kind `fact` or `inference` with `subject_domain="dataset"` requires **at least one** evidence record with `domain="dataset"`.
 
@@ -1560,7 +1902,10 @@ Deterministic modules emit constraints; Synthesis must satisfy or explicitly ack
 class FinalStrategy(BaseModel):
     schema_version: int
     run: RunIdentity
+    plan_id: str
+    plan_digest: str
     generation: int
+    input_snapshot_digest: str
     executive_summary: tuple[Claim, ...]
     problem_definition: tuple[Claim, ...]
     validation_strategy: tuple[Claim, ...]
@@ -1606,23 +1951,71 @@ Codes classify; identifiers identify. One `temporal_split_required` may legitima
 
 ### 23.1 Publication gate
 
-Final Strategy is published only when:
+The pre-publication gate is a deterministic function of exactly four validated
+inputs:
 
-- its JSON matches the requested integer schema version;
-- claim IDs are unique;
-- every ref exists in the supplied catalog view;
-- fact and inference evidence rules hold;
-- required sections exist;
-- critical upstream diagnostics and limitations are preserved;
-- no physical path or JSON-path syntax is used as a ref;
-- run and competition scopes match, and `generation` equals the context's `target_generation`;
-- every `StrategyConstraint` of `serious` or `critical` severity has exactly one `ConstraintResolution`, with `disposition` of `satisfied` or `acknowledged`, and a non-empty `reason` when acknowledged;
-- every `UpstreamIssue` of `error`, `critical`, or `serious` severity has exactly one `UpstreamIssueResolution`, with a non-empty `reason` when acknowledged;
-- `disposition="satisfied"` is verified against the typed decision named by the rule registry, never against prose.
+```text
+StrategyAttempt
+SynthesisContext
+the Synthesis node's NodeManifest
+the constraint-rule registry version named by the context schema
+```
+
+It performs the following checks in order and publishes only if all pass:
+
+1. validate the `StrategyAttempt` discriminator, wrapper schema version, and
+   complete `FinalStrategy` with `extra="forbid"`;
+2. require exact equality of `run_id`, `competition_id`, `plan_id`,
+   `plan_digest`, `generation`, and `input_snapshot_digest` across the strategy,
+   context, and catalog view; require the Synthesis `NodeManifest` to match all
+   of those fields it carries (`run_id`, plan fields, generation, and input
+   digest), and require the context view to have
+   `snapshot_status="candidate"`;
+3. require the node manifest to name the same generation and to be a valid
+   published Synthesis bundle in that candidate;
+4. require non-empty `executive_summary`, `problem_definition`,
+   `validation_strategy`, `leakage_controls`, `modeling_strategy`,
+   `feature_strategy`, and `experiment_plan`;
+5. collect claims from all claim-bearing sections and require globally unique,
+   non-empty `claim_id` values;
+6. require every evidence reference to match
+   `^ev_[a-z][a-z0-9_]{0,47}_[0-9a-f]{12}$`, occur in
+   `context.evidence.entries`, and not occur in `excluded_ids`; any path
+   separator, JSON pointer, dotted physical path, or unknown ID therefore fails
+   by construction;
+7. require every `fact` and `inference` to have at least one evidence ref;
+   require every dataset-domain `fact` or `inference` to cite at least one
+   entry with `domain="dataset"`;
+8. require every `recommendation` either to cite evidence or to have both
+   non-empty `assumptions` and non-empty `validation_prerequisites`;
+9. require an `uncertainty` with no evidence to have a non-empty
+   `missing_observation`;
+10. require `constraint_id` values in the context to be unique and every
+    resolution ID in the strategy to identify exactly one context constraint;
+    duplicate or foreign resolutions fail;
+11. for every constraint of `serious` or `critical` severity, require exactly
+    one resolution; `satisfied` passes only when the registered typed comparator
+    succeeds, while `acknowledged` requires a non-whitespace reason;
+    `unresolved` fails;
+12. require `issue_id` values in the context to be unique and every issue
+    resolution ID in the strategy to identify exactly one context issue;
+    duplicate or foreign resolutions fail;
+13. for every diagnostic issue with severity `error` or `critical`, and every
+    limitation issue with severity `serious` or `critical`, require exactly one
+    resolution; `acknowledged` requires a non-whitespace reason;
+14. reject non-finite numeric output, unresolved catalog refs, schema-version
+    mismatches, and any gate diagnostic of `error` or `critical`.
 
 These rules replace the earlier requirements that "deterministic critical findings are not contradicted without explicit acknowledgment" and that "critical upstream diagnostics and limitations are preserved." Both required deciding whether free text contradicted or retained a typed record — semantic judging, which no deterministic validator can perform and which §20 forbids putting on the LLM's side of the boundary.
 
 A claim citing a constraint is a narrative reference; the typed decision is what the gate compares. `disposition="satisfied"` is accepted only when the decision matches `expected_value` under the registry comparator; otherwise the resolution must be `acknowledged` with a reason, or the strategy does not publish. An unresolved or missing resolution for a critical constraint or issue blocks publication.
+
+After generation commit, presentation performs a separate visibility check:
+the committed manifest must select the exact Synthesis `attempt_id`; the export's
+run, plan, generation, and `input_snapshot_digest` must equal that bundle; and
+all evidence refs must resolve through the catalog rebuilt from the committed
+`node_states`. This check never reruns the LLM and never validates against a
+candidate that is no longer selected.
 
 Formatting or reference errors may receive bounded validation-feedback retries. Missing evidence is not repaired by repeated prose generation; it enters the additional-investigation protocol.
 
@@ -1677,8 +2070,43 @@ class InvestigationRequestBatch(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int
+    run: RunIdentity
+    plan_id: str
+    plan_digest: str
+    target_generation: int
+    originating_input_snapshot_digest: str
     round: int
     requests: tuple[AdditionalInvestigationRequest, ...]
+
+
+class InvestigationRequestDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    request_id: str
+    disposition: Literal[
+        "granted",
+        "already_satisfied",
+        "duplicate",
+        "unsupported",
+        "over_budget",
+        "rejected",
+    ]
+    activated_node_ids: tuple[str, ...] = ()
+    reason_code: str
+    message: str
+
+
+class InvestigationDecisionBatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int
+    run: RunIdentity
+    plan_id: str
+    plan_digest: str
+    target_generation: int
+    originating_input_snapshot_digest: str
+    round: int
+    decisions: tuple[InvestigationRequestDecision, ...]
 
 
 class StrategyAttempt(BaseModel):
@@ -1729,24 +2157,78 @@ MVP limits:
 - a separate wall-time and row budget;
 - format errors do not trigger Dataset Intelligence;
 - unsupported or over-budget requests become explicit uncertainties;
-- catalog extension is append-only and uses the same registration invariants;
+- evidence registration uses the same immutable bundle and catalog invariants;
 - a second unresolved request ends the loop rather than recursing.
 
 An investigation round cannot bypass the generation protocol. Appending evidence outside a generation commit would recreate precisely the defect §10.6 exists to prevent: new upstream evidence coexisting with a Synthesis result derived from the earlier state. Nor can the round add nodes to a plan that §18 declares static.
 
-The MVP resolves this by pre-declaring, not by dynamic graph construction. Investigation capabilities are ordinary nodes present in the plan from the start, inactive until requested:
+The MVP resolves this by pre-declaring, not by dynamic graph construction.
+Investigation capabilities are ordinary `activation="on_request"` nodes present
+in the immutable plan from the start. Preflight owns a versioned registry:
 
-```python
-class NodeSpec(BaseModel):
-    ...
-    activation: Literal["always", "on_request"] = "always"
+```text
+(capability, CapabilityParameters.kind) -> one or more node_id values
 ```
 
-A granted request activates one or more `on_request` nodes in the existing plan; those nodes plus their dependency closure — which always includes Synthesis — form a candidate generation and commit as one. `plan_id` does not change, because the plan did not change; only which of its nodes executed did. Preflight therefore still proves the whole graph before any dataset IO, and the investigation round is not a special execution path but an ordinary recompute with a different starting set.
+Every mapped node must be `on_request`, expose the requested capability, and
+have bindings capable of receiving the typed parameters. Missing, ambiguous, or
+non-`on_request` mappings fail preflight before dataset IO.
+
+The lifecycle is normative:
+
+1. Synthesis runs inside an already open candidate generation `G` and receives
+   `investigation_round=0`.
+2. If it returns `InvestigationAttempt`, the batch must match the context's run,
+   plan, generation, and `input_snapshot_digest`; request IDs and expected keys
+   must be unique.
+3. The deterministic validator evaluates every request in request-ID byte
+   order, checks the capability registry, typed parameters, semantic-key
+   deduplication, round limit, and the separate investigation budget, then emits
+   one `InvestigationRequestDecision` per request.
+4. `granted` requires at least one mapped `on_request` node; its
+   `activated_node_ids` are sorted and non-empty. Every other disposition
+   requires an empty node list and a non-empty reason.
+5. The decision batch is persisted under the same candidate. The Synthesis node
+   remains `pending` with `reason_code="investigation_requested"`; an
+   `InvestigationAttempt` is not a publishable Final Strategy and cannot become
+   the committed Synthesis attempt.
+6. Granted nodes change from `inactive` to `pending` in candidate `G`. They and
+   their transitive downstream closure execute in that same generation. Old
+   attempts for activated or invalidated closure nodes are not carried into the
+   candidate.
+7. Rejected, unsupported, duplicate, already-satisfied, and over-budget
+   decisions are inserted into the rebuilt `SynthesisContext` as
+   `investigation_decisions`; they do not create fake evidence.
+8. After granted nodes reach terminal state, rebuild the catalog view and
+   Synthesis input snapshot, set `investigation_round=1`, and execute Synthesis
+   once more in candidate `G`.
+9. The round-1 attempt must return `StrategyAttempt`. A second
+   `InvestigationAttempt` is a typed round-limit error; bounded format feedback
+   may ask for a strategy, but no additional Dataset Intelligence work runs.
+10. The candidate may commit only after the round-1 strategy passes §23.1. If a
+    granted investigation fails optionally, Synthesis receives the corresponding
+    issue and must express the unresolved observation. A blocking failure
+    abandons the candidate.
+
+If no request is granted, steps 7–10 still run in the same candidate and
+generation; the final strategy carries explicit uncertainties. No empty
+generation is created merely to record a rejection.
+
+`plan_id` and `plan_digest` never change during this flow. Only
+`NodeGenerationState` changes. The catalog is not extended "in place":
+successful investigation evidence becomes externally visible only when the
+whole generation commits.
 
 The alternative — a request producing a new `PipelinePlan` version and a candidate generation against it — is deferred. It is more general and will eventually be needed for capabilities nobody anticipated, but it makes plan identity mutable within a run, which every other part of this specification currently assumes it is not.
 
-`InvestigationPlan` carries run-local source refs, so `dataset run --plan ...` must state its relationship to the originating run. It **continues** that run: the same `run_id`, the same catalog, a new generation. It does not start a new run, because cross-run evidence resolution is forbidden (§11.4) and importing fragments into a fresh run would either break every existing ref or silently rewrite IDs.
+The Research Scout `InvestigationPlan` in §16 carries run-local source refs, so
+`dataset run --plan ...` must identify and continue the originating run. On the
+first Dataset Intelligence execution it persists the one immutable
+`PipelinePlan` selected by the deterministic adapter. On resume or an additional
+investigation, the command must load that persisted plan and require the stored
+`plan_digest`; supplying a different plan body is rejected and requires a new
+run. Continuation therefore means the same `run_id`, catalog, plan digest, and a
+candidate generation. It never imports fragments into a fresh run.
 
 ---
 
@@ -1863,6 +2345,8 @@ For every public contract:
 - invalid enum or dimension;
 - unsupported integer schema version;
 - serialization round-trip;
+- canonical byte golden vectors, including NFC, non-ASCII, mapping order,
+  finite float edge cases, and negative zero;
 - explicit version-adapter tests where supported.
 
 ### 29.2 Module tests
@@ -1889,14 +2373,22 @@ For every public contract:
 ### 29.4 Runner and checkpoint tests
 
 - dependency ordering and cycle detection;
+- all four cardinality cases and deterministic `many` ordering;
+- rejection of mixed edge/binding sources and untyped external bindings;
 - missing capability provider;
+- plan digest golden, immutable plan enforcement, and resume mismatch rejection;
+- every plan node represented in candidate and committed `node_states`;
+- `inactive` accepted only for an unrequested `on_request` node;
 - blocking and optional failure propagation;
+- failed recompute cannot reuse the prior generation's attempt inside the
+  candidate;
 - invisible failed publication;
 - all-or-nothing evidence registration;
 - resume hit and targeted invalidation;
 - synthesis config change does not invalidate EDA;
 - corrupted hash or schema rejects reuse;
 - recovery ignores incomplete staging bundles.
+- `NodeManifest.input_snapshot_digest` matches the exact typed input preimage.
 
 ### 29.5 Synthesis tests
 
@@ -1906,6 +2398,8 @@ For every public contract:
 - valid inference, recommendation, and uncertainty rules;
 - deterministic context bounding;
 - mandatory diagnostic preservation;
+- exact run/plan/generation/input-digest equality across context, view, strategy,
+  and node manifest;
 - structural golden comparisons without prose equality;
 - additional request validation, budget, deduplication, and round limit;
 - malformed LLM output cannot mutate canonical evidence.
@@ -1940,7 +2434,32 @@ The dataset fixtures above vary the *data*. They do not exercise the run lifecyc
 8. **Candidate never commits.** A candidate generation is abandoned mid-closure; no part of it is observable to presentation, exports, or a later resume.
 9. **Superseded candidate.** A strategy is produced against a snapshot that is then superseded; the pre-commit gate rejects it on digest mismatch rather than committing it.
 
-Scenarios 1 through 3 and 7 through 8 must exist before Phase 4 resume work begins.
+10. **Failed recompute after prior success.** The invalidated node's old attempt
+is absent from the candidate; failure cannot turn it into a candidate cache hit.
+The previous committed generation remains inspectable and user-facing status
+reports the failed update.
+11. **Complete node-state map.** Every plan node is present in a committed
+generation as `success`, `failed`, `skipped`, or `inactive`; no state is inferred
+from a missing key.
+12. **Synthesis self-publication.** Synthesis publishes into its candidate
+without invalidating its own `input_snapshot_digest`; the full
+`snapshot_digest` may change and is not used by the pre-publication gate.
+13. **Cardinality and external binding matrix.** `one` and `many`,
+required and optional ports receive exactly the shapes in §12, with typed
+external contracts and stable ordering.
+14. **Investigation in one candidate.** A round-0 request activates a
+predeclared node, produces evidence, rebuilds context, and commits a round-1
+strategy in the same generation and with the same plan digest.
+15. **Rejected and repeated investigation.** Unsupported or over-budget
+requests become typed decisions and uncertainties; a round-1 request cannot
+activate more work or recurse.
+16. **Cross-node provenance.** Two nodes using the same module publish distinct
+records whose `producer_node_id` matches their fragment and manifest while the
+semantic ID remains producer-independent.
+
+Scenarios 1 through 3, 7 through 8, and 10 through 15 must exist before Phase 4
+resume or Phase 6 additional-investigation work begins. Scenario 6 is a gate for
+`V6-P0-001`.
 
 ---
 
@@ -2176,7 +2695,8 @@ v6 is accepted only when:
 35. Every whitelisted investigation capability has a typed parameter model and a mandatory expected evidence key.
 36. No successor to the legacy pack contains two live fields for one concept; deprecated fields are written only by the legacy exporter.
 37. Re-executing a node twice in one run leaves the catalog buildable: at most one attempt per node is active, and superseded attempts contribute no evidence.
-38. Promoting an attempt is atomic; no observable state has zero or two active attempts for a node.
+38. Promoting an attempt is atomic; every successful committed node selects
+exactly one attempt, while failed, skipped, and inactive nodes select none.
 39. Publication never rewrites a file in place; every state transition is a rename.
 40. The evidence ID algorithm is specified to the byte, and two independent implementations produce identical IDs for identical keys.
 41. Every evidence namespace has exactly one declaring producer in a plan.
@@ -2200,8 +2720,33 @@ v6 is accepted only when:
 59. Reconciliation is keyed on instance identifiers, so two occurrences of one code are resolved independently.
 60. Every `UpstreamIssue` severity is derived from a typed source field, never assigned by convention.
 61. A dataset-domain fact or inference cites at least one dataset-domain evidence record.
-62. Every required input port is bound by exactly one edge or one plan input binding, and multi-provider inputs arrive in a deterministic order.
-63. An investigation round commits as a generation over its dependency closure and never appends evidence outside one.
+62. Every input port satisfies the exact `one`/`many` and required/optional
+cardinality matrix; edge and binding sources are never mixed on one port, and
+multi-provider inputs arrive in deterministic order.
+63. An investigation round commits inside one candidate generation over its
+dependency closure and never appends evidence outside one.
+64. Every candidate and committed generation contains one explicit
+`NodeGenerationState` for every plan node; missing entries never mean inactive,
+failed, or skipped.
+65. `plan.json` is immutable after validation; `plan_id` and `plan_digest` match
+every generation, manifest, node bundle, and evidence fragment in the run.
+66. Every external input binding is a typed discriminated contract with an
+explicit source contract and schema version; raw config and path strings are not
+plan bindings.
+67. Every evidence record names `producer_node_id`, which matches its enclosing
+fragment and node manifest but is not an input to evidence identity.
+68. Node output provenance is bound to a typed `input_snapshot_digest`; the
+full candidate `snapshot_digest` may change after publication and is never used
+as the Synthesis pre-publication comparison.
+69. The Final Strategy publication gate is implementable as the ordered
+structural checks in §23.1 and requires no interpretation of prose.
+70. A failed recompute cannot reactivate or reuse the invalidated node's prior
+attempt inside its candidate; the prior attempt remains visible only through
+the previous committed generation.
+71. Additional investigation changes node activation and generation state,
+never the immutable plan body, and a round-1 request cannot recurse.
+72. Every core hash, digest, fingerprint, and artifact ID uses the preimage and
+algorithm registry in §10.4.1, with executable golden vectors.
 
 ---
 
@@ -2434,6 +2979,9 @@ Revision 0.2.4 changes no module boundary, package layout, or execution model. W
 
 ## Appendix E — Decision log for revision 0.2.5
 
+> **Historical record.** Superseded in part by revision 0.2.6; implement from
+> the numbered sections and Appendix F.
+
 The fifth review confirmed the architecture as settled and found six remaining implementability gaps plus one blocker scheduled for a later phase. Five of the six were introduced by 0.2.4, and one of those is worth naming precisely: the generation protocol added in 0.2.4 to fix mixed-snapshot runs itself created a circular dependency, because Synthesis is a member of every closure it must read the results of. This is the second consecutive revision in which a correct fix produced the next defect, which is not an argument against the fixes but an argument for the scenario tests in §29.6.
 
 | Finding | Origin | Decision in v0.2.5 |
@@ -2455,3 +3003,44 @@ The fifth review confirmed the architecture as settled and found six remaining i
 One pattern is now clear enough to state as guidance rather than as a finding. Every defect in revisions 0.2.2 through 0.2.5 fell into one of two classes: a concept named in prose without a field to hold it, or a rule that was locally correct but globally circular. The first class is caught by reading contracts as if compiling them. The second is caught only by tracing a complete operation — publish, recompute, commit, render — across every section that touches it. Neither is caught by reviewing sections in isolation, which is why §29.6 now carries nine lifecycle scenarios and why those scenarios, not the section text, are the real specification of the run lifecycle.
 
 Revision 0.2.5 changes no module boundary, package layout, or execution model. The kernel is now constructible end to end: from the first node's `NodeManifest` through candidate snapshot, Synthesis, pre-commit gate, atomic commit, and presentation. Status may move to implementation-ready and Phase 0–2 tasks may be distributed independently, with §29.6 scenarios 1–3 and 7–8 as the gate on Phase 4 rather than as optional coverage.
+
+---
+
+## Appendix F — Decision log for revision 0.2.6
+
+The v6 baseline audit compared revision 0.2.5 with the `kaggle_eda` codebase and
+found that the architecture was coherent but still not safe to distribute as
+independent code tasks. The remaining gaps were not new module boundaries; they
+were missing terminal-state, identity, and lifecycle rules at the exact seams
+the first implementation tasks would touch.
+
+| Baseline finding | Decision in v0.2.6 |
+|---|---|
+| A generation did not represent every plan node, especially an unrequested investigation node | `NodeGenerationState` is total over the plan and distinguishes `pending`, `running`, `success`, `failed`, `skipped`, and `inactive` (§10.6, §18.2) |
+| A failed recompute could be confused with reuse of the prior success | Invalidated attempts are removed from the candidate; an old success survives only in the previous committed generation, and failed-update status is explicit (§10.6, §18.4) |
+| `plan_id` named a plan but did not prove its body or define its lifecycle | Immutable `plan.json`, normative `plan_digest`, propagation into every run artifact, and new-run requirement for a changed plan (§12.0.1) |
+| Port cardinality prose handled `one` but not all `many` cases | Exact four-row cardinality matrix, no mixed edge/binding sources, and deterministic ordering (§12) |
+| `PlanInputBinding.source` was an untyped enum | Discriminated external bindings with source contract and schema version; raw config bindings removed (§12) |
+| Digests reused phrases such as "canonical JSON" without one shared byte contract | Canonical bytes and the complete core digest/preimage registry (§10.4.1) |
+| Full candidate digest and Synthesis input digest were conflated, recreating self-reference when Synthesis published | Per-node `InputSnapshotPreimage`; `input_snapshot_digest` is distinct from the changing generation `snapshot_digest` (§10.7, §12.1, §22) |
+| Evidence provenance named a module but not the configured plan node instance | Mandatory `producer_node_id` with fragment/manifest equality checks, excluded from evidence identity (§11.2, §11.5) |
+| Publication requirements were still a prose checklist with non-structural recommendation and uncertainty rules | Ordered deterministic gate plus `validation_prerequisites` and `missing_observation` fields (§23, §23.1) |
+| Additional investigation said "activate and continue" without a request decision contract or exact generation behavior | Typed decisions, stable plan digest, same-candidate round lifecycle, terminal round behavior, and optional/blocking failure semantics (§24) |
+
+Revision 0.2.6 deliberately does **not** implement the runner, publication,
+resume, or investigation loop. It freezes the contracts those later phases must
+obey. The first code task remains the isolated evidence identity seam:
+
+```text
+EvidenceKey -> canonical evidence-key bytes -> evidence_id
+```
+
+That task implements only the special preimage in §11.3 and the relevant shared
+UTF-8/NFC helpers from §10.4.1. It does not need `NodeGenerationState`,
+`PipelinePlan`, publication, resume, or Synthesis. Its gate is lifecycle
+scenario 6 plus unit golden vectors.
+
+With this revision, the canonical document is
+`docs/specs/KAGGLE_RESEARCHER_V6_SPEC.md`. Versioned copies may be retained for
+review history, but implementation tasks cite this path and the exact numbered
+sections they require.

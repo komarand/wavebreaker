@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0",
+  "competition_id": "panel_entity_time_tiny",
+  "created_at": "2026-07-26T00:00:00+03:00",
+  "hypotheses": [
+    {
+      "hypothesis_id": "schema_001",
+      "category": "schema",
+      "claim": "The dataset contains repeated entities observed across ordered periods.",
+      "rationale": "entity_id repeats and WEEK_NUM is ordered.",
+      "expected_eda_checks": ["schema_inferer.roles"],
+      "priority": "P0",
+      "confidence_before_eda": "high"
+    },
+    {
+      "hypothesis_id": "metric_001",
+      "category": "metric",
+      "claim": "Gini stability requires ranked predictions and time-aware diagnostics.",
+      "rationale": "The task plan declares gini_stability.",
+      "expected_eda_checks": ["metric_analyzer.registry"],
+      "priority": "P0",
+      "confidence_before_eda": "high"
+    },
+    {
+      "hypothesis_id": "val_001",
+      "category": "validation",
+      "claim": "Primary validation should respect the ordered panel structure.",
+      "rationale": "Repeated entities and ordered observations can invalidate random row splits.",
+      "expected_eda_checks": [
+        "validation_analyzer.period_distribution",
+        "validation_analyzer.temporal_cv_feasibility"
+      ],
+      "priority": "P0",
+      "confidence_before_eda": "medium"
+    },
+    {
+      "hypothesis_id": "leak_001",
+      "category": "leakage",
+      "claim": "Entity and time overlap require explicit leakage checks.",
+      "rationale": "The same entity appears in multiple periods.",
+      "expected_eda_checks": ["leakage_checker.direct_checks"],
+      "priority": "P0",
+      "confidence_before_eda": "medium"
+    }
+  ],
+  "eda_tasks": [],
+  "structured_findings": [],
+  "scout_limitations": [],
+  "models_used": {
+    "fixture": "deterministic"
+  }
+}
