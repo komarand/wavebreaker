@@ -1,0 +1,238 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Callable
+
+import pytest
+
+import kaggle_researcher.facts.notebooks as notebooks_module
+from kaggle_researcher.facts.notebooks import (
+    list_competition_notebooks,
+    pull_notebook,
+)
+
+
+FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "facts" / "kernel_list.json"
+
+
+class FakeKaggleApi:
+    list_pages: list[list[Any]] = []
+    pull_impl: Callable[[str, Path], None] | None = None
+    instances: list["FakeKaggleApi"] = []
+
+    def __init__(self) -> None:
+        self.authenticated = False
+        self.list_calls: list[dict[str, Any]] = []
+        self.pull_calls: list[dict[str, Any]] = []
+        self.__class__.instances.append(self)
+
+    def authenticate(self) -> None:
+        self.authenticated = True
+
+    def kernels_list(self, **kwargs: Any) -> list[Any]:
+        self.list_calls.append(kwargs)
+        page = kwargs["page"]
+        if page > len(self.__class__.list_pages):
+            return []
+        return self.__class__.list_pages[page - 1]
+
+    def kernels_pull(
+        self,
+        kernel_ref: str,
+        *,
+        path: str,
+        metadata: bool = False,
+        quiet: bool = False,
+    ) -> None:
+        self.pull_calls.append(
+            {
+                "kernel_ref": kernel_ref,
+                "path": path,
+                "metadata": metadata,
+                "quiet": quiet,
+            }
+        )
+        if self.__class__.pull_impl is not None:
+            self.__class__.pull_impl(kernel_ref, Path(path))
+
+
+@pytest.fixture(autouse=True)
+def fake_kaggle_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    FakeKaggleApi.list_pages = []
+    FakeKaggleApi.pull_impl = None
+    FakeKaggleApi.instances = []
+    monkeypatch.setattr(notebooks_module.kaggle_agent, "KaggleApi", FakeKaggleApi)
+
+
+def _load_kernels() -> list[dict[str, Any]]:
+    return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+def test_list_parses_string_and_float_scores_deduplicates_and_sorts() -> None:
+    FakeKaggleApi.list_pages = [_load_kernels()]
+
+    notebooks = list_competition_notebooks("example-competition", max_notebooks=10)
+
+    assert [notebook["ref"] for notebook in notebooks] == [
+        "bob/high-score",
+        "alice/baseline",
+        "cara/no-score",
+    ]
+    assert notebooks[0]["publicScore"] == pytest.approx(0.8456)
+    assert isinstance(notebooks[0]["publicScore"], float)
+    assert notebooks[1]["title"] == "Baseline updated"
+    assert notebooks[1]["totalVotes"] == 18
+    assert notebooks[1]["publicScore"] == pytest.approx(0.82)
+    assert notebooks[2]["publicScore"] is None
+    assert notebooks[2]["lastRunTime"] is None
+
+    api = FakeKaggleApi.instances[0]
+    assert api.authenticated is True
+    assert api.list_calls == [
+        {
+            "competition": "example-competition",
+            "page": 1,
+            "page_size": 10,
+            "sort_by": "voteCount",
+            "language": "python",
+        }
+    ]
+
+
+def test_list_respects_limit_after_vote_sorting() -> None:
+    FakeKaggleApi.list_pages = [_load_kernels()]
+
+    notebooks = list_competition_notebooks("example-competition", max_notebooks=2)
+
+    assert [notebook["ref"] for notebook in notebooks] == [
+        "bob/high-score",
+        "alice/baseline",
+    ]
+
+
+def test_list_fetches_another_page_when_duplicates_leave_room() -> None:
+    kernels = _load_kernels()
+    FakeKaggleApi.list_pages = [
+        [kernels[0], kernels[1], kernels[2]],
+        [kernels[3]],
+    ]
+
+    notebooks = list_competition_notebooks("example-competition", max_notebooks=3)
+
+    assert [notebook["ref"] for notebook in notebooks] == [
+        "bob/high-score",
+        "alice/baseline",
+        "cara/no-score",
+    ]
+    assert [call["page"] for call in FakeKaggleApi.instances[0].list_calls] == [1, 2]
+
+
+def test_list_supports_alternate_attribute_names_and_nested_author() -> None:
+    FakeKaggleApi.list_pages = [
+        [
+            SimpleNamespace(
+                kernel_ref="dana/alternate",
+                kernel_title="Alternate fields",
+                author={"username": "dana"},
+                vote_count="1,234",
+                public_score="0.7654",
+                last_run="2026-07-29T08:00:00Z",
+            )
+        ]
+    ]
+
+    notebooks = list_competition_notebooks("example-competition", max_notebooks=10)
+
+    assert notebooks == [
+        {
+            "ref": "dana/alternate",
+            "title": "Alternate fields",
+            "author": "dana",
+            "totalVotes": 1234,
+            "publicScore": pytest.approx(0.7654),
+            "lastRunTime": "2026-07-29T08:00:00Z",
+        }
+    ]
+
+
+def test_non_positive_limit_does_not_create_api_client() -> None:
+    assert list_competition_notebooks("example-competition", max_notebooks=0) == []
+    assert FakeKaggleApi.instances == []
+
+
+def test_pull_notebook_returns_downloaded_ipynb_path(tmp_path: Path) -> None:
+    def write_notebook(_: str, dest: Path) -> None:
+        nested = dest / "downloaded"
+        nested.mkdir()
+        (nested / "kernel.ipynb").write_text(
+            json.dumps({"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}),
+            encoding="utf-8",
+        )
+
+    FakeKaggleApi.pull_impl = write_notebook
+
+    notebook_path = pull_notebook("alice/baseline", tmp_path)
+
+    assert notebook_path == tmp_path / "downloaded" / "kernel.ipynb"
+    assert notebook_path.is_file()
+    assert FakeKaggleApi.instances[0].pull_calls == [
+        {
+            "kernel_ref": "alice/baseline",
+            "path": str(tmp_path),
+            "metadata": True,
+            "quiet": True,
+        }
+    ]
+
+
+def test_pull_failure_returns_none_without_raising(tmp_path: Path) -> None:
+    def fail_pull(_: str, __: Path) -> None:
+        raise RuntimeError("download failed")
+
+    FakeKaggleApi.pull_impl = fail_pull
+
+    assert pull_notebook("alice/missing", tmp_path) is None
+
+
+def test_pull_without_ipynb_returns_none(tmp_path: Path) -> None:
+    def write_script(_: str, dest: Path) -> None:
+        (dest / "script.py").write_text("print('script')", encoding="utf-8")
+
+    FakeKaggleApi.pull_impl = write_script
+
+    assert pull_notebook("alice/script", tmp_path) is None
+
+
+def test_pull_empty_ref_returns_none_without_creating_destination(tmp_path: Path) -> None:
+    dest = tmp_path / "not-created"
+
+    assert pull_notebook("", dest) is None
+    assert not dest.exists()
+    assert FakeKaggleApi.instances == []
+
+
+def test_pull_retries_without_quiet_for_older_client(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class OlderKaggleApi(FakeKaggleApi):
+        def kernels_pull(
+            self,
+            kernel_ref: str,
+            *,
+            path: str,
+            metadata: bool = False,
+            **kwargs: Any,
+        ) -> None:
+            if "quiet" in kwargs:
+                raise TypeError("quiet is unsupported")
+            (Path(path) / "older.ipynb").write_text("{}", encoding="utf-8")
+
+    OlderKaggleApi.instances = []
+    monkeypatch.setattr(notebooks_module.kaggle_agent, "KaggleApi", OlderKaggleApi)
+
+    notebook_path = pull_notebook("alice/older", tmp_path)
+
+    assert notebook_path == tmp_path / "older.ipynb"

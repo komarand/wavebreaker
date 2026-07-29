@@ -1,0 +1,34 @@
+[
+  {
+    "ref": "bob/high-score",
+    "title": "High score notebook",
+    "author": "bob",
+    "totalVotes": 30,
+    "publicScore": 0.8456,
+    "lastRunTime": "2026-07-28T12:00:00Z"
+  },
+  {
+    "ref": "alice/baseline",
+    "title": "Baseline",
+    "author": "alice",
+    "totalVotes": "12",
+    "publicScore": "0.8123",
+    "lastRunTime": "2026-07-27T09:30:00Z"
+  },
+  {
+    "ref": "alice/baseline",
+    "title": "Baseline updated",
+    "author": "alice",
+    "totalVotes": 18,
+    "publicScore": "0.8200",
+    "lastRunTime": "2026-07-29T10:15:00Z"
+  },
+  {
+    "ref": "cara/no-score",
+    "title": "No public score",
+    "author": "cara",
+    "totalVotes": 5,
+    "publicScore": null,
+    "lastRunTime": null
+  }
+]

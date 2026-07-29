@@ -1,0 +1,24 @@
+{
+  "files": [
+    {
+      "name": "train.csv",
+      "totalBytes": 1200
+    },
+    {
+      "name": "nested/test.csv",
+      "totalBytes": 400
+    },
+    {
+      "name": "sample_submission.csv",
+      "totalBytes": 80,
+      "columns": [
+        "id",
+        "target"
+      ]
+    },
+    {
+      "name": "metadata.json",
+      "totalBytes": 50
+    }
+  ]
+}

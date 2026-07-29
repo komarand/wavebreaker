@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+from typing import Any
+
+from kaggle.api.kaggle_api_extended import KaggleApi
+
+from kaggle_researcher.facts.models import CompetitionMetadata
+
+
+_FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "title": ("title", "competitionTitle", "competition_title"),
+    "metric_name": (
+        "evaluationMetric",
+        "evaluation_metric",
+        "metricName",
+        "metric_name",
+    ),
+    "is_code_competition": (
+        "isKernelsSubmission",
+        "is_kernels_submission",
+        "isCodeCompetition",
+        "is_code_competition",
+    ),
+    "submissions_per_day": (
+        "maxDailySubmissions",
+        "max_daily_submissions",
+        "submissionsPerDay",
+        "submissions_per_day",
+    ),
+    "max_team_size": ("maxTeamSize", "max_team_size"),
+    "deadline": ("deadline", "deadlineDate", "deadline_date"),
+    "reward": ("reward", "rewardDisplay", "reward_display"),
+    "category": ("category", "categoryName", "category_name"),
+    "num_teams": (
+        "teamCount",
+        "team_count",
+        "numTeams",
+        "num_teams",
+        "numberOfTeams",
+        "number_of_teams",
+    ),
+}
+_REF_CANDIDATES = ("ref", "competitionRef", "competition_ref", "slug", "id")
+
+
+def fetch_competition_metadata(slug: str) -> CompetitionMetadata:
+    api = KaggleApi()
+    api.authenticate()
+    competitions = api.competitions_list(search=slug)
+    competition = next(
+        (
+            candidate
+            for candidate in competitions or []
+            if _get_competition_value(candidate, *_REF_CANDIDATES) == slug
+        ),
+        None,
+    )
+
+    values: dict[str, Any] = {}
+    unavailable_fields: list[str] = []
+    for field_name, candidate_names in _FIELD_CANDIDATES.items():
+        value = (
+            _get_competition_value(competition, *candidate_names)
+            if competition is not None
+            else None
+        )
+        values[field_name] = value
+        if value is None:
+            unavailable_fields.append(field_name)
+
+    return CompetitionMetadata(
+        competition_id=slug,
+        unavailable_fields=unavailable_fields,
+        **values,
+    )
+
+
+def _get_competition_value(competition: Any, *names: str) -> Any:
+    if competition is None:
+        return None
+
+    if isinstance(competition, dict):
+        normalized_values = {
+            _normalize_key(str(key)): value for key, value in competition.items()
+        }
+        for name in names:
+            value = normalized_values.get(_normalize_key(name))
+            if _has_value(value):
+                return value
+        return None
+
+    for name in names:
+        try:
+            value = getattr(competition, name)
+        except Exception:
+            continue
+        if _has_value(value):
+            return value
+
+    normalized_names = {_normalize_key(name) for name in names}
+    for attribute_name in dir(competition):
+        if _normalize_key(attribute_name) not in normalized_names:
+            continue
+        try:
+            value = getattr(competition, attribute_name)
+        except Exception:
+            continue
+        if _has_value(value):
+            return value
+
+    return None
+
+
+def _has_value(value: Any) -> bool:
+    return value is not None and value != ""
+
+
+def _normalize_key(key: str) -> str:
+    return "".join(character for character in key.lower() if character.isalnum())

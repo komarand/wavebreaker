@@ -1,0 +1,12 @@
+{
+  "ref": "example-competition",
+  "title": "Example Competition",
+  "evaluationMetric": "ROC AUC",
+  "isKernelsSubmission": true,
+  "maxDailySubmissions": 5,
+  "maxTeamSize": 4,
+  "deadline": "2026-08-31T23:59:00Z",
+  "reward": "$50,000",
+  "category": "Featured",
+  "teamCount": 1234
+}
