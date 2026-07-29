@@ -1,25 +1,46 @@
 # KaggleResearcher
 
-Minimal bootstrap for the research/reasoning layer described in `docs/SPEC.md`.
+KaggleResearcher is a competition-research system. The v4 research and
+reasoning pipeline is implemented and remains available through the legacy
+`kaggle_researcher.main` entry point. Wavebreaker B5 adds a deterministic
+competition-facts pipeline and a single-call competition brief through
+`kaggle_researcher.wave`.
+
+## Documentation
+
+- [v4 specification](docs/SPEC.md)
+- [v4 implementation tasks](docs/CODEX_TASKS.md)
+- [Wavebreaker B5 specification](docs/SPEC_B5.md)
+- [Wavebreaker B5 implementation tasks](docs/CODEX_TASKS_B5.md)
 
 ## Requirements
 
 - Python 3.11+
-- PostgreSQL with pgvector for retrieval storage
-- CUDA is optional but recommended for faster local embeddings
+- The legacy v4 pipeline uses PostgreSQL with pgvector and local
+  SentenceTransformers embeddings. CUDA is optional.
+- B5 requires no PostgreSQL, embeddings, or GPU.
 
-## Run
-
-Install dependencies:
+## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
+## Entry points
+
+Legacy v4 pipeline:
+
 ```bash
 python -m kaggle_researcher.main --help
 ```
 
-Embeddings are computed inside Python with SentenceTransformers. The default embedding model is `Qwen/Qwen3-Embedding-0.6B`, with `EMBED_DIM=1024` and `MAX_EMBED_BATCH_SIZE=8`.
+Wavebreaker B5:
 
-Current status: bootstrap only; external APIs, retrieval, embeddings, and report generation are not implemented yet.
+```bash
+python -m kaggle_researcher.wave --help
+```
+
+The B5 `facts` command is designed to run without a model API key. The B5
+implementation is delivered incrementally by the tasks in
+[`docs/CODEX_TASKS_B5.md`](docs/CODEX_TASKS_B5.md), beginning with the
+documentation contract in task 65.

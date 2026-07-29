@@ -29,6 +29,12 @@ class Settings:
     max_papers: int = 15
     max_repos: int = 10
     pdf_cache_dir: str = "./data/pdfs"
+    max_discussions: int = 200
+    max_context_tokens: int = 120_000
+    max_sample_sub_bytes: int = 5_000_000
+    meta_kaggle_dir: str | None = None
+    run_budget_tokens: int | None = None
+    kaggle_api_token: str | None = None
     kaggle_username: str | None = None
     kaggle_key: str | None = None
     github_token: str | None = None
@@ -50,11 +56,20 @@ def load_config() -> Settings:
             DEFAULT_MAX_EMBED_BATCH_SIZE,
         ),
         pg_dsn=os.getenv("PG_DSN", "postgresql://researcher:researcher@localhost:5432/kaggle_research"),
-        top_k=10,
-        max_notebooks=20,
-        max_papers=15,
-        max_repos=10,
-        pdf_cache_dir="./data/pdfs",
+        top_k=_get_positive_int_env("TOP_K", 10),
+        max_notebooks=_get_positive_int_env("MAX_NOTEBOOKS", 20),
+        max_papers=_get_positive_int_env("MAX_PAPERS", 15),
+        max_repos=_get_positive_int_env("MAX_REPOS", 10),
+        pdf_cache_dir=os.getenv("PDF_CACHE_DIR", "./data/pdfs"),
+        max_discussions=_get_positive_int_env("MAX_DISCUSSIONS", 200),
+        max_context_tokens=_get_positive_int_env("MAX_CONTEXT_TOKENS", 120_000),
+        max_sample_sub_bytes=_get_positive_int_env(
+            "MAX_SAMPLE_SUB_BYTES",
+            5_000_000,
+        ),
+        meta_kaggle_dir=os.getenv("META_KAGGLE_DIR"),
+        run_budget_tokens=_get_optional_positive_int_env("RUN_BUDGET_TOKENS"),
+        kaggle_api_token=os.getenv("KAGGLE_API_TOKEN"),
         kaggle_username=os.getenv("KAGGLE_USERNAME"),
         kaggle_key=os.getenv("KAGGLE_KEY"),
         github_token=os.getenv("GITHUB_TOKEN"),
@@ -65,6 +80,22 @@ def _get_positive_int_env(name: str, default: int) -> int:
     raw_value = os.getenv(name)
     if raw_value is None:
         return default
+
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a positive integer") from exc
+
+    if value <= 0:
+        raise ConfigError(f"{name} must be a positive integer")
+
+    return value
+
+
+def _get_optional_positive_int_env(name: str) -> int | None:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return None
 
     try:
         value = int(raw_value)
