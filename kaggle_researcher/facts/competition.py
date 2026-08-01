@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from kaggle.api.kaggle_api_extended import KaggleApi
-
+from kaggle_researcher.facts.kaggle_api import create_kaggle_api
 from kaggle_researcher.facts.models import CompetitionMetadata
 
 
@@ -43,9 +42,12 @@ _FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
 _REF_CANDIDATES = ("ref", "competitionRef", "competition_ref", "slug", "id")
 
 
-def fetch_competition_metadata(slug: str) -> CompetitionMetadata:
-    api = KaggleApi()
-    api.authenticate()
+def fetch_competition_metadata(
+    slug: str,
+    api: Any | None = None,
+) -> CompetitionMetadata:
+    if api is None:
+        api = create_kaggle_api()
     competitions = api.competitions_list(search=slug)
     competition = next(
         (

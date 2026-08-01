@@ -38,6 +38,23 @@ def test_optional_fact_fields_default_to_none() -> None:
     assert constraints.objective == "medal"
 
 
+def test_notebook_votes_default_to_zero() -> None:
+    notebook = NotebookFacts(
+        ref="author/notebook",
+        title="Notebook",
+        ast_fingerprint="fingerprint",
+        lineage_cluster_id="lineage",
+        splitters=[],
+        models=[],
+        metrics=[],
+        feature_ops=[],
+        declared_cv=[],
+        parse_status="ok",
+    )
+
+    assert notebook.votes == 0
+
+
 def test_competition_facts_preserve_collected_values_and_errors() -> None:
     collected_at = datetime(2026, 7, 29, 10, 30, tzinfo=UTC)
     observation = CodeObservation(
@@ -129,7 +146,7 @@ def test_competition_facts_preserve_collected_values_and_errors() -> None:
             {
                 "files": [],
                 "sample_submission_columns": [],
-                "sample_submission_source": "downloaded",
+                "sample_submission_source": "header_download",
                 "limitations": [],
             },
         ),

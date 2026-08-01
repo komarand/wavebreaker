@@ -7,8 +7,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from kaggle.api.kaggle_api_extended import KaggleApi
-
+from kaggle_researcher.facts.kaggle_api import create_kaggle_api, is_forbidden
 from kaggle_researcher.facts.models import FileInfo, FileManifest
 
 
@@ -23,15 +22,19 @@ def classify_role(name: str) -> str:
     return "auxiliary"
 
 
-def fetch_file_manifest(slug: str, max_sample_sub_bytes: int) -> FileManifest:
-    api = KaggleApi()
-    api.authenticate()
+def fetch_file_manifest(
+    slug: str,
+    max_sample_sub_bytes: int,
+    api: Any | None = None,
+) -> FileManifest:
+    if api is None:
+        api = create_kaggle_api()
     limitations: list[str] = []
 
     try:
         response = api.competition_list_files(slug)
     except Exception as exc:
-        if not _is_forbidden(exc):
+        if not is_forbidden(exc):
             raise
         limitations.append(
             "Kaggle API returned 403 while listing files; competition rules may not be accepted."
@@ -108,7 +111,7 @@ def fetch_file_manifest(slug: str, max_sample_sub_bytes: int) -> FileManifest:
             try:
                 sample_columns = _download_sample_header(api, slug, sample_file.name)
             except Exception as exc:
-                if not _is_forbidden(exc):
+                if not is_forbidden(exc):
                     raise
                 download_forbidden = True
                 limitations.append(
@@ -116,7 +119,7 @@ def fetch_file_manifest(slug: str, max_sample_sub_bytes: int) -> FileManifest:
                     "competition rules may not be accepted."
                 )
             if sample_columns:
-                sample_source = "header_download"
+                sample_source = "full_download"
             elif not download_forbidden:
                 limitations.append(
                     f"The downloaded {sample_file.name} did not contain a readable header."
@@ -157,7 +160,7 @@ def _train_test_size_ratio(files: list[FileInfo]) -> float | None:
     return train_size / test_size
 
 
-def _download_sample_header(api: KaggleApi, slug: str, file_name: str) -> list[str]:
+def _download_sample_header(api: Any, slug: str, file_name: str) -> list[str]:
     with tempfile.TemporaryDirectory(prefix="kaggle_sample_submission_") as temp_dir:
         api.competition_download_file(
             slug,
@@ -180,7 +183,12 @@ def _find_downloaded_file(temp_dir: Path, requested_name: str) -> Path:
     for path in downloaded_files:
         if path.name.lower() == requested_basename:
             return path
-    return downloaded_files[0]
+
+    found_names = [str(path.relative_to(temp_dir)) for path in downloaded_files]
+    raise RuntimeError(
+        f"Kaggle download for {requested_name!r} did not produce the expected filename. "
+        f"Found: {found_names}"
+    )
 
 
 def _read_header(path: Path) -> list[str]:
@@ -270,17 +278,6 @@ def _get_file_value(file_object: Any, *names: str) -> Any:
         if value is not None and value != "":
             return value
     return None
-
-
-def _is_forbidden(exc: Exception) -> bool:
-    status = getattr(exc, "status", None)
-    if status is None:
-        response = getattr(exc, "http_resp", None)
-        status = getattr(response, "status", None)
-    try:
-        return int(status) == 403
-    except (TypeError, ValueError):
-        return False
 
 
 def _normalize_key(key: str) -> str:

@@ -8,7 +8,11 @@ from typing import Any, Callable
 import pytest
 
 import kaggle_researcher.facts.files as files_module
-from kaggle_researcher.facts.files import classify_role, fetch_file_manifest
+from kaggle_researcher.facts.files import (
+    _find_downloaded_file,
+    classify_role,
+    fetch_file_manifest,
+)
 
 
 FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "facts" / "file_list.json"
@@ -65,7 +69,13 @@ def fake_kaggle_api(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeKaggleApi.list_error = None
     FakeKaggleApi.download_impl = None
     FakeKaggleApi.instances = []
-    monkeypatch.setattr(files_module, "KaggleApi", FakeKaggleApi)
+
+    def create_api() -> FakeKaggleApi:
+        api = FakeKaggleApi()
+        api.authenticate()
+        return api
+
+    monkeypatch.setattr(files_module, "create_kaggle_api", create_api)
 
 
 def _load_file_list() -> dict[str, Any]:
@@ -135,7 +145,7 @@ def test_download_reads_sample_header_and_never_downloads_train_or_test() -> Non
     manifest = fetch_file_manifest("example-competition", max_sample_sub_bytes=100)
 
     assert manifest.sample_submission_columns == ["id", "target"]
-    assert manifest.sample_submission_source == "header_download"
+    assert manifest.sample_submission_source == "full_download"
     assert manifest.limitations == []
     assert [call["file_name"] for call in FakeKaggleApi.instances[0].download_calls] == [
         "sample_submission.csv"
@@ -162,7 +172,7 @@ def test_zip_sample_header_is_read_without_extracting_archive() -> None:
     manifest = fetch_file_manifest("example-competition", max_sample_sub_bytes=100)
 
     assert manifest.sample_submission_columns == ["row_id", "prediction"]
-    assert manifest.sample_submission_source == "header_download"
+    assert manifest.sample_submission_source == "full_download"
 
 
 def test_ratio_is_none_when_train_or_test_is_missing() -> None:
@@ -229,3 +239,28 @@ def test_sample_download_403_is_non_fatal_and_never_falls_back_to_other_files() 
     assert [call["file_name"] for call in FakeKaggleApi.instances[0].download_calls] == [
         "sample_submission.csv"
     ]
+
+
+def test_find_downloaded_file_returns_exact_expected_file(tmp_path: Path) -> None:
+    expected = tmp_path / "sample_submission.csv"
+    expected.write_text("id,target\n", encoding="utf-8")
+    (tmp_path / "unrelated.csv").write_text("wrong\n", encoding="utf-8")
+
+    assert _find_downloaded_file(tmp_path, "sample_submission.csv") == expected
+
+
+@pytest.mark.parametrize("found_names", [["wrong.csv"], ["a.csv", "b.csv"]])
+def test_find_downloaded_file_fails_closed_on_name_mismatch(
+    tmp_path: Path,
+    found_names: list[str],
+) -> None:
+    for name in found_names:
+        (tmp_path / name).write_text("wrong\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _find_downloaded_file(tmp_path, "sample_submission.csv")
+
+    message = str(exc_info.value)
+    assert "sample_submission.csv" in message
+    for name in found_names:
+        assert name in message
