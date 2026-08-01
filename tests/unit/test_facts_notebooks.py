@@ -63,7 +63,13 @@ def fake_kaggle_api(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeKaggleApi.list_pages = []
     FakeKaggleApi.pull_impl = None
     FakeKaggleApi.instances = []
-    monkeypatch.setattr(notebooks_module.kaggle_agent, "KaggleApi", FakeKaggleApi)
+
+    def create_api() -> FakeKaggleApi:
+        api = FakeKaggleApi()
+        api.authenticate()
+        return api
+
+    monkeypatch.setattr(notebooks_module, "create_kaggle_api", create_api)
 
 
 def _load_kernels() -> list[dict[str, Any]]:
@@ -80,13 +86,13 @@ def test_list_parses_string_and_float_scores_deduplicates_and_sorts() -> None:
         "alice/baseline",
         "cara/no-score",
     ]
-    assert notebooks[0]["publicScore"] == pytest.approx(0.8456)
-    assert isinstance(notebooks[0]["publicScore"], float)
+    assert notebooks[0]["public_score"] == pytest.approx(0.8456)
+    assert isinstance(notebooks[0]["public_score"], float)
     assert notebooks[1]["title"] == "Baseline updated"
-    assert notebooks[1]["totalVotes"] == 18
-    assert notebooks[1]["publicScore"] == pytest.approx(0.82)
-    assert notebooks[2]["publicScore"] is None
-    assert notebooks[2]["lastRunTime"] is None
+    assert notebooks[1]["votes"] == 18
+    assert notebooks[1]["public_score"] == pytest.approx(0.82)
+    assert notebooks[2]["public_score"] is None
+    assert notebooks[2]["last_run"] is None
 
     api = FakeKaggleApi.instances[0]
     assert api.authenticated is True
@@ -97,6 +103,7 @@ def test_list_parses_string_and_float_scores_deduplicates_and_sorts() -> None:
             "page_size": 10,
             "sort_by": "voteCount",
             "language": "python",
+            "kernel_type": "notebook",
         }
     ]
 
@@ -150,9 +157,9 @@ def test_list_supports_alternate_attribute_names_and_nested_author() -> None:
             "ref": "dana/alternate",
             "title": "Alternate fields",
             "author": "dana",
-            "totalVotes": 1234,
-            "publicScore": pytest.approx(0.7654),
-            "lastRunTime": "2026-07-29T08:00:00Z",
+            "votes": 1234,
+            "public_score": pytest.approx(0.7654),
+            "last_run": "2026-07-29T08:00:00Z",
         }
     ]
 
@@ -160,6 +167,28 @@ def test_list_supports_alternate_attribute_names_and_nested_author() -> None:
 def test_non_positive_limit_does_not_create_api_client() -> None:
     assert list_competition_notebooks("example-competition", max_notebooks=0) == []
     assert FakeKaggleApi.instances == []
+
+
+def test_list_normalizes_required_notebook_fields_and_skips_missing_ref(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    FakeKaggleApi.list_pages = [
+        [
+            {"ref": "alice/none", "title": None, "totalVotes": None},
+            {"ref": "bob/empty", "title": "", "votes": "not-a-number"},
+            {"ref": "cara/blank", "title": "   ", "total_votes": -5},
+            {"title": "Missing ref", "totalVotes": 100},
+        ]
+    ]
+
+    notebooks = list_competition_notebooks("example-competition", max_notebooks=10)
+
+    assert [(item["ref"], item["title"], item["votes"]) for item in notebooks] == [
+        ("alice/none", "alice/none", 0),
+        ("bob/empty", "bob/empty", 0),
+        ("cara/blank", "cara/blank", 0),
+    ]
+    assert "without a ref" in caplog.text
 
 
 def test_pull_notebook_returns_downloaded_ipynb_path(tmp_path: Path) -> None:
@@ -231,7 +260,7 @@ def test_pull_retries_without_quiet_for_older_client(
             (Path(path) / "older.ipynb").write_text("{}", encoding="utf-8")
 
     OlderKaggleApi.instances = []
-    monkeypatch.setattr(notebooks_module.kaggle_agent, "KaggleApi", OlderKaggleApi)
+    monkeypatch.setattr(notebooks_module, "create_kaggle_api", OlderKaggleApi)
 
     notebook_path = pull_notebook("alice/older", tmp_path)
 

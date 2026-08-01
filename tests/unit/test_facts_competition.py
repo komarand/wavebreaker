@@ -49,7 +49,13 @@ class FakeKaggleApi:
 def fake_kaggle_api(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeKaggleApi.competitions = []
     FakeKaggleApi.instances = []
-    monkeypatch.setattr(competition_module, "KaggleApi", FakeKaggleApi)
+
+    def create_api() -> FakeKaggleApi:
+        api = FakeKaggleApi()
+        api.authenticate()
+        return api
+
+    monkeypatch.setattr(competition_module, "create_kaggle_api", create_api)
 
 
 def _load_full_competition() -> dict[str, Any]:

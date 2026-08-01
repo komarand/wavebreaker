@@ -1,21 +1,27 @@
 from __future__ import annotations
 
+import logging
 import math
 from pathlib import Path
 from typing import Any
 
-from kaggle_researcher.agents import kaggle_agent
+from kaggle_researcher.facts.kaggle_api import create_kaggle_api
 
 
 _REF_NAMES = ("ref", "kernelRef", "kernel_ref", "id")
+logger = logging.getLogger(__name__)
 
 
-def list_competition_notebooks(slug: str, max_notebooks: int) -> list[dict[str, Any]]:
+def list_competition_notebooks(
+    slug: str,
+    max_notebooks: int,
+    api: Any | None = None,
+) -> list[dict[str, Any]]:
     if max_notebooks <= 0:
         return []
 
-    api = kaggle_agent.KaggleApi()
-    api.authenticate()
+    if api is None:
+        api = create_kaggle_api()
     page_size = min(max_notebooks, 100)
     page = 1
     notebooks_by_ref: dict[str, dict[str, Any]] = {}
@@ -28,6 +34,7 @@ def list_competition_notebooks(slug: str, max_notebooks: int) -> list[dict[str, 
                 page_size=page_size,
                 sort_by="voteCount",
                 language="python",
+                kernel_type="notebook",
             )
             or []
         )
@@ -50,18 +57,27 @@ def list_competition_notebooks(slug: str, max_notebooks: int) -> list[dict[str, 
     )[:max_notebooks]
 
 
-def pull_notebook(kernel_ref: str, dest: Path) -> Path | None:
+def pull_notebook(
+    kernel_ref: str,
+    dest: Path,
+    api: Any | None = None,
+) -> Path | None:
     if not kernel_ref:
         return None
 
     try:
         dest.mkdir(parents=True, exist_ok=True)
         before = _notebook_file_state(dest)
-        api = kaggle_agent.KaggleApi()
-        api.authenticate()
+        if api is None:
+            api = create_kaggle_api()
         _pull_kernel(api, kernel_ref, dest)
         after = _notebook_file_state(dest)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Failed to pull Kaggle notebook %s (%s)",
+            kernel_ref,
+            type(exc).__name__,
+        )
         return None
 
     changed_paths = sorted(
@@ -74,12 +90,17 @@ def pull_notebook(kernel_ref: str, dest: Path) -> Path | None:
 
 def _normalize_kernel(kernel: Any) -> dict[str, Any] | None:
     ref = _get_kernel_value(kernel, *_REF_NAMES)
-    if not isinstance(ref, str) or not ref:
+    if not isinstance(ref, str) or not ref.strip():
+        logger.warning("Skipping Kaggle notebook entry without a ref")
         return None
+    ref = ref.strip()
+
+    raw_title = _get_kernel_value(kernel, "title", "kernelTitle", "kernel_title")
+    title = raw_title.strip() if isinstance(raw_title, str) else ""
 
     return {
         "ref": ref,
-        "title": _get_kernel_value(kernel, "title", "kernelTitle", "kernel_title"),
+        "title": title or ref,
         "author": _normalize_author(
             _get_kernel_value(
                 kernel,
@@ -90,7 +111,7 @@ def _normalize_kernel(kernel: Any) -> dict[str, Any] | None:
                 "owner_name",
             )
         ),
-        "totalVotes": _parse_votes(
+        "votes": _parse_votes(
             _get_kernel_value(
                 kernel,
                 "totalVotes",
@@ -100,14 +121,14 @@ def _normalize_kernel(kernel: Any) -> dict[str, Any] | None:
                 "vote_count",
             )
         ),
-        "publicScore": _parse_public_score(
+        "public_score": _parse_public_score(
             _get_kernel_value(
                 kernel,
                 "publicScore",
                 "public_score",
             )
         ),
-        "lastRunTime": _get_kernel_value(
+        "last_run": _get_kernel_value(
             kernel,
             "lastRunTime",
             "last_run_time",
@@ -142,19 +163,19 @@ def _parse_public_score(value: Any) -> float | None:
     return score if math.isfinite(score) else None
 
 
-def _parse_votes(value: Any) -> int | None:
+def _parse_votes(value: Any) -> int:
     if value is None or value == "":
-        return None
+        return 0
     try:
         votes = int(str(value).replace(",", "").strip())
     except (TypeError, ValueError):
-        return None
-    return votes if votes >= 0 else None
+        return 0
+    return votes if votes >= 0 else 0
 
 
 def _votes_sort_key(notebook: dict[str, Any]) -> int:
-    votes = notebook.get("totalVotes")
-    return votes if isinstance(votes, int) else -1
+    votes = notebook.get("votes")
+    return votes if isinstance(votes, int) else 0
 
 
 def _pull_kernel(api: Any, kernel_ref: str, dest: Path) -> None:
