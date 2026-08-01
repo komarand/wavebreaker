@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 from pathlib import Path
 from typing import Any
 
-from kaggle_researcher.facts.models import CodeObservation
+from kaggle_researcher.facts.models import CodeObservation, NotebookFacts
 
 
 SPLITTER_NAMES = {
@@ -147,6 +148,41 @@ def extract_observations(notebook_path: Path) -> dict[str, Any]:
     }
 
 
+def ast_fingerprint(notebook_path: Path) -> str:
+    try:
+        notebook = _read_notebook(notebook_path)
+        cells = _notebook_cells(notebook)
+    except Exception:
+        return _fingerprint_parts(["<unparsed>"])
+
+    tree_parts: list[str] = []
+    for cell in cells:
+        if _cell_value(cell, "cell_type") != "code":
+            continue
+        source = _source_text(_cell_value(cell, "source"))
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError, TypeError):
+            tree_parts.append("<unparsed>")
+            continue
+
+        normalized_tree = _FingerprintNormalizer().visit(tree)
+        tree_parts.append(ast.dump(normalized_tree, annotate_fields=False))
+
+    return _fingerprint_parts(tree_parts)
+
+
+def assign_lineage_clusters(facts: list[NotebookFacts]) -> list[NotebookFacts]:
+    return [
+        fact.model_copy(
+            update={
+                "lineage_cluster_id": f"lc_{fact.ast_fingerprint[:12]}",
+            }
+        )
+        for fact in facts
+    ]
+
+
 class _ObservationVisitor(ast.NodeVisitor):
     def __init__(
         self,
@@ -176,6 +212,27 @@ class _ObservationVisitor(ast.NodeVisitor):
                 )
             )
         self.generic_visit(node)
+
+
+class _FingerprintNormalizer(ast.NodeTransformer):
+    def visit_Module(self, node: ast.Module) -> ast.AST:
+        node.body = _without_leading_docstring(node.body)
+        return self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+        node.body = _without_leading_docstring(node.body)
+        return self.generic_visit(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AST:
+        node.body = _without_leading_docstring(node.body)
+        return self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
+        node.body = _without_leading_docstring(node.body)
+        return self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> ast.AST:
+        return ast.copy_location(ast.Constant(value="?"), node)
 
 
 def _read_notebook(path: Path) -> Any:
@@ -281,6 +338,23 @@ def _append_declared_cv(text: str, values: list[str], seen: set[str]) -> None:
             continue
         seen.add(score)
         values.append(score)
+
+
+def _without_leading_docstring(statements: list[ast.stmt]) -> list[ast.stmt]:
+    if not statements:
+        return statements
+    first_statement = statements[0]
+    if (
+        isinstance(first_statement, ast.Expr)
+        and isinstance(first_statement.value, ast.Constant)
+        and isinstance(first_statement.value.value, str)
+    ):
+        return statements[1:]
+    return statements
+
+
+def _fingerprint_parts(parts: list[str]) -> str:
+    return hashlib.sha256("".join(parts).encode("utf-8")).hexdigest()
 
 
 def _empty_result() -> dict[str, Any]:
