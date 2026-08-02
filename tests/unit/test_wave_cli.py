@@ -116,9 +116,10 @@ def test_brief_and_journal_specific_arguments_are_parsed() -> None:
     assert journal_args.brief_was_useful == "yes"
 
 
-def test_subcommands_are_explicit_stubs() -> None:
-    with pytest.raises(NotImplementedError, match="wave facts is not implemented yet"):
-        main(["facts", "example"])
+@pytest.mark.parametrize("command", ["brief", "journal"])
+def test_unimplemented_subcommands_are_explicit_stubs(command: str) -> None:
+    with pytest.raises(NotImplementedError, match=f"wave {command} is not implemented yet"):
+        main([command, "example"])
 
 
 def test_b5_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,10 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import json
+from collections import Counter
 from collections.abc import Sequence
+from datetime import datetime
+from pathlib import Path
+
+from kaggle_researcher.facts.collect import collect_facts
+from kaggle_researcher.facts.cv_lb import summarize_cv_lb
+from kaggle_researcher.facts.models import CompetitionFacts, UserConstraints
 
 
 OBJECTIVES = ("medal", "top_percent", "learn", "fast_baseline")
+DEFAULT_MAX_NOTEBOOKS = 20
+DEFAULT_MAX_DISCUSSIONS = 200
+DEFAULT_MAX_SAMPLE_SUB_BYTES = 5_000_000
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,7 +68,95 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.command == "facts":
+        _run_facts(args)
+        return
     raise NotImplementedError(f"wave {args.command} is not implemented yet")
+
+
+def _run_facts(args: argparse.Namespace) -> None:
+    facts = collect_facts(
+        slug=args.slug,
+        max_notebooks=(
+            args.max_notebooks
+            if args.max_notebooks is not None
+            else DEFAULT_MAX_NOTEBOOKS
+        ),
+        max_discussions=(
+            args.max_discussions
+            if args.max_discussions is not None
+            else DEFAULT_MAX_DISCUSSIONS
+        ),
+        similar=_parse_similar(args.similar),
+        user_constraints=UserConstraints(),
+        max_sample_sub_bytes=DEFAULT_MAX_SAMPLE_SUB_BYTES,
+    )
+    output_dir = _create_output_dir(facts.competition_id, args.out)
+    facts_path = output_dir / "facts.json"
+    facts_path.write_text(
+        json.dumps(facts.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    _print_facts_summary(facts, facts_path)
+
+
+def _create_output_dir(competition_id: str, requested: str | None) -> Path:
+    if requested:
+        output_dir = Path(requested)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = Path("runs") / f"{competition_id}_{timestamp}"
+    counter = 2
+    while output_dir.exists():
+        output_dir = Path("runs") / f"{competition_id}_{timestamp}_{counter:03d}"
+        counter += 1
+    output_dir.mkdir(parents=True, exist_ok=False)
+    return output_dir
+
+
+def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
+    metadata = facts.metadata
+    code_competition = (
+        "yes"
+        if metadata.is_code_competition is True
+        else "no"
+        if metadata.is_code_competition is False
+        else "unavailable"
+    )
+    ratio = facts.files.train_test_size_ratio
+    clusters = {notebook.lineage_cluster_id for notebook in facts.notebooks}
+    print(f"facts: {facts_path}")
+    print(f"metric: {metadata.metric_name or 'unavailable'}")
+    print(f"code competition: {code_competition}")
+    print(f"train/test ratio: {ratio if ratio is not None else 'unavailable'}")
+    print(f"notebooks: {len(facts.notebooks)}")
+    print(f"lineage clusters: {len(clusters)}")
+    print(f"splitters by lineage cluster: {dict(_splitter_distribution(facts))}")
+    print(f"cv/lb: {summarize_cv_lb(facts.cv_lb_pairs)}")
+    print(f"discussions: {len(facts.discussions)}")
+
+
+def _splitter_distribution(facts: CompetitionFacts) -> Counter[str]:
+    splitters_by_cluster: dict[str, set[str]] = {}
+    for notebook in facts.notebooks:
+        cluster_splitters = splitters_by_cluster.setdefault(
+            notebook.lineage_cluster_id,
+            set(),
+        )
+        cluster_splitters.update(splitter.name for splitter in notebook.splitters)
+    return Counter(
+        splitter
+        for cluster_splitters in splitters_by_cluster.values()
+        for splitter in cluster_splitters
+    )
+
+
+def _parse_similar(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return list(dict.fromkeys(slug.strip() for slug in value.split(",") if slug.strip()))
 
 
 def _add_competition_arguments(parser: argparse.ArgumentParser) -> None:
