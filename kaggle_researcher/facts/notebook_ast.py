@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import io
 import json
 import re
+import tokenize
 from pathlib import Path
 from typing import Any
 
@@ -113,7 +115,7 @@ def extract_observations(notebook_path: Path) -> dict[str, Any]:
 
     for cell in cells:
         cell_type = _cell_value(cell, "cell_type")
-        source = _source_text(_cell_value(cell, "source"))
+        source = _cell_source(cell)
         if cell_type == "markdown":
             _append_declared_cv(source, declared_cv, seen_cv)
             continue
@@ -122,15 +124,16 @@ def extract_observations(notebook_path: Path) -> dict[str, Any]:
 
         locator = f"cell_{code_cell_index}"
         code_cell_index += 1
+        python_source = _strip_magics(source)
         try:
-            tree = ast.parse(source)
+            tree = ast.parse(python_source)
         except SyntaxError:
             has_syntax_error = True
             continue
 
         parsed_code_cells += 1
         visitor = _ObservationVisitor(
-            source=source,
+            source=python_source,
             locator=locator,
             observations=observations,
         )
@@ -159,7 +162,7 @@ def ast_fingerprint(notebook_path: Path) -> str:
     for cell in cells:
         if _cell_value(cell, "cell_type") != "code":
             continue
-        source = _source_text(_cell_value(cell, "source"))
+        source = _strip_magics(_cell_source(cell))
         try:
             tree = ast.parse(source)
         except (SyntaxError, ValueError, TypeError):
@@ -173,6 +176,7 @@ def ast_fingerprint(notebook_path: Path) -> str:
 
 
 def assign_lineage_clusters(facts: list[NotebookFacts]) -> list[NotebookFacts]:
+    # TODO: Task 74 collect_facts must call assign_lineage_clusters after all notebook fingerprints are collected.
     return [
         fact.model_copy(
             update={
@@ -236,12 +240,8 @@ class _FingerprintNormalizer(ast.NodeTransformer):
 
 
 def _read_notebook(path: Path) -> Any:
-    try:
-        import nbformat
-    except ModuleNotFoundError:
-        with path.open("r", encoding="utf-8") as stream:
-            return json.load(stream)
-    return nbformat.read(path, as_version=4)
+    with path.open("r", encoding="utf-8") as stream:
+        return json.load(stream)
 
 
 def _notebook_cells(notebook: Any) -> list[Any]:
@@ -257,12 +257,41 @@ def _cell_value(value: Any, name: str) -> Any:
     return getattr(value, name, None)
 
 
-def _source_text(source: Any) -> str:
+def _cell_source(cell: Any) -> str:
+    source = _cell_value(cell, "source")
     if isinstance(source, str):
         return source
     if isinstance(source, list):
-        return "".join(item for item in source if isinstance(item, str))
-    return ""
+        return "".join(str(part) for part in source)
+    if source is None:
+        return ""
+    return str(source)
+
+
+def _strip_magics(source: str) -> str:
+    string_lines: set[int] = set()
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+        for token in tokens:
+            if token.type == tokenize.STRING:
+                string_lines.update(range(token.start[0], token.end[0] + 1))
+    except (IndentationError, tokenize.TokenError):
+        pass
+
+    stripped_lines: list[str] = []
+    for line_number, line in enumerate(source.splitlines(keepends=True), start=1):
+        if line_number in string_lines or not line.lstrip().startswith(
+            ("!", "%", "%%")
+        ):
+            stripped_lines.append(line)
+            continue
+        if line.endswith("\r\n"):
+            stripped_lines.append("\r\n")
+        elif line.endswith(("\n", "\r")):
+            stripped_lines.append(line[-1])
+        else:
+            stripped_lines.append("\n")
+    return "".join(stripped_lines)
 
 
 def _callee_name(function: ast.expr) -> str:

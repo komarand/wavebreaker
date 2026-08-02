@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import builtins
+import importlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from kaggle_researcher.facts.models import CodeObservation
-from kaggle_researcher.facts.notebook_ast import extract_observations
+from kaggle_researcher.facts.notebook_ast import (
+    _cell_source,
+    _strip_magics,
+    extract_observations,
+)
 
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "facts"
@@ -106,6 +113,84 @@ def test_invalid_notebook_file_returns_failed_result_without_raising(tmp_path: P
 
     assert result["parse_status"] == "failed"
     assert all(result[key] == [] for key in _list_result_keys())
+
+
+@pytest.mark.parametrize(
+    ("cell", "expected"),
+    [
+        ({"source": "value = 1"}, "value = 1"),
+        ({"source": ["value", " = ", 1]}, "value = 1"),
+        ({}, ""),
+        ({"source": {"unexpected": True}}, "{'unexpected': True}"),
+    ],
+)
+def test_cell_source_handles_json_source_shapes(
+    cell: dict[str, object], expected: str
+) -> None:
+    assert _cell_source(cell) == expected
+
+
+def test_parser_strips_multiline_magics_and_shell_commands(tmp_path: Path) -> None:
+    notebook_path = _write_notebook(
+        tmp_path,
+        [_code_cell("%matplotlib inline\n  !pip install package\nmodel = Ridge()\n")],
+    )
+
+    result = extract_observations(notebook_path)
+
+    assert result["parse_status"] == "ok"
+    assert [model.name for model in result["models"]] == ["Ridge"]
+
+
+def test_magic_only_cell_is_parseable(tmp_path: Path) -> None:
+    notebook_path = _write_notebook(
+        tmp_path,
+        [_code_cell("%%time\n  %load_ext autoreload\n!pwd\n")],
+    )
+
+    assert extract_observations(notebook_path)["parse_status"] == "ok"
+
+
+def test_strip_magics_preserves_lines_and_string_literal_contents() -> None:
+    source = '!pwd\ntext = """first\n%literal\n!literal\n"""\n%time value\n'
+
+    stripped = _strip_magics(source)
+
+    assert len(stripped.splitlines()) == len(source.splitlines())
+    assert "%literal" in stripped
+    assert "!literal" in stripped
+    assert stripped.splitlines()[0] == ""
+    assert stripped.splitlines()[-1] == ""
+
+
+def test_module_imports_when_nbformat_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def import_without_nbformat(
+        name: str,
+        globals: dict[str, Any] | None = None,
+        locals: dict[str, Any] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> Any:
+        if name.startswith("nbformat"):
+            raise ModuleNotFoundError(name)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_nbformat)
+    module = importlib.import_module("kaggle_researcher.facts.notebook_ast")
+
+    importlib.reload(module)
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "kaggle_researcher"
+        / "facts"
+        / "notebook_ast.py"
+    )
+
+    assert "nbformat" not in module_path.read_text(encoding="utf-8")
 
 
 def test_keyword_values_capture_names_literals_short_source_and_long_marker(

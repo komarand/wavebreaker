@@ -81,6 +81,19 @@ def test_unparsed_cells_use_stable_marker(tmp_path: Path) -> None:
     assert ast_fingerprint(path_a) == ast_fingerprint(path_b)
 
 
+def test_magics_do_not_make_fingerprint_cell_unparseable(tmp_path: Path) -> None:
+    with_magics = _write_notebook(
+        tmp_path / "with_magics.ipynb",
+        ["%matplotlib inline\n!pwd\nmodel = Ridge(alpha=1.0)"],
+    )
+    plain = _write_notebook(
+        tmp_path / "plain.ipynb",
+        ["\n\nmodel = Ridge(alpha=99.0)"],
+    )
+
+    assert ast_fingerprint(with_magics) == ast_fingerprint(plain)
+
+
 def test_code_cell_order_affects_fingerprint(tmp_path: Path) -> None:
     forward = _write_notebook(
         tmp_path / "forward.ipynb",
