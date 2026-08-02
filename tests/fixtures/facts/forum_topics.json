@@ -1,0 +1,118 @@
+{
+  "competition_pages": {
+    "first": {
+      "topics": [
+        {
+          "id": 101,
+          "title": "Host validation guidance",
+          "authorName": "competition-host",
+          "authorIsHost": true,
+          "votes": 34,
+          "postDate": "2025-01-02T03:04:05Z"
+        },
+        {
+          "id": 102,
+          "title": "Unavailable thread",
+          "authorName": "participant",
+          "authorIsHost": false,
+          "votes": 2,
+          "postDate": "2025-01-03T03:04:05Z"
+        }
+      ],
+      "next_page_token": "page-2"
+    },
+    "page-2": {
+      "topics": [
+        {
+          "id": 103,
+          "title": "Feature engineering ideas",
+          "authorName": "researcher",
+          "authorIsHost": false,
+          "votes": 12,
+          "postDate": "2025-01-04T03:04:05Z"
+        },
+        {
+          "id": 104,
+          "title": "Beyond the requested limit",
+          "authorName": "late-author",
+          "authorIsHost": false,
+          "votes": 99,
+          "postDate": "2025-01-05T03:04:05Z"
+        }
+      ],
+      "next_page_token": "page-3"
+    }
+  },
+  "writeup_pages": {
+    "past-one": {
+      "topics": [
+        {
+          "id": 201,
+          "title": "First-place solution",
+          "authorName": "winner-a",
+          "authorIsHost": false,
+          "votes": 150,
+          "postDate": "2024-06-01T00:00:00Z"
+        },
+        {
+          "id": 202,
+          "title": "Second solution",
+          "authorName": "winner-b",
+          "authorIsHost": false,
+          "votes": 90,
+          "postDate": "2024-06-02T00:00:00Z"
+        }
+      ],
+      "next_page_token": null
+    },
+    "past-two": {
+      "topics": [
+        {
+          "id": 203,
+          "title": "Winning ensemble",
+          "authorName": "winner-c",
+          "authorIsHost": false,
+          "votes": 80,
+          "postDate": "2023-04-01T00:00:00Z"
+        }
+      ],
+      "next_page_token": null
+    }
+  },
+  "threads": {
+    "101": {
+      "topic": {
+        "id": 101,
+        "title": "Host validation guidance",
+        "authorName": "competition-host",
+        "authorIsHost": true,
+        "votes": 35,
+        "postDate": "2025-01-02T03:04:05Z",
+        "content": "Use grouped validation."
+      },
+      "comments": [
+        {
+          "content": "Groups must not cross folds.",
+          "replies": [{"content": "This removed the leakage."}]
+        }
+      ]
+    },
+    "103": {
+      "topic": {"id": 103, "content": "Aggregate features by entity."},
+      "comments": [{"content": "Lagged aggregates also helped."}]
+    },
+    "201": {
+      "topic": {"id": 201, "content": "Blend diverse folds."},
+      "comments": [{"content": "Weights were optimized out of fold."}]
+    },
+    "202": {
+      "topic": {"id": 202, "content": "Train several seeds."},
+      "comments": []
+    },
+    "203": {
+      "topic": {"id": 203, "content": "Use a rank ensemble."},
+      "comments": []
+    }
+  },
+  "failed_topic_ids": [102]
+}
