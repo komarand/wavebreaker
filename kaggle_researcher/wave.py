@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
+from kaggle_researcher.config import get_writeups_per_competition
 from kaggle_researcher.facts.collect import collect_facts
 from kaggle_researcher.facts.cv_lb import summarize_cv_lb
 from kaggle_researcher.facts.models import CompetitionFacts, UserConstraints
@@ -87,6 +88,7 @@ def _run_facts(args: argparse.Namespace) -> None:
             if args.max_discussions is not None
             else DEFAULT_MAX_DISCUSSIONS
         ),
+        writeups_per_competition=args.writeups_per_competition,
         similar=_parse_similar(args.similar),
         user_constraints=UserConstraints(),
         max_sample_sub_bytes=DEFAULT_MAX_SAMPLE_SUB_BYTES,
@@ -163,8 +165,24 @@ def _add_competition_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("slug", help="Kaggle competition slug.")
     parser.add_argument("--max-notebooks", type=int, help="Maximum notebooks to collect.")
     parser.add_argument("--max-discussions", type=int, help="Maximum discussions to collect.")
+    parser.add_argument(
+        "--writeups-per-competition",
+        type=_positive_int,
+        default=get_writeups_per_competition(),
+        help="Maximum winner writeups per similar competition.",
+    )
     parser.add_argument("--similar", help="Comma-separated similar competition slugs.")
     parser.add_argument("--out", help="Output directory.")
+
+
+def _positive_int(raw_value: str) -> int:
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return value
 
 
 if __name__ == "__main__":

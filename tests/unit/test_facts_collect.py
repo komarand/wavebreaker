@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from pathlib import Path
@@ -61,7 +62,8 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
     monkeypatch.setattr(
         collect,
         "fetch_winner_writeups",
-        lambda slugs, limit: calls.append("writeups") or [_discussion(slugs[0], True)],
+        lambda slugs, limit: calls.append(f"writeups:{limit}")
+        or [_discussion(slugs[0], True)],
     )
 
     facts = collect.collect_facts(
@@ -71,6 +73,7 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
         similar=["past-comp"],
         user_constraints=UserConstraints(vram_gb=12),
         max_sample_sub_bytes=1000,
+        writeups_per_competition=10,
     )
 
     assert calls == [
@@ -80,7 +83,7 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
         "assign:2",
         "pairs:1",
         "discussions",
-        "writeups",
+        "writeups:10",
     ]
     assert len(facts.notebooks) == 2
     assert len({item.lineage_cluster_id for item in facts.notebooks}) == 1
@@ -90,6 +93,11 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
     ]
     assert facts.similar_competitions[0].status == "not_computable"
     assert facts.similar_competitions[0].source == "unavailable"
+    assert (
+        facts.similar_competitions[0].not_computable_reason
+        == "Meta Kaggle dumps not configured."
+    )
+    assert "task" not in facts.similar_competitions[0].not_computable_reason.lower()
     assert facts.user_constraints.vram_gb == 12
     assert facts.collection_errors == []
 
@@ -211,6 +219,132 @@ def test_notebook_work_is_concurrent_and_bounded_to_four(
 
     assert len(facts.notebooks) == 8
     assert 1 < peak <= collect.NOTEBOOK_CONCURRENCY == 4
+
+
+def test_concurrency_one_collects_multiple_notebooks_without_hanging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_successful_non_notebook_stages(monkeypatch)
+    records = [_record(f"author/notebook-{index}") for index in range(3)]
+    monkeypatch.setattr(collect, "NOTEBOOK_CONCURRENCY", 1)
+    monkeypatch.setattr(
+        collect,
+        "list_competition_notebooks",
+        lambda slug, limit: records,
+    )
+    monkeypatch.setattr(collect, "pull_notebook", _fake_pull)
+    monkeypatch.setattr(collect, "extract_observations", lambda path: _observations())
+    monkeypatch.setattr(collect, "ast_fingerprint", lambda path: "d" * 64)
+
+    facts = collect.collect_facts("example", 3, 0, [], UserConstraints(), 1000)
+
+    assert [notebook.ref for notebook in facts.notebooks] == [
+        "author/notebook-0",
+        "author/notebook-1",
+        "author/notebook-2",
+    ]
+
+
+def test_download_semaphore_is_not_reacquired_for_ast_analysis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class CountingSemaphore:
+        entries = 0
+
+        async def __aenter__(self):
+            self.entries += 1
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    semaphore = CountingSemaphore()
+
+    def pull(ref: str, destination: Path) -> Path:
+        calls.append("pull")
+        return _fake_pull(ref, destination)
+
+    def extract(path: Path) -> dict[str, Any]:
+        calls.append("extract")
+        return _observations()
+
+    def fingerprint(path: Path) -> str:
+        calls.append("fingerprint")
+        return "e" * 64
+
+    monkeypatch.setattr(collect, "pull_notebook", pull)
+    monkeypatch.setattr(collect, "extract_observations", extract)
+    monkeypatch.setattr(collect, "ast_fingerprint", fingerprint)
+
+    result = asyncio.run(
+        collect._collect_one_notebook(
+            record=_record("author/one"),
+            destination=tmp_path,
+            semaphore=semaphore,  # type: ignore[arg-type]
+        )
+    )
+
+    assert semaphore.entries == 1
+    assert calls == ["pull", "extract", "fingerprint"]
+    assert not isinstance(result, str)
+    assert result.ast_fingerprint == "e" * 64
+    assert result.splitters == _observations()["splitters"]
+
+
+def test_discussion_and_writeup_limits_are_independent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_successful_non_notebook_stages(monkeypatch)
+    monkeypatch.setattr(collect, "list_competition_notebooks", lambda slug, limit: [])
+    calls: list[tuple[str, object, int]] = []
+
+    def discussions(slug: str, limit: int) -> list[DiscussionFacts]:
+        calls.append(("discussions", slug, limit))
+        return [_discussion(slug)]
+
+    def writeups(slugs: list[str], limit: int) -> list[DiscussionFacts]:
+        calls.append(("writeups", tuple(slugs), limit))
+        return [_discussion(slug, True) for slug in slugs]
+
+    monkeypatch.setattr(collect, "fetch_competition_discussions", discussions)
+    monkeypatch.setattr(collect, "fetch_winner_writeups", writeups)
+
+    facts = collect.collect_facts(
+        "example",
+        max_notebooks=0,
+        max_discussions=200,
+        similar=["past-a", "past-b", "past-c"],
+        user_constraints=UserConstraints(),
+        max_sample_sub_bytes=1000,
+        writeups_per_competition=10,
+    )
+
+    assert calls == [
+        ("discussions", "example", 200),
+        ("writeups", ("past-a", "past-b", "past-c"), 10),
+    ]
+    writeups = [
+        item for item in facts.discussions if item.source_type == "winner_writeup"
+    ]
+    assert len(writeups) == 3
+    assert all(item.status == "not_computable" for item in facts.similar_competitions)
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_collect_rejects_nonpositive_writeup_limit(limit: int) -> None:
+    with pytest.raises(ValueError, match="writeups_per_competition"):
+        collect.collect_facts(
+            "example",
+            0,
+            0,
+            [],
+            UserConstraints(),
+            1000,
+            writeups_per_competition=limit,
+        )
 
 
 def _patch_successful_non_notebook_stages(monkeypatch: pytest.MonkeyPatch) -> None:

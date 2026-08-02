@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 from kaggle_researcher.facts.competition import fetch_competition_metadata
 from kaggle_researcher.facts.cv_lb import build_cv_lb_pairs
@@ -30,7 +29,6 @@ from kaggle_researcher.facts.notebooks import list_competition_notebooks, pull_n
 
 
 NOTEBOOK_CONCURRENCY = 4
-T = TypeVar("T")
 
 
 def collect_facts(
@@ -40,7 +38,10 @@ def collect_facts(
     similar: list[str],
     user_constraints: UserConstraints,
     max_sample_sub_bytes: int,
+    writeups_per_competition: int = 10,
 ) -> CompetitionFacts:
+    if writeups_per_competition <= 0:
+        raise ValueError("writeups_per_competition must be a positive integer")
     try:
         metadata = fetch_competition_metadata(slug)
     except Exception as exc:
@@ -83,7 +84,7 @@ def collect_facts(
     except Exception as exc:
         collection_errors.append(_stage_error("competition discussions", exc))
     try:
-        discussions.extend(fetch_winner_writeups(similar, max_discussions))
+        discussions.extend(fetch_winner_writeups(similar, writeups_per_competition))
     except Exception as exc:
         collection_errors.append(_stage_error("winner writeups", exc))
 
@@ -93,7 +94,7 @@ def collect_facts(
             status="not_computable",
             matched_teams=0,
             source="unavailable",
-            not_computable_reason="Leaderboard stability is deferred to task 82.",
+            not_computable_reason="Meta Kaggle dumps not configured.",
         )
         for competition_slug in similar
     ]
@@ -167,17 +168,17 @@ async def _collect_one_notebook(
 ) -> NotebookFacts | str:
     ref = str(record.get("ref") or "<unknown>")
     try:
-        notebook_path = await _bounded_to_thread(
-            semaphore,
-            pull_notebook,
-            ref,
-            destination,
-        )
+        async with semaphore:
+            notebook_path = await asyncio.to_thread(
+                pull_notebook,
+                ref,
+                destination,
+            )
         if notebook_path is None:
             return f"notebook {ref} pull failed"
-        observations, fingerprint = await asyncio.gather(
-            _bounded_to_thread(semaphore, extract_observations, notebook_path),
-            _bounded_to_thread(semaphore, ast_fingerprint, notebook_path),
+        observations, fingerprint = await asyncio.to_thread(
+            _analyze_downloaded_notebook,
+            notebook_path,
         )
         return NotebookFacts(
             ref=ref,
@@ -199,13 +200,12 @@ async def _collect_one_notebook(
         return _stage_error(f"notebook {ref}", exc)
 
 
-async def _bounded_to_thread(
-    semaphore: asyncio.Semaphore,
-    function: Callable[..., T],
-    *args: Any,
-) -> T:
-    async with semaphore:
-        return await asyncio.to_thread(function, *args)
+def _analyze_downloaded_notebook(
+    notebook_path: Path,
+) -> tuple[dict[str, Any], str]:
+    observations = extract_observations(notebook_path)
+    fingerprint = ast_fingerprint(notebook_path)
+    return observations, fingerprint
 
 
 def _stage_error(stage: str, exc: BaseException) -> str:

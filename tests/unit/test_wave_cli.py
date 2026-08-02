@@ -15,6 +15,7 @@ B5_CONFIG_ENV_VARS = (
     "MAX_REPOS",
     "PDF_CACHE_DIR",
     "MAX_DISCUSSIONS",
+    "WRITEUPS_PER_COMPETITION",
     "MAX_CONTEXT_TOKENS",
     "MAX_SAMPLE_SUB_BYTES",
     "META_KAGGLE_DIR",
@@ -60,6 +61,8 @@ def test_facts_arguments_are_parsed() -> None:
             "60",
             "--max-discussions",
             "200",
+            "--writeups-per-competition",
+            "7",
             "--similar",
             "comp-a,comp-b",
             "--out",
@@ -72,6 +75,7 @@ def test_facts_arguments_are_parsed() -> None:
         slug="example",
         max_notebooks=60,
         max_discussions=200,
+        writeups_per_competition=7,
         similar="comp-a,comp-b",
         out="./output",
     )
@@ -137,6 +141,7 @@ def test_b5_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.max_repos == 10
     assert settings.pdf_cache_dir == "./data/pdfs"
     assert settings.max_discussions == 200
+    assert settings.writeups_per_competition == 10
     assert settings.max_context_tokens == 120_000
     assert settings.max_sample_sub_bytes == 5_000_000
     assert settings.meta_kaggle_dir is None
@@ -156,6 +161,7 @@ def test_b5_config_env_overrides_and_legacy_kaggle_fallback(
     monkeypatch.setenv("MAX_REPOS", "18")
     monkeypatch.setenv("PDF_CACHE_DIR", "./custom-pdfs")
     monkeypatch.setenv("MAX_DISCUSSIONS", "300")
+    monkeypatch.setenv("WRITEUPS_PER_COMPETITION", "12")
     monkeypatch.setenv("MAX_CONTEXT_TOKENS", "90000")
     monkeypatch.setenv("MAX_SAMPLE_SUB_BYTES", "4000000")
     monkeypatch.setenv("META_KAGGLE_DIR", "./meta-kaggle")
@@ -172,6 +178,7 @@ def test_b5_config_env_overrides_and_legacy_kaggle_fallback(
     assert settings.max_repos == 18
     assert settings.pdf_cache_dir == "./custom-pdfs"
     assert settings.max_discussions == 300
+    assert settings.writeups_per_competition == 12
     assert settings.max_context_tokens == 90_000
     assert settings.max_sample_sub_bytes == 4_000_000
     assert settings.meta_kaggle_dir == "./meta-kaggle"
@@ -181,7 +188,15 @@ def test_b5_config_env_overrides_and_legacy_kaggle_fallback(
     assert settings.kaggle_key == "legacy-key"
 
 
-@pytest.mark.parametrize("name", ["TOP_K", "MAX_DISCUSSIONS", "RUN_BUDGET_TOKENS"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "TOP_K",
+        "MAX_DISCUSSIONS",
+        "WRITEUPS_PER_COMPETITION",
+        "RUN_BUDGET_TOKENS",
+    ],
+)
 def test_new_integer_config_values_must_be_positive(
     monkeypatch: pytest.MonkeyPatch,
     name: str,
@@ -191,3 +206,11 @@ def test_new_integer_config_values_must_be_positive(
 
     with pytest.raises(ConfigError, match=f"{name} must be a positive integer"):
         load_config()
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_writeup_cli_limit_must_be_positive(value: str) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            ["facts", "example", "--writeups-per-competition", value]
+        )

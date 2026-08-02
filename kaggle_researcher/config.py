@@ -6,6 +6,7 @@ from dataclasses import dataclass
 DEFAULT_EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_EMBED_DIM = 1024
 DEFAULT_MAX_EMBED_BATCH_SIZE = 8
+DEFAULT_WRITEUPS_PER_COMPETITION = 10
 
 from dotenv import load_dotenv
 
@@ -30,6 +31,7 @@ class Settings:
     max_repos: int = 10
     pdf_cache_dir: str = "./data/pdfs"
     max_discussions: int = 200
+    writeups_per_competition: int = DEFAULT_WRITEUPS_PER_COMPETITION
     max_context_tokens: int = 120_000
     max_sample_sub_bytes: int = 5_000_000
     meta_kaggle_dir: str | None = None
@@ -62,6 +64,7 @@ def load_config() -> Settings:
         max_repos=_get_positive_int_env("MAX_REPOS", 10),
         pdf_cache_dir=os.getenv("PDF_CACHE_DIR", "./data/pdfs"),
         max_discussions=_get_positive_int_env("MAX_DISCUSSIONS", 200),
+        writeups_per_competition=get_writeups_per_competition(),
         max_context_tokens=_get_positive_int_env("MAX_CONTEXT_TOKENS", 120_000),
         max_sample_sub_bytes=_get_positive_int_env(
             "MAX_SAMPLE_SUB_BYTES",
@@ -73,6 +76,14 @@ def load_config() -> Settings:
         kaggle_username=os.getenv("KAGGLE_USERNAME"),
         kaggle_key=os.getenv("KAGGLE_KEY"),
         github_token=os.getenv("GITHUB_TOKEN"),
+    )
+
+
+def get_writeups_per_competition() -> int:
+    """Return the facts-only writeup cap without requiring model credentials."""
+    return _get_positive_int_env(
+        "WRITEUPS_PER_COMPETITION",
+        DEFAULT_WRITEUPS_PER_COMPETITION,
     )
 
 

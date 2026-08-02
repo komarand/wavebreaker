@@ -29,6 +29,13 @@ def test_wave_facts_writes_offline_checkpoint_and_cluster_summary(
 ) -> None:
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     _patch_offline_stages(monkeypatch)
+    writeup_limits: list[int] = []
+
+    def winner_writeups(slugs: list[str], limit: int) -> list[DiscussionFacts]:
+        writeup_limits.append(limit)
+        return [_discussion(slug, "winner_writeup") for slug in slugs]
+
+    monkeypatch.setattr(collect, "fetch_winner_writeups", winner_writeups)
 
     wave.main(
         [
@@ -38,6 +45,8 @@ def test_wave_facts_writes_offline_checkpoint_and_cluster_summary(
             "2",
             "--max-discussions",
             "3",
+            "--writeups-per-competition",
+            "4",
             "--similar",
             "past-comp",
             "--out",
@@ -52,6 +61,10 @@ def test_wave_facts_writes_offline_checkpoint_and_cluster_summary(
     assert len(payload["notebooks"]) == 2
     assert len({item["lineage_cluster_id"] for item in payload["notebooks"]}) == 1
     assert payload["similar_competitions"][0]["status"] == "not_computable"
+    assert payload["similar_competitions"][0]["not_computable_reason"] == (
+        "Meta Kaggle dumps not configured."
+    )
+    assert writeup_limits == [4]
     assert payload["collection_errors"] == []
     assert "deepseek" not in facts_path.read_text(encoding="utf-8").lower()
     assert "metric: roc_auc" in output
