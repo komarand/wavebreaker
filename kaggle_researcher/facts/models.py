@@ -36,7 +36,7 @@ class FileManifest(BaseModel):
     files: list[FileInfo]
     train_test_size_ratio: float | None = None
     sample_submission_columns: list[str]
-    sample_submission_source: Literal["api", "full_download", "unavailable"]
+    sample_submission_source: Literal["api", "header_download", "unavailable"]
     limitations: list[str]
 
 
@@ -44,7 +44,7 @@ class NotebookFacts(BaseModel):
     ref: str
     title: str
     author: str | None = None
-    votes: int = 0
+    votes: int
     public_score: float | None = None
     last_run: datetime | None = None
 
