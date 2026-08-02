@@ -1,5 +1,6 @@
 # requirements-dev.txt
 pytest==8.3.2
+# Installed by .github/workflows/tests.yml for asyncio_mode=auto.
 pytest-asyncio==0.23.8
 pytest-socket==0.7.0
 pytest-cov==5.0.0
