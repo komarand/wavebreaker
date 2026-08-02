@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from collections import Counter
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
-from kaggle_researcher.config import get_writeups_per_competition
+from pydantic import BaseModel
+
+from kaggle_researcher.brief import generate_brief
+from kaggle_researcher.brief_validate import validate_brief
+from kaggle_researcher.config import get_writeups_per_competition, load_config
 from kaggle_researcher.facts.collect import collect_facts
 from kaggle_researcher.facts.cv_lb import summarize_cv_lb
 from kaggle_researcher.facts.models import CompetitionFacts, UserConstraints
+from kaggle_researcher.render import render_brief, render_facts_section
+from kaggle_researcher.report.docx_generator import generate_report
 
 
 OBJECTIVES = ("medal", "top_percent", "learn", "fast_baseline")
@@ -49,6 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--facts-from",
         help="Read previously collected facts from this path.",
     )
+    brief_parser.add_argument(
+        "--docx",
+        action="store_true",
+        help="Also write brief.docx using the rendered markdown.",
+    )
 
     journal_parser = subparsers.add_parser(
         "journal",
@@ -71,6 +83,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     if args.command == "facts":
         _run_facts(args)
+        return
+    if args.command == "brief":
+        _run_brief(args)
         return
     raise NotImplementedError(f"wave {args.command} is not implemented yet")
 
@@ -100,6 +115,115 @@ def _run_facts(args: argparse.Namespace) -> None:
         encoding="utf-8",
     )
     _print_facts_summary(facts, facts_path)
+
+
+def _run_brief(args: argparse.Namespace) -> None:
+    facts = _facts_for_brief(args)
+    output_dir = _create_output_dir(facts.competition_id, args.out)
+    facts_path = output_dir / "facts.json"
+    _write_model_json(facts_path, facts)
+
+    try:
+        settings = load_config()
+        generated_brief = asyncio.run(generate_brief(facts, settings))
+    except Exception as exc:
+        markdown = _facts_only_brief(facts, exc)
+        markdown_path = output_dir / "brief.md"
+        markdown_path.write_text(markdown, encoding="utf-8")
+        docx_path = _write_docx(facts, markdown, output_dir) if args.docx else None
+        _print_brief_paths(
+            facts_path=facts_path,
+            brief_path=None,
+            markdown_path=markdown_path,
+            docx_path=docx_path,
+        )
+        return
+
+    brief = validate_brief(generated_brief, facts)
+    brief_path = output_dir / "brief.json"
+    markdown_path = output_dir / "brief.md"
+    markdown = render_brief(brief, facts)
+    _write_model_json(brief_path, brief)
+    markdown_path.write_text(markdown, encoding="utf-8")
+    docx_path = _write_docx(facts, markdown, output_dir) if args.docx else None
+    _print_brief_paths(
+        facts_path=facts_path,
+        brief_path=brief_path,
+        markdown_path=markdown_path,
+        docx_path=docx_path,
+    )
+
+
+def _facts_for_brief(args: argparse.Namespace) -> CompetitionFacts:
+    if args.facts_from:
+        return CompetitionFacts.model_validate_json(
+            Path(args.facts_from).read_text(encoding="utf-8")
+        )
+    return collect_facts(
+        slug=args.slug,
+        max_notebooks=(
+            args.max_notebooks
+            if args.max_notebooks is not None
+            else DEFAULT_MAX_NOTEBOOKS
+        ),
+        max_discussions=(
+            args.max_discussions
+            if args.max_discussions is not None
+            else DEFAULT_MAX_DISCUSSIONS
+        ),
+        writeups_per_competition=args.writeups_per_competition,
+        similar=_parse_similar(args.similar),
+        user_constraints=UserConstraints(
+            vram_gb=args.vram,
+            hours_per_week=args.hours,
+            objective=args.objective,
+        ),
+        max_sample_sub_bytes=DEFAULT_MAX_SAMPLE_SUB_BYTES,
+    )
+
+
+def _write_model_json(path: Path, model: BaseModel) -> None:
+    path.write_text(
+        json.dumps(model.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _facts_only_brief(facts: CompetitionFacts, error: Exception) -> str:
+    return (
+        f"{render_facts_section(facts)}\n\n"
+        "> Full competition brief generation was unavailable "
+        f"({type(error).__name__}). The facts checkpoint remains usable.\n"
+    )
+
+
+def _write_docx(
+    facts: CompetitionFacts,
+    markdown: str,
+    output_dir: Path,
+) -> Path:
+    return generate_report(
+        competition_name=facts.metadata.title or facts.competition_id,
+        roadmap_text=markdown,
+        sources=[],
+        output_path=output_dir / "brief.docx",
+        overwrite=True,
+    )
+
+
+def _print_brief_paths(
+    *,
+    facts_path: Path,
+    brief_path: Path | None,
+    markdown_path: Path,
+    docx_path: Path | None,
+) -> None:
+    print(f"facts: {facts_path}")
+    if brief_path is not None:
+        print(f"brief json: {brief_path}")
+    print(f"brief markdown: {markdown_path}")
+    if docx_path is not None:
+        print(f"brief docx: {docx_path}")
 
 
 def _create_output_dir(competition_id: str, requested: str | None) -> Path:

@@ -115,12 +115,19 @@ def test_brief_and_journal_specific_arguments_are_parsed() -> None:
     assert brief_args.hours == 10.5
     assert brief_args.objective == "top_percent"
     assert brief_args.facts_from == "./facts.json"
+    assert brief_args.docx is False
     assert journal_args.final_rank == 47
     assert journal_args.num_teams == 1200
     assert journal_args.brief_was_useful == "yes"
 
 
-@pytest.mark.parametrize("command", ["brief", "journal"])
+def test_brief_docx_flag_is_parsed() -> None:
+    args = build_parser().parse_args(["brief", "example", "--docx"])
+
+    assert args.docx is True
+
+
+@pytest.mark.parametrize("command", ["journal"])
 def test_unimplemented_subcommands_are_explicit_stubs(command: str) -> None:
     with pytest.raises(NotImplementedError, match=f"wave {command} is not implemented yet"):
         main([command, "example"])
