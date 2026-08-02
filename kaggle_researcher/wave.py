@@ -10,6 +10,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from kaggle_researcher import journal
 from kaggle_researcher.brief import generate_brief
 from kaggle_researcher.brief_validate import validate_brief
 from kaggle_researcher.config import get_writeups_per_competition, load_config
@@ -71,10 +72,15 @@ def build_parser() -> argparse.ArgumentParser:
     journal_parser.add_argument("--final-rank", type=int, help="Final leaderboard rank.")
     journal_parser.add_argument("--num-teams", type=int, help="Number of competing teams.")
     journal_parser.add_argument(
+        "--brief-run-id",
+        help="Run directory name under runs/ containing brief.json.",
+    )
+    journal_parser.add_argument(
         "--brief-was-useful",
         choices=("yes", "no"),
         help="Whether the generated brief was useful.",
     )
+    journal_parser.add_argument("--notes", help="Optional participation notes.")
 
     return parser
 
@@ -87,7 +93,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.command == "brief":
         _run_brief(args)
         return
-    raise NotImplementedError(f"wave {args.command} is not implemented yet")
+    if args.command == "journal":
+        _run_journal(args)
+        return
+    raise AssertionError(f"unhandled wave command: {args.command}")
 
 
 def _run_facts(args: argparse.Namespace) -> None:
@@ -224,6 +233,24 @@ def _print_brief_paths(
     print(f"brief markdown: {markdown_path}")
     if docx_path is not None:
         print(f"brief docx: {docx_path}")
+
+
+def _run_journal(args: argparse.Namespace) -> None:
+    useful = (
+        args.brief_was_useful == "yes"
+        if args.brief_was_useful is not None
+        else None
+    )
+    journal.append_entry(
+        competition_id=args.slug,
+        brief_run_id=args.brief_run_id,
+        used_validation=args.used_validation,
+        final_rank=args.final_rank,
+        num_teams=args.num_teams,
+        brief_was_useful=useful,
+        notes=args.notes,
+    )
+    print(json.dumps(journal.summarize(), ensure_ascii=False, sort_keys=True))
 
 
 def _create_output_dir(competition_id: str, requested: str | None) -> Path:

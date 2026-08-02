@@ -100,6 +100,8 @@ def test_brief_and_journal_specific_arguments_are_parsed() -> None:
         [
             "journal",
             "example",
+            "--brief-run-id",
+            "example_20260803_120000",
             "--used-validation",
             "GroupKFold(customer_id)",
             "--final-rank",
@@ -108,6 +110,8 @@ def test_brief_and_journal_specific_arguments_are_parsed() -> None:
             "1200",
             "--brief-was-useful",
             "yes",
+            "--notes",
+            "Finished in the top 5%.",
         ]
     )
 
@@ -119,18 +123,14 @@ def test_brief_and_journal_specific_arguments_are_parsed() -> None:
     assert journal_args.final_rank == 47
     assert journal_args.num_teams == 1200
     assert journal_args.brief_was_useful == "yes"
+    assert journal_args.brief_run_id == "example_20260803_120000"
+    assert journal_args.notes == "Finished in the top 5%."
 
 
 def test_brief_docx_flag_is_parsed() -> None:
     args = build_parser().parse_args(["brief", "example", "--docx"])
 
     assert args.docx is True
-
-
-@pytest.mark.parametrize("command", ["journal"])
-def test_unimplemented_subcommands_are_explicit_stubs(command: str) -> None:
-    with pytest.raises(NotImplementedError, match=f"wave {command} is not implemented yet"):
-        main([command, "example"])
 
 
 def test_b5_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
