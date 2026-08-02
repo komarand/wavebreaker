@@ -1,0 +1,291 @@
+from __future__ import annotations
+
+import inspect
+from datetime import datetime, timezone
+
+import pytest
+
+from kaggle_researcher import brief_validate
+from kaggle_researcher.brief_schemas import Claim, CompetitionBrief
+from kaggle_researcher.facts.models import (
+    CompetitionFacts,
+    CompetitionMetadata,
+    DiscussionFacts,
+    FileManifest,
+    NotebookFacts,
+    UserConstraints,
+)
+from kaggle_researcher.research_scout_schemas import EdaTask, ResearchHypothesis
+
+
+def test_fabricated_source_is_removed_and_recorded() -> None:
+    claim = _claim(
+        "claim_validation",
+        ["facts", "fabricated-source"],
+        text="Metric evidence comes from official facts.",
+    )
+    original = _brief(validation=[claim])
+
+    validated = brief_validate.validate_brief(original, _facts())
+
+    assert validated.validation[0].source_ids == ["facts"]
+    assert validated.validation[0].text == claim.text
+    assert any(
+        "claim_validation" in item and "fabricated-source" in item
+        for item in validated.limitations
+    )
+
+
+def test_claim_with_only_invalid_sources_moves_to_unknowns() -> None:
+    unsupported = _claim(
+        "claim_unsupported",
+        ["made-up"],
+        text="An unsupported performance claim.",
+    )
+    original = _brief(
+        validation=[_claim("claim_validation", ["facts"])],
+        what_works=[unsupported],
+    )
+
+    validated = brief_validate.validate_brief(original, _facts())
+
+    assert validated.what_works == []
+    assert "unsupported: An unsupported performance claim." in validated.unknowns
+    assert all(
+        claim.text != unsupported.text
+        for claim in validated.validation + validated.what_works
+    )
+
+
+@pytest.mark.parametrize(
+    "section_name",
+    ["validation", "metric_notes", "leakage_risks", "what_works", "time_wasters"],
+)
+def test_all_claim_sections_apply_the_same_source_validation(section_name: str) -> None:
+    kwargs = {section_name: [_claim("claim_section", ["invalid-source"])]}
+    if section_name == "validation":
+        kwargs["validation"] = [
+            _claim("claim_validation", ["facts"]),
+            _claim("claim_section", ["invalid-source"]),
+        ]
+
+    validated = brief_validate.validate_brief(_brief(**kwargs), _facts())
+
+    section = getattr(validated, section_name)
+    assert all(claim.claim_id != "claim_section" for claim in section)
+    assert "unsupported: Grounded claim text." in validated.unknowns
+
+
+def test_facts_notebook_and_discussion_ids_are_valid_sources() -> None:
+    facts = _facts(with_sources=True)
+    claim = _claim(
+        "claim_validation",
+        ["facts", "author/notebook", "topic-101"],
+    )
+
+    validated = brief_validate.validate_brief(
+        _brief(validation=[claim]),
+        facts,
+    )
+
+    assert validated.validation[0].source_ids == [
+        "facts",
+        "author/notebook",
+        "topic-101",
+    ]
+    assert validated.limitations == ["Existing limitation."]
+
+
+def test_validation_returns_a_new_brief_without_mutating_input() -> None:
+    original = _brief(
+        validation=[_claim("claim_validation", ["facts", "invalid-source"])]
+    )
+
+    validated = brief_validate.validate_brief(original, _facts())
+
+    assert validated is not original
+    assert original.validation[0].source_ids == ["facts", "invalid-source"]
+    assert original.limitations == ["Existing limitation."]
+
+
+def test_removed_thesis_support_is_dropped_and_thesis_moves_to_unknowns() -> None:
+    original = _brief(
+        thesis="Unsupported thesis text.",
+        thesis_support=["claim_validation"],
+        validation=[_claim("claim_validation", ["fabricated-source"])],
+    )
+
+    validated = brief_validate.validate_brief(original, _facts())
+
+    assert validated.thesis == ""
+    assert validated.thesis_support == []
+    assert validated.validation == []
+    assert "unsupported: Unsupported thesis text." in validated.unknowns
+    assert any("Thesis was moved to unknowns" in item for item in validated.limitations)
+
+
+def test_thesis_keeps_remaining_supported_claim_identifier() -> None:
+    original = _brief(
+        thesis_support=["claim_validation", "claim_secondary"],
+        validation=[
+            _claim("claim_validation", ["invalid-source"]),
+            _claim("claim_secondary", ["facts"]),
+        ],
+    )
+
+    validated = brief_validate.validate_brief(original, _facts())
+
+    assert validated.thesis == original.thesis
+    assert validated.thesis_support == ["claim_secondary"]
+    assert [claim.claim_id for claim in validated.validation] == ["claim_secondary"]
+
+
+def test_hypotheses_and_eda_tasks_remain_pydantic_valid_and_unchanged() -> None:
+    hypothesis = _hypothesis()
+    eda_task = _eda_task()
+    original = _brief(hypotheses=[hypothesis], eda_tasks=[eda_task])
+
+    validated = brief_validate.validate_brief(original, _facts())
+
+    assert validated.hypotheses == [hypothesis]
+    assert validated.eda_tasks == [eda_task]
+    assert isinstance(validated.hypotheses[0], ResearchHypothesis)
+    assert isinstance(validated.eda_tasks[0], EdaTask)
+
+
+def test_validator_contains_no_content_rewriting_helpers() -> None:
+    source = inspect.getsource(brief_validate)
+
+    for forbidden in ("enforce_", "correct_", "cleanup_", "_rewrite_"):
+        assert forbidden not in source
+
+
+def _brief(
+    *,
+    thesis: str = "Use the official metric to anchor validation.",
+    thesis_support: list[str] | None = None,
+    validation: list[Claim] | None = None,
+    metric_notes: list[Claim] | None = None,
+    leakage_risks: list[Claim] | None = None,
+    what_works: list[Claim] | None = None,
+    time_wasters: list[Claim] | None = None,
+    hypotheses: list[ResearchHypothesis] | None = None,
+    eda_tasks: list[EdaTask] | None = None,
+) -> CompetitionBrief:
+    validation_claims = validation
+    if validation_claims is None:
+        validation_claims = [_claim("claim_validation", ["facts"])]
+    support = thesis_support
+    if support is None:
+        support = [validation_claims[0].claim_id]
+    return CompetitionBrief(
+        competition_id="current-comp",
+        thesis=thesis,
+        thesis_support=support,
+        validation=validation_claims,
+        metric_notes=metric_notes or [],
+        leakage_risks=leakage_risks or [],
+        what_works=what_works or [],
+        time_wasters=time_wasters or [],
+        hypotheses=hypotheses or [],
+        eda_tasks=eda_tasks or [],
+        first_moves=[],
+        unknowns=[],
+        limitations=["Existing limitation."],
+    )
+
+
+def _claim(
+    claim_id: str,
+    source_ids: list[str],
+    *,
+    text: str = "Grounded claim text.",
+) -> Claim:
+    return Claim(
+        claim_id=claim_id,
+        text=text,
+        source_ids=source_ids,
+        kind="fact",
+    )
+
+
+def _facts(*, with_sources: bool = False) -> CompetitionFacts:
+    notebooks = [_notebook()] if with_sources else []
+    discussions = [_discussion()] if with_sources else []
+    return CompetitionFacts(
+        competition_id="current-comp",
+        collected_at=datetime(2026, 8, 2, tzinfo=timezone.utc),
+        metadata=CompetitionMetadata(
+            competition_id="current-comp",
+            metric_name="roc_auc",
+            is_code_competition=True,
+            unavailable_fields=[],
+        ),
+        files=FileManifest(
+            files=[],
+            sample_submission_columns=[],
+            sample_submission_source="unavailable",
+            limitations=[],
+        ),
+        notebooks=notebooks,
+        discussions=discussions,
+        similar_competitions=[],
+        cv_lb_pairs=[],
+        user_constraints=UserConstraints(),
+        collection_errors=[],
+    )
+
+
+def _notebook() -> NotebookFacts:
+    return NotebookFacts(
+        ref="author/notebook",
+        title="Notebook",
+        ast_fingerprint="a" * 64,
+        lineage_cluster_id="lineage_one",
+        splitters=[],
+        models=[],
+        metrics=[],
+        feature_ops=[],
+        declared_cv=[],
+        parse_status="ok",
+    )
+
+
+def _discussion() -> DiscussionFacts:
+    return DiscussionFacts(
+        topic_id="topic-101",
+        title="Discussion",
+        author="author",
+        author_is_host=False,
+        votes=1,
+        source_type="discussion",
+        competition_id="current-comp",
+        text="Discussion text.",
+    )
+
+
+def _hypothesis() -> ResearchHypothesis:
+    return ResearchHypothesis(
+        id="val_001",
+        category="validation",
+        priority="P0",
+        claim="Grouped validation may be required.",
+        why_it_matters="Entity overlap may inflate validation.",
+        how_to_verify=["Measure entity overlap between folds."],
+        provenance=["heuristic", "not_verified_on_data"],
+        supporting_source_ids=["facts"],
+        confidence="medium",
+    )
+
+
+def _eda_task() -> EdaTask:
+    return EdaTask(
+        id="eda_val_001",
+        priority="P0",
+        module="validation_analyzer",
+        question="Which column defines independent validation groups?",
+        rationale="Independent groups are needed for validation.",
+        expected_outputs=["validation_evidence.group_column"],
+        related_hypothesis_ids=["val_001"],
+        blocking=True,
+    )
