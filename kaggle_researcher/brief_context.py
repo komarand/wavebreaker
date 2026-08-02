@@ -11,6 +11,13 @@ from pydantic import BaseModel, Field
 
 from kaggle_researcher.facts.models import CompetitionFacts, DiscussionFacts, NotebookFacts
 
+FACTS_SOURCE_ID = "facts"
+CV_LB_SOURCE_ID = "cv_lb"
+NOTEBOOK_AST_SOURCE_ID = "notebook_ast"
+TRUSTED_SOURCE_IDS = frozenset(
+    {FACTS_SOURCE_ID, CV_LB_SOURCE_ID, NOTEBOOK_AST_SOURCE_ID}
+)
+
 
 class ContextPackingStats(BaseModel):
     token_budget: int
@@ -174,8 +181,12 @@ def _official_facts_unit(facts: CompetitionFacts) -> _ContextUnit:
         "user_constraints": facts.user_constraints.model_dump(mode="json"),
     }
     return _ContextUnit(
-        text=_trusted_block("TRUSTED_OFFICIAL_FACTS", payload),
-        source_ids=("facts",),
+        text=_trusted_block(
+            "TRUSTED_OFFICIAL_FACTS",
+            payload,
+            source_id=FACTS_SOURCE_ID,
+        ),
+        source_ids=(FACTS_SOURCE_ID,),
         category="official",
     )
 
@@ -188,7 +199,7 @@ def _notebook_ast_units(notebooks: list[NotebookFacts]) -> list[_ContextUnit]:
     units: list[_ContextUnit] = []
     for cluster_id in sorted(clusters):
         members = sorted(clusters[cluster_id], key=lambda item: item.ref)
-        source_ids = tuple(item.ref for item in members)
+        notebook_source_ids = tuple(item.ref for item in members)
         payload = {
             "cluster_id": cluster_id,
             "declared_cv": sorted(
@@ -201,7 +212,7 @@ def _notebook_ast_units(notebooks: list[NotebookFacts]) -> list[_ContextUnit]:
             "parse_status_counts": dict(
                 sorted(Counter(item.parse_status for item in members).items())
             ),
-            "source_ids": list(source_ids),
+            "source_ids": list(notebook_source_ids),
             "splitters": _aggregate_observations(members, "splitters"),
         }
         units.append(
@@ -210,8 +221,9 @@ def _notebook_ast_units(notebooks: list[NotebookFacts]) -> list[_ContextUnit]:
                     "TRUSTED_NOTEBOOK_AST",
                     payload,
                     lineage_cluster_id=cluster_id,
+                    source_id=NOTEBOOK_AST_SOURCE_ID,
                 ),
-                source_ids=source_ids,
+                source_ids=(NOTEBOOK_AST_SOURCE_ID, *notebook_source_ids),
                 category="notebook_ast",
             )
         )
@@ -253,8 +265,12 @@ def _cv_lb_unit(facts: CompetitionFacts) -> _ContextUnit:
         ],
     }
     return _ContextUnit(
-        text=_trusted_block("TRUSTED_CV_LB", payload),
-        source_ids=(),
+        text=_trusted_block(
+            "TRUSTED_CV_LB",
+            payload,
+            source_id=CV_LB_SOURCE_ID,
+        ),
+        source_ids=(CV_LB_SOURCE_ID,),
         category="cv_lb",
     )
 

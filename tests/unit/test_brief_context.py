@@ -24,7 +24,7 @@ def test_minimal_facts_pack_without_failure_and_report_missing_blocks() -> None:
     packed = pack_brief_context(_facts(), 10_000)
 
     assert packed.competition_id == "current-comp"
-    assert "<TRUSTED_OFFICIAL_FACTS>" in packed.text
+    assert '<TRUSTED_OFFICIAL_FACTS source_id="facts">' in packed.text
     assert packed.stats.included_source_ids == ["facts"]
     assert any("No notebook AST" in item for item in packed.stats.limitations)
     assert any("No winner writeups" in item for item in packed.stats.limitations)
@@ -51,6 +51,23 @@ def test_ast_cluster_block_precedes_discussion_text() -> None:
 
     assert packed.text.index("<TRUSTED_NOTEBOOK_AST") < packed.text.index(
         "discussion body"
+    )
+
+
+def test_trusted_blocks_publish_their_canonical_source_ids() -> None:
+    packed = pack_brief_context(
+        _facts(
+            notebooks=[_notebook("author/notebook")],
+            similar_competitions=[_leaderboard("past-comp")],
+        ),
+        20_000,
+    )
+
+    assert 'source_id="facts"' in packed.text
+    assert 'source_id="notebook_ast"' in packed.text
+    assert 'source_id="cv_lb"' in packed.text
+    assert {"facts", "notebook_ast", "cv_lb"} <= set(
+        packed.stats.included_source_ids
     )
 
 

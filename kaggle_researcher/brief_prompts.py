@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
+from kaggle_researcher.brief_context import CV_LB_SOURCE_ID, NOTEBOOK_AST_SOURCE_ID
 from kaggle_researcher.brief_schemas import CompetitionBrief
-
 
 _COMPETITION_BRIEF_SCHEMA = json.dumps(
     CompetitionBrief.model_json_schema(),
@@ -24,6 +24,10 @@ Grounding rules:
 - kind="fact" is allowed only for statements directly taken from the trusted facts blocks:
   TRUSTED_OFFICIAL_FACTS, TRUSTED_NOTEBOOK_AST, or TRUSTED_CV_LB. Never label untrusted prose
   as fact.
+- Use source_id="{CV_LB_SOURCE_ID}" for claims supported by the TRUSTED_CV_LB block.
+- Use source_id="{NOTEBOOK_AST_SOURCE_ID}" for aggregate claims supported by the
+  TRUSTED_NOTEBOOK_AST block. Use individual notebook refs when a claim is supported by a
+  specific notebook.
 - If evidence is insufficient for a section, add an entry to unknowns. Do not produce a plausible
   statement without a source.
 - Prevalence is not performance. Many notebooks using an approach shows what the crowd does, not

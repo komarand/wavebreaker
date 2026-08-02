@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from kaggle_researcher.brief_context import TRUSTED_SOURCE_IDS
 from kaggle_researcher.brief_schemas import Claim, CompetitionBrief
 from kaggle_researcher.facts.models import CompetitionFacts
-
 
 CLAIM_SECTIONS = (
     "validation",
@@ -19,6 +19,9 @@ def validate_brief(
 ) -> CompetitionBrief:
     """Return a source-validated copy using drop, move, and record operations only."""
     valid_source_ids = _valid_source_ids(facts)
+    discussion_source_ids = {
+        discussion.topic_id for discussion in facts.discussions
+    }
     limitations = list(brief.limitations)
     unknowns = list(brief.unknowns)
     validated_sections: dict[str, list[Claim]] = {}
@@ -49,14 +52,19 @@ def validate_brief(
                 removed_claim_ids.add(claim.claim_id)
                 continue
 
-            validated_claims.append(
-                Claim.model_validate(
-                    {
-                        **claim.model_dump(mode="python"),
-                        "source_ids": retained_source_ids,
-                    }
-                )
+            validated_claim = claim.model_copy(
+                update={"source_ids": retained_source_ids}
             )
+            if (
+                validated_claim.kind == "fact"
+                and set(retained_source_ids) <= discussion_source_ids
+            ):
+                validated_claim = validated_claim.model_copy(update={"kind": "claim"})
+                limitations.append(
+                    f"Claim {claim.claim_id} was downgraded from fact to claim because "
+                    "it is supported only by discussion or writeup sources."
+                )
+            validated_claims.append(validated_claim)
         validated_sections[section_name] = validated_claims
 
     thesis_support = [
@@ -87,7 +95,7 @@ def validate_brief(
 
 def _valid_source_ids(facts: CompetitionFacts) -> set[str]:
     return {
-        "facts",
+        *TRUSTED_SOURCE_IDS,
         *(notebook.ref for notebook in facts.notebooks),
         *(discussion.topic_id for discussion in facts.discussions),
     }

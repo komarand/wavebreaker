@@ -96,6 +96,64 @@ def test_facts_notebook_and_discussion_ids_are_valid_sources() -> None:
     assert validated.limitations == ["Existing limitation."]
 
 
+@pytest.mark.parametrize("source_id", ["cv_lb", "notebook_ast"])
+def test_canonical_trusted_source_id_is_preserved(source_id: str) -> None:
+    validated = brief_validate.validate_brief(
+        _brief(validation=[_claim("claim_validation", [source_id])]),
+        _facts(),
+    )
+
+    assert validated.validation[0].source_ids == [source_id]
+    assert validated.validation[0].kind == "fact"
+    assert validated.limitations == ["Existing limitation."]
+
+
+@pytest.mark.parametrize("source_type", ["discussion", "winner_writeup"])
+def test_discussion_only_fact_is_downgraded_without_rewriting(
+    source_type: str,
+) -> None:
+    source_id = f"topic-{source_type}"
+    facts = _facts(
+        discussions=[_discussion(topic_id=source_id, source_type=source_type)]
+    )
+    claim = _claim(
+        "claim_discussion_only",
+        [source_id],
+        text="The source makes this assertion.",
+    )
+
+    validated = brief_validate.validate_brief(
+        _brief(
+            thesis_support=["claim_discussion_only"],
+            validation=[claim],
+        ),
+        facts,
+    )
+
+    result = validated.validation[0]
+    assert result.claim_id == claim.claim_id
+    assert result.text == claim.text
+    assert result.source_ids == claim.source_ids
+    assert result.kind == "claim"
+    assert (
+        "Claim claim_discussion_only was downgraded from fact to claim because it is "
+        "supported only by discussion or writeup sources."
+    ) in validated.limitations
+
+
+def test_mixed_trusted_and_discussion_fact_is_not_downgraded() -> None:
+    facts = _facts(discussions=[_discussion()])
+
+    validated = brief_validate.validate_brief(
+        _brief(validation=[_claim("claim_validation", ["facts", "topic-101"])]),
+        facts,
+    )
+
+    assert validated.validation[0].kind == "fact"
+    assert validated.validation[0].source_ids == ["facts", "topic-101"]
+    assert not any("downgraded" in item for item in validated.limitations)
+
+
 def test_validation_returns_a_new_brief_without_mutating_input() -> None:
     original = _brief(
         validation=[_claim("claim_validation", ["facts", "invalid-source"])]
@@ -209,9 +267,15 @@ def _claim(
     )
 
 
-def _facts(*, with_sources: bool = False) -> CompetitionFacts:
+def _facts(
+    *,
+    with_sources: bool = False,
+    discussions: list[DiscussionFacts] | None = None,
+) -> CompetitionFacts:
     notebooks = [_notebook()] if with_sources else []
-    discussions = [_discussion()] if with_sources else []
+    fact_discussions = discussions
+    if fact_discussions is None:
+        fact_discussions = [_discussion()] if with_sources else []
     return CompetitionFacts(
         competition_id="current-comp",
         collected_at=datetime(2026, 8, 2, tzinfo=timezone.utc),
@@ -228,7 +292,7 @@ def _facts(*, with_sources: bool = False) -> CompetitionFacts:
             limitations=[],
         ),
         notebooks=notebooks,
-        discussions=discussions,
+        discussions=fact_discussions,
         similar_competitions=[],
         cv_lb_pairs=[],
         user_constraints=UserConstraints(),
@@ -251,15 +315,19 @@ def _notebook() -> NotebookFacts:
     )
 
 
-def _discussion() -> DiscussionFacts:
+def _discussion(
+    *,
+    topic_id: str = "topic-101",
+    source_type: str = "discussion",
+) -> DiscussionFacts:
     return DiscussionFacts(
-        topic_id="topic-101",
+        topic_id=topic_id,
         title="Discussion",
         author="author",
         author_is_host=False,
         votes=1,
-        source_type="discussion",
-        competition_id="current-comp",
+        source_type=source_type,
+        competition_id=("current-comp" if source_type == "discussion" else "past-comp"),
         text="Discussion text.",
     )
 

@@ -42,13 +42,14 @@ async def generate_brief(
                 validation_error=first_error,
             ),
         )
-
-    try:
-        return CompetitionBrief.model_validate(retry_payload)
-    except ValidationError as second_error:
-        raise BriefGenerationError(
-            "DeepSeek returned an invalid CompetitionBrief after one schema retry"
-        ) from second_error
+        try:
+            return CompetitionBrief.model_validate(retry_payload)
+        except ValidationError as retry_error:
+            raise BriefGenerationError(
+                "DeepSeek returned an invalid CompetitionBrief after one schema retry. "
+                f"First validation error: {first_error}. "
+                f"Retry validation error: {retry_error}."
+            ) from retry_error
 
 
 def _initial_user_prompt(packed_context: PackedBriefContext) -> str:
