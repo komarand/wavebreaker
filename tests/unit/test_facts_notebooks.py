@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
@@ -13,14 +14,13 @@ from kaggle_researcher.facts.notebooks import (
     pull_notebook,
 )
 
-
 FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "facts" / "kernel_list.json"
 
 
 class FakeKaggleApi:
     list_pages: list[list[Any]] = []
     pull_impl: Callable[[str, Path], None] | None = None
-    instances: list["FakeKaggleApi"] = []
+    instances: list[FakeKaggleApi] = []
 
     def __init__(self) -> None:
         self.authenticated = False
@@ -70,10 +70,59 @@ def fake_kaggle_api(monkeypatch: pytest.MonkeyPatch) -> None:
         return api
 
     monkeypatch.setattr(notebooks_module, "create_kaggle_api", create_api)
+    monkeypatch.setattr(
+        notebooks_module,
+        "_NOTEBOOK_REQUEST_POLICY",
+        notebooks_module.KaggleRequestPolicy(
+            base_delay_seconds=0,
+            min_interval_seconds=0,
+        ),
+    )
 
 
 def _load_kernels() -> list[dict[str, Any]]:
     return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+def test_pull_retries_rate_limit_before_succeeding(tmp_path: Path) -> None:
+    attempts = 0
+
+    class RateLimited(RuntimeError):
+        status = 429
+
+    def pull_after_rate_limit(kernel_ref: str, destination: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise RateLimited("rate limited")
+        (destination / "retry.ipynb").write_text("{}", encoding="utf-8")
+
+    FakeKaggleApi.pull_impl = pull_after_rate_limit
+
+    path = pull_notebook("author/retry", tmp_path)
+
+    assert path == tmp_path / "retry.ipynb"
+    assert attempts == 3
+
+
+def test_notebook_listing_retries_transient_rate_limit() -> None:
+    class RateLimited(RuntimeError):
+        status = 429
+
+    class TransientApi:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def kernels_list(self, **kwargs: Any) -> list[Any]:
+            self.calls += 1
+            if self.calls < 3:
+                raise RateLimited("rate limited")
+            return []
+
+    api = TransientApi()
+
+    assert list_competition_notebooks("example", 10, api=api) == []
+    assert api.calls == 3
 
 
 def test_list_parses_string_and_float_scores_deduplicates_and_sorts() -> None:

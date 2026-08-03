@@ -172,11 +172,46 @@ def test_comment_pagination_uses_next_page_token() -> None:
     low_level = LowLevelClient()
     client = object.__new__(discussions._KaggleForumsClient)
     client._client = low_level
+    client._request_policy = discussions.KaggleRequestPolicy(min_interval_seconds=0)
 
     thread = client.get_topic("101")
 
     assert low_level.tokens == [None, "page-2"]
     assert [comment.content for comment in thread.comments] == ["first", "second"]
+
+
+def test_low_level_forums_calls_retry_http_429() -> None:
+    class RateLimited(RuntimeError):
+        status = 429
+
+    class LowLevelClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def list_topics(self, request: Any) -> Any:
+            self.calls += 1
+            if self.calls < 3:
+                raise RateLimited("rate limited")
+            return SimpleNamespace(topics=[], next_page_token=None)
+
+    low_level = LowLevelClient()
+    client = object.__new__(discussions._KaggleForumsClient)
+    client._client = low_level
+    client._request_policy = discussions.KaggleRequestPolicy(
+        base_delay_seconds=0,
+        min_interval_seconds=0,
+    )
+
+    response = client.list_topics(
+        forum_slug="competition",
+        page_size=10,
+        page_token=None,
+        category=None,
+        sort_by=None,
+    )
+
+    assert response.topics == []
+    assert low_level.calls == 3
 
 
 def test_winner_writeups_use_category_top_sort_and_competition_ids(

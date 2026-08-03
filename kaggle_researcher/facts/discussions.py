@@ -9,11 +9,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
 
-from kaggle_researcher.facts.kaggle_api import extract_http_status
+from kaggle_researcher.facts.kaggle_api import (
+    KaggleRequestPolicy,
+    extract_http_status,
+)
 from kaggle_researcher.facts.models import DiscussionFacts
 
 LOGGER = logging.getLogger(__name__)
 PAGE_SIZE = 200
+_FORUMS_REQUEST_POLICY = KaggleRequestPolicy(min_interval_seconds=0.5)
 DiscussionStatus = Literal["collected", "empty", "forbidden", "unavailable", "failed"]
 
 
@@ -341,6 +345,7 @@ class _KaggleForumsClient:
             api_token=os.getenv("KAGGLE_API_TOKEN") or _stored_oauth_access_token(),
         )
         self._client = self._kaggle.discussions.discussion_api_client
+        self._request_policy = _FORUMS_REQUEST_POLICY
 
     def list_topics(
         self,
@@ -368,7 +373,7 @@ class _KaggleForumsClient:
             ]
         if sort_by:
             request.sort_by = TopicListSortBy[f"TOPIC_LIST_SORT_BY_{sort_by.upper()}"]
-        return self._client.list_topics(request)
+        return self._request(lambda: self._client.list_topics(request))
 
     def get_topic(self, topic_id: str) -> Any:
         from kagglesdk.discussions.types.discussions_api_service import (
@@ -378,7 +383,7 @@ class _KaggleForumsClient:
 
         get_request = ApiGetTopicRequest()
         get_request.id = int(topic_id)
-        topic_response = self._client.get_topic(get_request)
+        topic_response = self._request(lambda: self._client.get_topic(get_request))
 
         comments: list[Any] = []
         page_token: str | None = None
@@ -388,13 +393,19 @@ class _KaggleForumsClient:
             comments_request.page_size = PAGE_SIZE
             if page_token:
                 comments_request.page_token = page_token
-            response = self._client.list_comments(comments_request)
+            response = self._request(
+                lambda request=comments_request: self._client.list_comments(request)
+            )
             comments.extend(response.comments or [])
             next_page_token = _text(response.next_page_token)
             if not next_page_token or next_page_token == page_token:
                 break
             page_token = next_page_token
         return SimpleNamespace(topic=topic_response.topic, comments=comments)
+
+    def _request(self, operation: Any) -> Any:
+        policy = getattr(self, "_request_policy", _FORUMS_REQUEST_POLICY)
+        return policy.call(operation)
 
 
 def _forums_client() -> Any:

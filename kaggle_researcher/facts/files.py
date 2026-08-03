@@ -8,11 +8,14 @@ from pathlib import Path
 from typing import Any
 
 from kaggle_researcher.facts.kaggle_api import (
+    KaggleRequestPolicy,
     create_kaggle_api,
     is_forbidden,
     unpack_list_response,
 )
 from kaggle_researcher.facts.models import FileInfo, FileManifest
+
+_FILE_REQUEST_POLICY = KaggleRequestPolicy(min_interval_seconds=0)
 
 
 def classify_role(name: str) -> str:
@@ -145,9 +148,16 @@ def _list_competition_files(api: Any, slug: str) -> list[Any]:
 
     while True:
         if page_token is None:
-            response = api.competition_list_files(slug)
+            response = _FILE_REQUEST_POLICY.call(
+                lambda: api.competition_list_files(slug)
+            )
         else:
-            response = api.competition_list_files(slug, page_token=page_token)
+            response = _FILE_REQUEST_POLICY.call(
+                lambda token=page_token: api.competition_list_files(
+                    slug,
+                    page_token=token,
+                )
+            )
         unpacked = unpack_list_response(response, "files")
         files.extend(unpacked.items)
 
@@ -181,11 +191,13 @@ def _train_test_size_ratio(files: list[FileInfo]) -> float | None:
 
 def _download_sample_header(api: Any, slug: str, file_name: str) -> list[str]:
     with tempfile.TemporaryDirectory(prefix="kaggle_sample_submission_") as temp_dir:
-        api.competition_download_file(
-            slug,
-            file_name,
-            path=temp_dir,
-            quiet=True,
+        _FILE_REQUEST_POLICY.call(
+            lambda: api.competition_download_file(
+                slug,
+                file_name,
+                path=temp_dir,
+                quiet=True,
+            )
         )
         downloaded_path = _find_downloaded_file(Path(temp_dir), file_name)
         return _read_header(downloaded_path)
@@ -236,7 +248,7 @@ def _extract_columns(raw_columns: Any) -> list[str]:
         return []
     if isinstance(raw_columns, str):
         return [raw_columns] if raw_columns else []
-    if not isinstance(raw_columns, (list, tuple)):
+    if not isinstance(raw_columns, list | tuple):
         return []
 
     columns: list[str] = []

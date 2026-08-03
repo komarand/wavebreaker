@@ -16,16 +16,18 @@ import kaggle_researcher.facts.notebooks as notebooks_module
 from kaggle_researcher.facts.competition import fetch_competition_metadata
 from kaggle_researcher.facts.files import fetch_file_manifest
 from kaggle_researcher.facts.kaggle_api import (
+    KaggleRequestPolicy,
     create_kaggle_api,
     extract_http_status,
+    extract_retry_after,
     is_forbidden,
+    is_retryable_kaggle_error,
     unpack_list_response,
 )
 from kaggle_researcher.facts.notebooks import (
     list_competition_notebooks,
     pull_notebook,
 )
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -152,6 +154,98 @@ def test_extract_http_status_regex_fallback(
     assert extract_http_status(exc) == expected
 
 
+def test_extract_http_status_accepts_urllib_code_shape() -> None:
+    assert extract_http_status(SimpleNamespace(code=429)) == 429
+
+
+@pytest.mark.parametrize("status", [408, 425, 429, 500, 502, 503, 504])
+def test_retryable_kaggle_statuses_are_explicit(status: int) -> None:
+    assert is_retryable_kaggle_error(SimpleNamespace(status=status)) is True
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422, 501])
+def test_non_retryable_kaggle_statuses_are_not_retried(status: int) -> None:
+    assert is_retryable_kaggle_error(SimpleNamespace(status=status)) is False
+
+
+def test_retry_after_is_read_without_exposing_response_body() -> None:
+    exc = SimpleNamespace(
+        response=SimpleNamespace(headers={"Retry-After": "12.5"})
+    )
+
+    assert extract_retry_after(exc) == pytest.approx(12.5)
+
+
+def test_request_policy_retries_with_bounded_exponential_backoff() -> None:
+    clock = _FakeClock()
+    attempts = 0
+
+    class RateLimited(RuntimeError):
+        status = 429
+
+    def operation() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise RateLimited("secret response body")
+        return "ok"
+
+    policy = KaggleRequestPolicy(
+        max_attempts=3,
+        base_delay_seconds=1,
+        max_delay_seconds=5,
+        min_interval_seconds=0,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+
+    assert policy.call(operation) == "ok"
+    assert attempts == 3
+    assert clock.sleeps == [1, 2]
+
+
+def test_request_policy_caps_retry_after_and_attempt_count() -> None:
+    clock = _FakeClock()
+    attempts = 0
+
+    class RateLimited(RuntimeError):
+        status = 429
+        response = SimpleNamespace(headers={"retry-after": "120"})
+
+    def operation() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise RateLimited("rate limited")
+
+    policy = KaggleRequestPolicy(
+        max_attempts=3,
+        max_delay_seconds=7,
+        min_interval_seconds=0,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+
+    with pytest.raises(RateLimited):
+        policy.call(operation)
+
+    assert attempts == 3
+    assert clock.sleeps == [7, 7]
+
+
+def test_request_policy_rate_limits_successive_calls() -> None:
+    clock = _FakeClock()
+    policy = KaggleRequestPolicy(
+        min_interval_seconds=0.5,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+
+    policy.call(lambda: None)
+    policy.call(lambda: None)
+
+    assert clock.sleeps == [0.5]
+
+
 @pytest.mark.parametrize(
     "exc",
     [
@@ -249,3 +343,16 @@ def test_one_injected_api_is_reused_by_all_collectors_without_authentication(
     assert api.kernel_list_kwargs is not None
     assert api.kernel_list_kwargs["language"] == "python"
     assert api.kernel_list_kwargs["kernel_type"] == "notebook"
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds

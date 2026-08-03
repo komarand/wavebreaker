@@ -6,13 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from kaggle_researcher.facts.kaggle_api import (
+    KaggleRequestPolicy,
     UnpackedListResponse,
     create_kaggle_api,
     unpack_list_response,
 )
 
-
 _REF_NAMES = ("ref", "kernelRef", "kernel_ref", "id")
+_NOTEBOOK_REQUEST_POLICY = KaggleRequestPolicy(min_interval_seconds=1.0)
 logger = logging.getLogger(__name__)
 
 
@@ -33,12 +34,14 @@ def list_competition_notebooks(
     notebooks_by_ref: dict[str, dict[str, Any]] = {}
 
     while len(notebooks_by_ref) < max_notebooks:
-        unpacked = _list_kernels_page(
-            api,
-            slug=slug,
-            page=page,
-            page_size=page_size,
-            page_token=page_token,
+        unpacked = _NOTEBOOK_REQUEST_POLICY.call(
+            lambda current_page=page, current_token=page_token: _list_kernels_page(
+                api,
+                slug=slug,
+                page=current_page,
+                page_size=page_size,
+                page_token=current_token,
+            )
         )
         kernels = unpacked.items
         for kernel in kernels:
@@ -118,7 +121,7 @@ def pull_notebook(
         before = _notebook_file_state(dest)
         if api is None:
             api = create_kaggle_api()
-        _pull_kernel(api, kernel_ref, dest)
+        _NOTEBOOK_REQUEST_POLICY.call(lambda: _pull_kernel(api, kernel_ref, dest))
         after = _notebook_file_state(dest)
     except Exception as exc:
         logger.warning(

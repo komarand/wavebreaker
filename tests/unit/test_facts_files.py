@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
@@ -14,7 +15,6 @@ from kaggle_researcher.facts.files import (
     classify_role,
     fetch_file_manifest,
 )
-
 
 FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "facts" / "file_list.json"
 
@@ -27,7 +27,7 @@ class FakeKaggleApi:
     list_response: Any = None
     list_error: Exception | None = None
     download_impl: Callable[[str, str, Path], None] | None = None
-    instances: list["FakeKaggleApi"] = []
+    instances: list[FakeKaggleApi] = []
 
     def __init__(self) -> None:
         self.authenticated = False
@@ -77,10 +77,40 @@ def fake_kaggle_api(monkeypatch: pytest.MonkeyPatch) -> None:
         return api
 
     monkeypatch.setattr(files_module, "create_kaggle_api", create_api)
+    monkeypatch.setattr(
+        files_module,
+        "_FILE_REQUEST_POLICY",
+        files_module.KaggleRequestPolicy(
+            base_delay_seconds=0,
+            min_interval_seconds=0,
+        ),
+    )
 
 
 def _load_file_list() -> dict[str, Any]:
     return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+def test_file_listing_retries_transient_rate_limit() -> None:
+    class RateLimited(RuntimeError):
+        status = 429
+
+    class TransientApi:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def competition_list_files(self, competition: str) -> dict[str, Any]:
+            self.calls += 1
+            if self.calls < 3:
+                raise RateLimited("rate limited")
+            return {"files": []}
+
+    api = TransientApi()
+
+    manifest = fetch_file_manifest("example-competition", 100, api=api)
+
+    assert manifest.files == []
+    assert api.calls == 3
 
 
 @pytest.mark.parametrize(
