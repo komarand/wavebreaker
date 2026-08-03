@@ -98,6 +98,70 @@ def test_kaggle_2_response_object_is_unwrapped() -> None:
     assert metadata.metric_name == "ROC AUC"
 
 
+def test_kaggle_2_metadata_fields_have_priority_and_preserve_false() -> None:
+    FakeKaggleApi.competitions = [
+        SimpleNamespace(
+            ref="kaggle-2-competition",
+            title="Kaggle 2 Competition",
+            evaluation_metric="mAP",
+            metric_name="Legacy Metric",
+            metric_template="metric_template",
+            is_kernels_submissions_only=False,
+            is_code_competition=True,
+            max_daily_submissions=7,
+            submissions_per_day=3,
+            max_team_size=2,
+            deadline="2026-10-01T00:00:00Z",
+            reward="Kudos",
+            category="Community",
+            team_count=348,
+            num_teams=12,
+        )
+    ]
+
+    metadata = fetch_competition_metadata("kaggle-2-competition")
+
+    assert metadata.metric_name == "mAP"
+    assert metadata.is_code_competition is False
+    assert metadata.submissions_per_day == 7
+    assert metadata.max_team_size == 2
+    assert metadata.num_teams == 348
+    assert metadata.unavailable_fields == []
+
+
+@pytest.mark.parametrize(
+    "placeholder",
+    ["metric_template", " metric template ", "", "metric", "unknown", "UNKNOWN"],
+)
+def test_metric_placeholders_are_unavailable(placeholder: str) -> None:
+    FakeKaggleApi.competitions = [
+        {
+            "ref": "placeholder-metric",
+            "title": "Placeholder Metric",
+            "evaluation_metric": placeholder,
+        }
+    ]
+
+    metadata = fetch_competition_metadata("placeholder-metric")
+
+    assert metadata.metric_name is None
+    assert "metric_name" in metadata.unavailable_fields
+
+
+def test_kaggle_2_plural_code_competition_field_maps_true() -> None:
+    FakeKaggleApi.competitions = [
+        {
+            "ref": "code-only",
+            "title": "Code Only",
+            "is_kernels_submissions_only": True,
+        }
+    ]
+
+    metadata = fetch_competition_metadata("code-only")
+
+    assert metadata.is_code_competition is True
+
+
 def test_missing_fields_are_none_and_reported_without_description_inference() -> None:
     FakeKaggleApi.competitions = [
         {

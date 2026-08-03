@@ -9,34 +9,36 @@ from kaggle_researcher.facts.models import CompetitionMetadata
 _FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
     "title": ("title", "competitionTitle", "competition_title"),
     "metric_name": (
-        "evaluationMetric",
         "evaluation_metric",
-        "metricName",
+        "evaluationMetric",
         "metric_name",
+        "metricName",
     ),
     "is_code_competition": (
+        "is_kernels_submissions_only",
+        "isKernelsSubmissionsOnly",
         "isKernelsSubmission",
         "is_kernels_submission",
-        "isCodeCompetition",
         "is_code_competition",
+        "isCodeCompetition",
     ),
     "submissions_per_day": (
-        "maxDailySubmissions",
         "max_daily_submissions",
-        "submissionsPerDay",
+        "maxDailySubmissions",
         "submissions_per_day",
+        "submissionsPerDay",
     ),
-    "max_team_size": ("maxTeamSize", "max_team_size"),
+    "max_team_size": ("max_team_size", "maxTeamSize"),
     "deadline": ("deadline", "deadlineDate", "deadline_date"),
     "reward": ("reward", "rewardDisplay", "reward_display"),
     "category": ("category", "categoryName", "category_name"),
     "num_teams": (
-        "teamCount",
         "team_count",
-        "numTeams",
+        "teamCount",
         "num_teams",
-        "numberOfTeams",
+        "numTeams",
         "number_of_teams",
+        "numberOfTeams",
     ),
 }
 _REF_CANDIDATES = ("ref", "competitionRef", "competition_ref", "slug", "id")
@@ -70,6 +72,8 @@ def fetch_competition_metadata(
             if competition is not None
             else None
         )
+        if field_name == "metric_name":
+            value = _normalize_metric_name(value)
         values[field_name] = value
         if value is None:
             unavailable_fields.append(field_name)
@@ -86,6 +90,9 @@ def _get_competition_value(competition: Any, *names: str) -> Any:
         return None
 
     if isinstance(competition, dict):
+        for name in names:
+            if name in competition and _has_value(competition[name]):
+                return competition[name]
         normalized_values = {
             _normalize_key(str(key)): value for key, value in competition.items()
         }
@@ -122,6 +129,16 @@ def _competition_ref_matches(value: Any, slug: str) -> bool:
         return False
     normalized = value.strip().rstrip("/")
     return normalized == slug or normalized.rsplit("/", 1)[-1] == slug
+
+
+def _normalize_metric_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    metric_name = value.strip()
+    normalized = " ".join(metric_name.lower().replace("_", " ").split())
+    if normalized in {"", "metric", "metric template", "unknown"}:
+        return None
+    return metric_name
 
 
 def _has_value(value: Any) -> bool:
