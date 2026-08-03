@@ -294,6 +294,25 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
     print(f"comparable cv/lb pairs: {diagnostics.comparable_pairs}")
     if diagnostics.zero_pairs_reason:
         print(f"cv/lb diagnostic: {diagnostics.zero_pairs_reason}")
+    score_diagnostics = facts.score_diagnostics
+    print(f"score observations: {score_diagnostics.observations_total}")
+    print(
+        "notebooks with score observations: "
+        f"{score_diagnostics.notebooks_with_score_observations}"
+    )
+    print(
+        "canonical score metrics: "
+        f"{score_diagnostics.observations_with_canonical_metric}"
+    )
+    print(
+        "uncanonicalized score metrics: "
+        f"{score_diagnostics.observations_without_canonical_metric}"
+    )
+    print(
+        "title/ref score observations: "
+        f"{score_diagnostics.title_or_ref_observations}"
+    )
+    print(f"excluded score candidates: {score_diagnostics.candidates_excluded}")
     print(f"discussions: {len(facts.discussions)}")
     print(f"discussion status: {facts.discussion_collection_status}")
     print(f"discussion auth: {facts.discussion_auth_mode}")

@@ -178,6 +178,34 @@ def test_single_notebook_pull_failure_does_not_drop_successful_notebooks(
     assert facts.collection_errors == ["notebook author/broken pull failed"]
 
 
+def test_title_and_ref_scores_are_collected_once_with_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_successful_non_notebook_stages(monkeypatch)
+    record = _record("rommelsharma/0-95-jaguar-re-id-frozen-dinov2-giant")
+    record["title"] = "0.95 Jaguar Re-ID Frozen DINOv2 Giant"
+    monkeypatch.setattr(
+        collect,
+        "list_competition_notebooks",
+        lambda slug, limit: [record],
+    )
+    monkeypatch.setattr(collect, "pull_notebook", _fake_pull)
+    monkeypatch.setattr(collect, "extract_observations", lambda path: _observations())
+    monkeypatch.setattr(collect, "ast_fingerprint", lambda path: "f" * 64)
+
+    facts = collect.collect_facts(
+        "example", 1, 0, [], UserConstraints(), max_sample_sub_bytes=1000
+    )
+
+    observations = facts.notebooks[0].score_observations
+    assert len(observations) == 1
+    assert observations[0].value == pytest.approx(0.95)
+    assert observations[0].source == "title"
+    assert facts.score_diagnostics.observations_total == 1
+    assert facts.score_diagnostics.title_or_ref_observations == 1
+    assert facts.score_diagnostics.candidates_seen == 2
+
+
 def test_discussion_forbidden_is_recorded_without_failing_collection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -21,6 +21,16 @@ class DeclaredCvObservation(BaseModel):
     raw_text: str
 
 
+class ScoreObservation(BaseModel):
+    value: float
+    value_raw: str
+    metric_raw: str | None = None
+    metric_canonical: str | None = None
+    locator: str
+    raw_text: str
+    source: Literal["markdown", "code", "code_string", "title", "ref"]
+
+
 class CompetitionMetadata(BaseModel):
     competition_id: str
     title: str | None = None
@@ -68,6 +78,9 @@ class NotebookFacts(BaseModel):
     feature_ops: list[CodeObservation]
     declared_cv: list[str]
     declared_cv_observations: list[DeclaredCvObservation] = Field(default_factory=list)
+    score_observations: list[ScoreObservation] = Field(default_factory=list)
+    score_candidates_seen: int = 0
+    score_candidates_excluded: int = 0
 
     parse_status: Literal["ok", "partial", "failed"]
 
@@ -153,6 +166,18 @@ class CvLbDiagnostics(BaseModel):
     zero_pairs_reason: str | None = None
 
 
+class ScoreDiagnostics(BaseModel):
+    notebooks_total: int = 0
+    notebooks_with_score_observations: int = 0
+    observations_total: int = 0
+    observations_with_raw_metric: int = 0
+    observations_with_canonical_metric: int = 0
+    observations_without_canonical_metric: int = 0
+    title_or_ref_observations: int = 0
+    candidates_seen: int = 0
+    candidates_excluded: int = 0
+
+
 class UserConstraints(BaseModel):
     vram_gb: float | None = None
     hours_per_week: float | None = None
@@ -172,6 +197,7 @@ class CompetitionFacts(BaseModel):
     similar_competitions: list[LeaderboardStability]
     cv_lb_pairs: list[CvLbPair]
     cv_lb_diagnostics: CvLbDiagnostics = Field(default_factory=CvLbDiagnostics)
+    score_diagnostics: ScoreDiagnostics = Field(default_factory=ScoreDiagnostics)
 
     discussion_collection_status: Literal[
         "collected", "empty", "forbidden", "unavailable", "failed"

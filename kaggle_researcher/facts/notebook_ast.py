@@ -4,15 +4,19 @@ import ast
 import hashlib
 import io
 import json
+import math
 import re
 import tokenize
+import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from kaggle_researcher.facts.models import (
     CodeObservation,
     DeclaredCvObservation,
     NotebookFacts,
+    ScoreDiagnostics,
+    ScoreObservation,
 )
 
 SPLITTER_NAMES = {
@@ -90,15 +94,87 @@ MODEL_KWARGS = {
     "max_depth",
     "num_leaves",
 }
-DECLARED_CV_PATTERN = re.compile(
-    r"\b(?:cv|oof|local|fold|validation)\b[^\n]{0,40}?(0\.\d{3,})",
+_NUMBER_PATTERN = r"[-+]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?%?"
+SCORE_EXPLICIT_PATTERN = re.compile(
+    rf"(?P<label>[A-Za-z][A-Za-z0-9_./ -]{{0,48}}?)\s*(?::|=)\s*"
+    rf"(?P<value>{_NUMBER_PATTERN})"
+)
+SCORE_ADJACENT_PATTERN = re.compile(
+    r"(?P<label>[A-Za-z][A-Za-z0-9_.-]*"
+    r"(?:[ /_-]+[A-Za-z][A-Za-z0-9_.-]*){0,4})\s+"
+    r"(?P<value>(?:0?\.\d+|1(?:\.0+)?|\d+(?:\.\d+)?%))"
+)
+ENCODED_TITLE_SCORE_PATTERN = re.compile(
+    r"^(?:(?P<decimal>0\.\d+)|0[-_](?P<fraction>\d{2,4}))(?:\b|[-_ ])"
+)
+VALIDATION_CONTEXT_PATTERN = re.compile(
+    r"(?<![a-z0-9])(?:cv|oof|local|fold|validation|val)(?:\b|_)",
     re.IGNORECASE,
 )
-DECLARED_CV_METRICS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\bmAP\b", re.IGNORECASE), "mAP"),
-    (re.compile(r"\b(?:top|rank)[-_ ]?1\b", re.IGNORECASE), "rank-1"),
-    (re.compile(r"\baccuracy\b", re.IGNORECASE), "accuracy"),
+EXCLUDED_SCORE_LABELS = frozenset(
+    {
+        "batch_size",
+        "default",
+        "dimension",
+        "dropout",
+        "embed_dim",
+        "embedding_dimension",
+        "epoch",
+        "epochs",
+        "fold",
+        "factor",
+        "image_size",
+        "img_size",
+        "input_size",
+        "k",
+        "k1",
+        "k2",
+        "lambda",
+        "learning_rate",
+        "lr",
+        "margin",
+        "max_epochs",
+        "n_splits",
+        "num_folds",
+        "num_workers",
+        "patience",
+        "random_state",
+        "resolution",
+        "scale",
+        "seed",
+        "split",
+        "steps",
+        "test_split",
+        "threshold",
+        "top_k",
+        "total_steps",
+        "train_split",
+        "val_split",
+        "version",
+        "warmup_steps",
+        "weight_decay",
+        "workers",
+    }
 )
+CANONICAL_METRIC_ALIASES: dict[str, str] = {
+    "accuracy": "accuracy",
+    "acc": "accuracy",
+    "accuracyscore": "accuracy",
+    "auc": "roc_auc",
+    "f1": "f1",
+    "f1score": "f1",
+    "identitybalancedmap": "mAP",
+    "logloss": "log_loss",
+    "mae": "mae",
+    "map": "mAP",
+    "meanabsoluteerror": "mae",
+    "meanaverageprecision": "mAP",
+    "mse": "mse",
+    "rank1": "rank-1",
+    "rmse": "rmse",
+    "rocauc": "roc_auc",
+    "top1": "rank-1",
+}
 MAX_EXPRESSION_LENGTH = 80
 
 
@@ -117,6 +193,9 @@ def extract_observations(notebook_path: Path) -> dict[str, Any]:
     }
     declared_cv: list[str] = []
     declared_cv_observations: list[DeclaredCvObservation] = []
+    score_observations: list[ScoreObservation] = []
+    score_candidates_seen = 0
+    score_candidates_excluded = 0
     seen_cv: set[str] = set()
     parsed_code_cells = 0
     code_cell_index = 0
@@ -126,12 +205,19 @@ def extract_observations(notebook_path: Path) -> dict[str, Any]:
         cell_type = _cell_value(cell, "cell_type")
         source = _cell_source(cell)
         if cell_type == "markdown":
-            _append_declared_cv(
+            added, candidates_seen, candidates_excluded = extract_score_observations(
                 source,
+                locator=f"cell_{cell_index}",
+                source="markdown",
+            )
+            score_observations.extend(added)
+            score_candidates_seen += candidates_seen
+            score_candidates_excluded += candidates_excluded
+            _append_declared_cv_from_scores(
+                added,
                 declared_cv,
                 seen_cv,
                 declared_cv_observations,
-                locator=f"cell_{cell_index}",
             )
             continue
         if cell_type != "code":
@@ -141,7 +227,7 @@ def extract_observations(notebook_path: Path) -> dict[str, Any]:
         code_cell_index += 1
         python_source = _strip_magics(source)
         try:
-            tree = ast.parse(python_source)
+            tree = _parse_source(python_source)
         except SyntaxError:
             has_syntax_error = True
             continue
@@ -153,13 +239,28 @@ def extract_observations(notebook_path: Path) -> dict[str, Any]:
             observations=observations,
         )
         visitor.visit(tree)
+        added, candidates_seen, candidates_excluded = _code_score_observations(
+            tree,
+            python_source,
+            locator,
+        )
+        score_observations.extend(added)
+        score_candidates_seen += candidates_seen
+        score_candidates_excluded += candidates_excluded
         for string_value in _string_literals_in_source_order(tree):
-            _append_declared_cv(
+            added, candidates_seen, candidates_excluded = extract_score_observations(
                 string_value,
+                locator=locator,
+                source="code_string",
+            )
+            score_observations.extend(added)
+            score_candidates_seen += candidates_seen
+            score_candidates_excluded += candidates_excluded
+            _append_declared_cv_from_scores(
+                added,
                 declared_cv,
                 seen_cv,
                 declared_cv_observations,
-                locator=locator,
             )
 
     if parsed_code_cells == 0:
@@ -169,6 +270,9 @@ def extract_observations(notebook_path: Path) -> dict[str, Any]:
         **observations,
         "declared_cv": declared_cv,
         "declared_cv_observations": declared_cv_observations,
+        "score_observations": score_observations,
+        "score_candidates_seen": score_candidates_seen,
+        "score_candidates_excluded": score_candidates_excluded,
         "parse_status": "partial" if has_syntax_error else "ok",
     }
 
@@ -186,7 +290,7 @@ def ast_fingerprint(notebook_path: Path) -> str:
             continue
         source = _strip_magics(_cell_source(cell))
         try:
-            tree = ast.parse(source)
+            tree = _parse_source(source)
         except (SyntaxError, ValueError, TypeError):
             tree_parts.append("<unparsed>")
             continue
@@ -382,36 +486,330 @@ def _string_literals_in_source_order(tree: ast.AST) -> list[str]:
     return [node.value for node in string_nodes]
 
 
-def _append_declared_cv(
+def extract_score_observations(
     text: str,
+    *,
+    locator: str,
+    source: Literal["markdown", "code", "code_string", "title", "ref"],
+) -> tuple[list[ScoreObservation], int, int]:
+    observations: list[ScoreObservation] = []
+    candidates_seen = 0
+    candidates_excluded = 0
+    occupied_ranges: list[tuple[int, int]] = []
+
+    for pattern, implicit_position in (
+        (SCORE_EXPLICIT_PATTERN, False),
+        (SCORE_ADJACENT_PATTERN, True),
+    ):
+        for match in pattern.finditer(text):
+            if any(
+                match.start() < end and match.end() > start
+                for start, end in occupied_ranges
+            ):
+                continue
+            occupied_ranges.append(match.span())
+            candidates_seen += 1
+            metric_raw = " ".join(match.group("label").strip().split()) or None
+            value_raw = match.group("value")
+            if _is_excluded_score_label(metric_raw) or not _is_text_score_position(
+                metric_raw,
+                value_raw,
+                implicit=implicit_position,
+            ):
+                candidates_excluded += 1
+                continue
+            value = _score_value(value_raw)
+            if value is None:
+                candidates_excluded += 1
+                continue
+            observations.append(
+                ScoreObservation(
+                    value=value,
+                    value_raw=value_raw,
+                    metric_raw=metric_raw,
+                    metric_canonical=canonicalize_metric_label(metric_raw),
+                    locator=locator,
+                    raw_text=" ".join(match.group(0).strip().split()),
+                    source=source,
+                )
+            )
+
+    if source in {"title", "ref"}:
+        title_match = ENCODED_TITLE_SCORE_PATTERN.search(text)
+        if title_match is not None and not occupied_ranges:
+            candidates_seen += 1
+            decimal = title_match.group("decimal")
+            value_raw = decimal or f"0.{title_match.group('fraction')}"
+            observations.append(
+                ScoreObservation(
+                    value=float(value_raw),
+                    value_raw=value_raw,
+                    metric_raw=None,
+                    metric_canonical=None,
+                    locator=locator,
+                    raw_text=title_match.group(0).rstrip("-_"),
+                    source=source,
+                )
+            )
+
+    return observations, candidates_seen, candidates_excluded
+
+
+def _code_score_observations(
+    tree: ast.AST,
+    source_text: str,
+    locator: str,
+) -> tuple[list[ScoreObservation], int, int]:
+    observations: list[ScoreObservation] = []
+    candidates_seen = 0
+    candidates_excluded = 0
+    candidates: list[tuple[str, ast.expr, ast.AST]] = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                label = _assignment_label(target, source_text)
+                if label is not None:
+                    candidates.append((label, node.value, node))
+        elif isinstance(node, ast.AnnAssign):
+            label = _assignment_label(node.target, source_text)
+            if label is not None and node.value is not None:
+                candidates.append((label, node.value, node))
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values, strict=True):
+                if (
+                    isinstance(key, ast.Constant)
+                    and isinstance(key.value, str)
+                    and key.value.strip()
+                ):
+                    candidates.append((key.value.strip(), value, node))
+
+    for metric_raw, value_node, context_node in candidates:
+        numeric = _numeric_literal(value_node)
+        if numeric is None:
+            continue
+        candidates_seen += 1
+        if _is_excluded_score_label(metric_raw) or not _is_code_score_label(
+            metric_raw
+        ):
+            candidates_excluded += 1
+            continue
+        value, value_raw = numeric
+        raw_text = ast.get_source_segment(source_text, context_node)
+        compact_text = " ".join((raw_text or f"{metric_raw}={value_raw}").split())
+        observations.append(
+            ScoreObservation(
+                value=value,
+                value_raw=value_raw,
+                metric_raw=metric_raw,
+                metric_canonical=canonicalize_metric_label(metric_raw),
+                locator=locator,
+                raw_text=compact_text[:160],
+                source="code",
+            )
+        )
+    return observations, candidates_seen, candidates_excluded
+
+
+def _assignment_label(target: ast.expr, source_text: str) -> str | None:
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    if isinstance(target, ast.Subscript):
+        slice_value = target.slice
+        if isinstance(slice_value, ast.Constant) and isinstance(slice_value.value, str):
+            return slice_value.value.strip() or None
+    segment = ast.get_source_segment(source_text, target)
+    return segment.strip() if segment and len(segment.strip()) <= 48 else None
+
+
+def _numeric_literal(value: ast.expr) -> tuple[float, str] | None:
+    sign = 1
+    constant = value
+    if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub):
+        sign = -1
+        constant = value.operand
+    if (
+        not isinstance(constant, ast.Constant)
+        or isinstance(constant.value, bool)
+        or not isinstance(constant.value, int | float)
+    ):
+        return None
+    number = float(constant.value) * sign
+    if not math.isfinite(number):
+        return None
+    value_raw = repr(number) if isinstance(constant.value, float) else str(int(number))
+    return number, value_raw
+
+
+def canonicalize_metric_label(metric_raw: str | None) -> str | None:
+    if not metric_raw:
+        return None
+    normalized = "".join(
+        character for character in metric_raw.lower() if character.isalnum()
+    )
+    for prefix in ("validation", "local", "oof", "fold", "val", "cv"):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :]
+            break
+    direct = CANONICAL_METRIC_ALIASES.get(normalized)
+    if direct is not None:
+        return direct
+    if "identitybalancedmap" in normalized or "meanaverageprecision" in normalized:
+        return "mAP"
+    token_candidates = {
+        canonical
+        for token in re.findall(r"[a-z]+\d*", metric_raw.lower())
+        if (canonical := CANONICAL_METRIC_ALIASES.get(token)) is not None
+    }
+    return next(iter(token_candidates)) if len(token_candidates) == 1 else None
+
+
+def diagnose_scores(notebooks: list[NotebookFacts]) -> ScoreDiagnostics:
+    observations = [
+        observation
+        for notebook in notebooks
+        for observation in notebook.score_observations
+    ]
+    return ScoreDiagnostics(
+        notebooks_total=len(notebooks),
+        notebooks_with_score_observations=sum(
+            bool(notebook.score_observations) for notebook in notebooks
+        ),
+        observations_total=len(observations),
+        observations_with_raw_metric=sum(
+            observation.metric_raw is not None for observation in observations
+        ),
+        observations_with_canonical_metric=sum(
+            observation.metric_canonical is not None for observation in observations
+        ),
+        observations_without_canonical_metric=sum(
+            observation.metric_canonical is None for observation in observations
+        ),
+        title_or_ref_observations=sum(
+            observation.source in {"title", "ref"} for observation in observations
+        ),
+        candidates_seen=sum(notebook.score_candidates_seen for notebook in notebooks),
+        candidates_excluded=sum(
+            notebook.score_candidates_excluded for notebook in notebooks
+        ),
+    )
+
+
+def _append_declared_cv_from_scores(
+    score_observations: list[ScoreObservation],
     values: list[str],
     seen: set[str],
     observations: list[DeclaredCvObservation],
-    *,
-    locator: str,
 ) -> None:
-    for match in DECLARED_CV_PATTERN.finditer(text):
-        score = match.group(1)
+    for score_observation in score_observations:
+        if not VALIDATION_CONTEXT_PATTERN.search(score_observation.raw_text):
+            continue
+        score = (
+            f"{score_observation.value:.12g}"
+            if score_observation.value_raw.endswith("%")
+            else score_observation.value_raw
+        )
         if score in seen:
             continue
         seen.add(score)
         values.append(score)
-        raw_text = " ".join(match.group(0).strip().split())
         observations.append(
             DeclaredCvObservation(
-                value=float(score),
-                metric_name=_declared_cv_metric(raw_text),
-                locator=locator,
-                raw_text=raw_text,
+                value=score_observation.value,
+                metric_name=score_observation.metric_canonical,
+                locator=score_observation.locator,
+                raw_text=score_observation.raw_text,
             )
         )
 
 
-def _declared_cv_metric(text: str) -> str | None:
-    for pattern, metric_name in DECLARED_CV_METRICS:
-        if pattern.search(text):
-            return metric_name
-    return None
+def _score_value(raw_value: str) -> float | None:
+    try:
+        value = float(raw_value.rstrip("%"))
+    except ValueError:
+        return None
+    if raw_value.endswith("%"):
+        value /= 100
+    return value if math.isfinite(value) else None
+
+
+def _is_excluded_score_label(metric_raw: str | None) -> bool:
+    if not metric_raw:
+        return False
+    normalized = re.sub(r"[^a-z0-9]+", "_", metric_raw.lower()).strip("_")
+    return any(
+        normalized == excluded or normalized.endswith(f"_{excluded}")
+        for excluded in EXCLUDED_SCORE_LABELS
+    )
+
+
+def _is_code_score_label(metric_raw: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", metric_raw.lower()).strip("_")
+    tokens = set(normalized.split("_"))
+    return bool(
+        tokens
+        & {
+            "cv",
+            "lb",
+            "local",
+            "metric",
+            "oof",
+            "private",
+            "public",
+            "score",
+            "val",
+            "validation",
+        }
+    )
+
+
+def _is_text_score_position(
+    metric_raw: str | None,
+    value_raw: str,
+    *,
+    implicit: bool,
+) -> bool:
+    if not metric_raw:
+        return False
+    has_context = _has_score_position_marker(metric_raw) or (
+        canonicalize_metric_label(metric_raw) is not None
+    )
+    if implicit:
+        return has_context
+    normalized_value = value_raw.lower()
+    return has_context or any(
+        marker in normalized_value for marker in (".", "%", "e")
+    )
+
+
+def _has_score_position_marker(metric_raw: str) -> bool:
+    tokens = re.findall(r"[a-z]+\d*", metric_raw.lower())
+    position_tokens = tokens[-2:]
+    return any(
+        token in {
+            "cv",
+            "lb",
+            "local",
+            "metric",
+            "oof",
+            "private",
+            "public",
+            "score",
+            "scores",
+            "val",
+            "validation",
+        }
+        or token.startswith("score")
+        for token in position_tokens
+    )
+
+
+def _parse_source(source: str) -> ast.Module:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        return ast.parse(source)
 
 
 def _without_leading_docstring(statements: list[ast.stmt]) -> list[ast.stmt]:
@@ -439,5 +837,8 @@ def _empty_result() -> dict[str, Any]:
         "feature_ops": [],
         "declared_cv": [],
         "declared_cv_observations": [],
+        "score_observations": [],
+        "score_candidates_seen": 0,
+        "score_candidates_excluded": 0,
         "parse_status": "failed",
     }

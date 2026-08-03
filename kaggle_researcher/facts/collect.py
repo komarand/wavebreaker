@@ -19,12 +19,15 @@ from kaggle_researcher.facts.models import (
     FileManifest,
     LeaderboardStability,
     NotebookFacts,
+    ScoreObservation,
     UserConstraints,
 )
 from kaggle_researcher.facts.notebook_ast import (
     assign_lineage_clusters,
     ast_fingerprint,
+    diagnose_scores,
     extract_observations,
+    extract_score_observations,
 )
 from kaggle_researcher.facts.notebooks import list_competition_notebooks, pull_notebook
 
@@ -79,6 +82,7 @@ def collect_facts(
         collection_errors.append(_stage_error("CV/LB pairing", exc))
         cv_lb_pairs = []
     cv_lb_diagnostics = diagnose_cv_lb(notebooks, cv_lb_pairs)
+    score_diagnostics = diagnose_scores(notebooks)
 
     discussions = []
     discussion_status = "empty"
@@ -126,6 +130,7 @@ def collect_facts(
         similar_competitions=similar_competitions,
         cv_lb_pairs=cv_lb_pairs,
         cv_lb_diagnostics=cv_lb_diagnostics,
+        score_diagnostics=score_diagnostics,
         discussion_collection_status=discussion_status,
         discussion_collection_error=discussion_error,
         discussion_auth_mode=discussion_auth_mode(),
@@ -203,6 +208,9 @@ async def _collect_one_notebook(
             _analyze_downloaded_notebook,
             notebook_path,
         )
+        context_scores, context_candidates, context_excluded = (
+            _notebook_context_scores(record)
+        )
         return NotebookFacts(
             ref=ref,
             title=str(record.get("title") or ref),
@@ -221,6 +229,18 @@ async def _collect_one_notebook(
                 "declared_cv_observations",
                 [],
             ),
+            score_observations=[
+                *observations.get("score_observations", []),
+                *context_scores,
+            ],
+            score_candidates_seen=(
+                observations.get("score_candidates_seen", 0) + context_candidates
+            ),
+            score_candidates_excluded=observations.get(
+                "score_candidates_excluded",
+                0,
+            )
+            + context_excluded,
             parse_status=observations["parse_status"],
         )
     except Exception as exc:
@@ -233,6 +253,35 @@ def _analyze_downloaded_notebook(
     observations = extract_observations(notebook_path)
     fingerprint = ast_fingerprint(notebook_path)
     return observations, fingerprint
+
+
+def _notebook_context_scores(
+    record: dict[str, Any],
+) -> tuple[list[ScoreObservation], int, int]:
+    observations: list[ScoreObservation] = []
+    candidates_seen = 0
+    candidates_excluded = 0
+    seen: set[tuple[float, str | None]] = set()
+    ref = str(record.get("ref") or "")
+    contexts = (
+        (str(record.get("title") or ""), "title"),
+        (ref.rsplit("/", 1)[-1], "ref"),
+    )
+    for text, source in contexts:
+        added, source_candidates, source_excluded = extract_score_observations(
+            text,
+            locator=source,
+            source=source,
+        )
+        candidates_seen += source_candidates
+        candidates_excluded += source_excluded
+        for observation in added:
+            key = (observation.value, observation.metric_raw)
+            if key in seen:
+                continue
+            seen.add(key)
+            observations.append(observation)
+    return observations, candidates_seen, candidates_excluded
 
 
 def _stage_error(stage: str, exc: BaseException) -> str:

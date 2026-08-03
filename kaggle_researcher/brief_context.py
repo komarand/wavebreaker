@@ -178,6 +178,7 @@ def _official_facts_unit(facts: CompetitionFacts) -> _ContextUnit:
         "files": facts.files.model_dump(mode="json"),
         "metadata": facts.metadata.model_dump(mode="json"),
         "schema_version": facts.schema_version,
+        "score_diagnostics": facts.score_diagnostics.model_dump(mode="json"),
         "user_constraints": facts.user_constraints.model_dump(mode="json"),
     }
     return _ContextUnit(
@@ -212,6 +213,14 @@ def _notebook_ast_units(notebooks: list[NotebookFacts]) -> list[_ContextUnit]:
             "parse_status_counts": dict(
                 sorted(Counter(item.parse_status for item in members).items())
             ),
+            "score_observations": [
+                {
+                    "notebook_ref": item.ref,
+                    **observation.model_dump(mode="json"),
+                }
+                for item in members
+                for observation in item.score_observations
+            ],
             "source_ids": list(notebook_source_ids),
             "splitters": _aggregate_observations(members, "splitters"),
         }

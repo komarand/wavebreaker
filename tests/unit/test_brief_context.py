@@ -16,6 +16,7 @@ from kaggle_researcher.facts.models import (
     FileManifest,
     LeaderboardStability,
     NotebookFacts,
+    ScoreObservation,
     UserConstraints,
 )
 
@@ -52,6 +53,26 @@ def test_ast_cluster_block_precedes_discussion_text() -> None:
     assert packed.text.index("<TRUSTED_NOTEBOOK_AST") < packed.text.index(
         "discussion body"
     )
+
+
+def test_score_observations_are_passed_to_existing_reasoning_context() -> None:
+    notebook = _notebook("author/notebook")
+    notebook.score_observations = [
+        ScoreObservation(
+            value=0.8123,
+            value_raw="0.8123",
+            metric_raw="custom wildlife score",
+            metric_canonical=None,
+            locator="cell_0",
+            raw_text="custom wildlife score: 0.8123",
+            source="markdown",
+        )
+    ]
+
+    packed = pack_brief_context(_facts(notebooks=[notebook]), 20_000)
+
+    assert '"metric_raw":"custom wildlife score"' in packed.text
+    assert '"raw_text":"custom wildlife score: 0.8123"' in packed.text
 
 
 def test_trusted_blocks_publish_their_canonical_source_ids() -> None:
