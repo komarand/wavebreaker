@@ -1,24 +1,43 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 from collections.abc import Iterable, Mapping
+from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
 
+from kaggle_researcher.facts.kaggle_api import extract_http_status
 from kaggle_researcher.facts.models import DiscussionFacts
-
 
 LOGGER = logging.getLogger(__name__)
 PAGE_SIZE = 200
+DiscussionStatus = Literal["collected", "empty", "forbidden", "unavailable", "failed"]
+
+
+class DiscussionCollection(list[DiscussionFacts]):
+    def __init__(
+        self,
+        items: Iterable[DiscussionFacts] = (),
+        *,
+        status: DiscussionStatus,
+        error: str | None = None,
+        limitation: str | None = None,
+    ) -> None:
+        super().__init__(items)
+        self.status = status
+        self.error = error
+        self.limitation = limitation
 
 
 def fetch_competition_discussions(
     slug: str,
     max_topics: int,
-) -> list[DiscussionFacts]:
+) -> DiscussionCollection:
     if max_topics <= 0:
-        return []
+        return DiscussionCollection(status="empty")
     return _collect_topics(
         slug=slug,
         limit=max_topics,
@@ -56,8 +75,14 @@ def _collect_topics(
     category: str | None = None,
     sort_by: str | None = None,
     sort_by_votes: bool = False,
-) -> list[DiscussionFacts]:
-    client = _forums_client()
+) -> DiscussionCollection:
+    try:
+        client = _forums_client()
+    except Exception as exc:
+        error = _discussion_error("unavailable", exc)
+        LOGGER.warning("Discussion client is unavailable (%s)", type(exc).__name__)
+        return DiscussionCollection(status="unavailable", error=error)
+
     topic_summaries: list[Any] = []
     page_token: str | None = None
 
@@ -71,8 +96,20 @@ def _collect_topics(
                 sort_by=sort_by,
             )
         except Exception as exc:
-            LOGGER.warning("Failed to list discussion topics for %s: %s", slug, exc)
-            break
+            status: DiscussionStatus = (
+                "forbidden" if extract_http_status(exc) == 403 else "failed"
+            )
+            error = _discussion_error(status, exc)
+            LOGGER.warning(
+                "Failed to list discussion topics for %s (%s)",
+                slug,
+                type(exc).__name__,
+            )
+            return DiscussionCollection(
+                status=status,
+                error=error,
+                limitation=error if status == "forbidden" else None,
+            )
 
         page_topics = list(_items(response, "topics"))
         topic_summaries.extend(page_topics[: limit - len(topic_summaries)])
@@ -88,6 +125,7 @@ def _collect_topics(
         )
 
     facts: list[DiscussionFacts] = []
+    topic_failures = 0
     for topic_summary in topic_summaries[:limit]:
         topic_id = _text(_value(topic_summary, "id", "topic_id", "topicId"))
         if not topic_id:
@@ -103,8 +141,51 @@ def _collect_topics(
                 )
             )
         except Exception as exc:
-            LOGGER.warning("Failed to fetch discussion topic %s: %s", topic_id, exc)
-    return facts
+            topic_failures += 1
+            detail = f": {exc}" if isinstance(exc, ValueError) else ""
+            LOGGER.warning(
+                "Failed to fetch discussion topic %s (%s)%s",
+                topic_id,
+                type(exc).__name__,
+                detail,
+            )
+
+    if facts:
+        return DiscussionCollection(facts, status="collected")
+    if topic_summaries and topic_failures:
+        return DiscussionCollection(
+            status="failed",
+            error="Kaggle Discussion API topic retrieval failed.",
+        )
+    return DiscussionCollection(status="empty")
+
+
+def discussion_auth_mode() -> Literal["legacy", "oauth", "unknown"]:
+    kaggle_dir = Path.home() / ".kaggle"
+    if (
+        os.getenv("KAGGLE_API_TOKEN")
+        or (kaggle_dir / "credentials.json").is_file()
+        or (kaggle_dir / "access_token").is_file()
+        or (kaggle_dir / "access_token.txt").is_file()
+    ):
+        return "oauth"
+    if (
+        (os.getenv("KAGGLE_USERNAME") and os.getenv("KAGGLE_KEY"))
+        or (kaggle_dir / "kaggle.json").is_file()
+    ):
+        return "legacy"
+    return "unknown"
+
+
+def _discussion_error(status: DiscussionStatus, exc: BaseException) -> str:
+    status_code = extract_http_status(exc)
+    if status == "forbidden":
+        return "Kaggle Discussion API returned HTTP 403."
+    if status_code is not None:
+        return f"Kaggle Discussion API returned HTTP {status_code}."
+    if status == "unavailable":
+        return "Kaggle Discussion API client is unavailable."
+    return f"Kaggle Discussion API collection failed ({type(exc).__name__})."
 
 
 def _to_discussion_fact(
@@ -186,7 +267,7 @@ def _comment_texts(comments: Iterable[Any]) -> list[str]:
 
 def _items(response: Any, name: str) -> Iterable[Any]:
     value = _value(response, name)
-    return value if isinstance(value, Iterable) and not isinstance(value, (str, bytes)) else []
+    return value if isinstance(value, Iterable) and not isinstance(value, str | bytes) else []
 
 
 def _first_value(primary: Any, fallback: Any, *, names: tuple[str, ...]) -> Any:
@@ -257,7 +338,7 @@ class _KaggleForumsClient:
             env=KaggleEnv.PROD,
             username=os.getenv("KAGGLE_USERNAME"),
             password=os.getenv("KAGGLE_KEY"),
-            api_token=os.getenv("KAGGLE_API_TOKEN"),
+            api_token=os.getenv("KAGGLE_API_TOKEN") or _stored_oauth_access_token(),
         )
         self._client = self._kaggle.discussions.discussion_api_client
 
@@ -318,3 +399,19 @@ class _KaggleForumsClient:
 
 def _forums_client() -> Any:
     return _KaggleForumsClient()
+
+
+def _stored_oauth_access_token() -> str | None:
+    credentials_path = Path.home() / ".kaggle" / "credentials.json"
+    try:
+        payload = json.loads(credentials_path.read_text(encoding="utf-8"))
+        token = payload.get("access_token")
+        expiration = payload.get("access_token_expiration")
+        if not isinstance(token, str) or not token or not isinstance(expiration, str):
+            return None
+        expires_at = datetime.fromisoformat(expiration)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return token if expires_at > datetime.now(timezone.utc) else None
+    except (OSError, ValueError, TypeError):
+        return None

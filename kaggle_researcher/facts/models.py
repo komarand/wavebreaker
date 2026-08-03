@@ -14,6 +14,13 @@ class CodeObservation(BaseModel):
     locator: str
 
 
+class DeclaredCvObservation(BaseModel):
+    value: float
+    metric_name: str | None = None
+    locator: str
+    raw_text: str
+
+
 class CompetitionMetadata(BaseModel):
     competition_id: str
     title: str | None = None
@@ -58,6 +65,7 @@ class NotebookFacts(BaseModel):
     metrics: list[CodeObservation]
     feature_ops: list[CodeObservation]
     declared_cv: list[str]
+    declared_cv_observations: list[DeclaredCvObservation] = Field(default_factory=list)
 
     parse_status: Literal["ok", "partial", "failed"]
 
@@ -130,6 +138,17 @@ class CvLbPair(BaseModel):
     declared_cv: float
     public_score: float
     lineage_cluster_id: str
+    metric_name: str | None = None
+
+
+class CvLbDiagnostics(BaseModel):
+    notebooks_total: int = 0
+    notebooks_with_public_score: int = 0
+    notebooks_with_declared_cv: int = 0
+    notebooks_with_both: int = 0
+    comparable_pairs: int = 0
+    rejected_non_comparable_pairs: int = 0
+    zero_pairs_reason: str | None = None
 
 
 class UserConstraints(BaseModel):
@@ -150,6 +169,14 @@ class CompetitionFacts(BaseModel):
     discussions: list[DiscussionFacts]
     similar_competitions: list[LeaderboardStability]
     cv_lb_pairs: list[CvLbPair]
+    cv_lb_diagnostics: CvLbDiagnostics = Field(default_factory=CvLbDiagnostics)
+
+    discussion_collection_status: Literal[
+        "collected", "empty", "forbidden", "unavailable", "failed"
+    ] = "empty"
+    discussion_collection_error: str | None = None
+    discussion_auth_mode: Literal["legacy", "oauth", "unknown"] = "unknown"
+    limitations: list[str] = Field(default_factory=list)
 
     user_constraints: UserConstraints
     collection_errors: list[str]

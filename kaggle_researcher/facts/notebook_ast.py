@@ -9,8 +9,11 @@ import tokenize
 from pathlib import Path
 from typing import Any
 
-from kaggle_researcher.facts.models import CodeObservation, NotebookFacts
-
+from kaggle_researcher.facts.models import (
+    CodeObservation,
+    DeclaredCvObservation,
+    NotebookFacts,
+)
 
 SPLITTER_NAMES = {
     "KFold",
@@ -88,8 +91,13 @@ MODEL_KWARGS = {
     "num_leaves",
 }
 DECLARED_CV_PATTERN = re.compile(
-    r"\b(?:cv|oof|local|fold)\b\D{0,15}(0\.\d{3,})",
+    r"\b(?:cv|oof|local|fold|validation)\b[^\n]{0,40}?(0\.\d{3,})",
     re.IGNORECASE,
+)
+DECLARED_CV_METRICS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bmAP\b", re.IGNORECASE), "mAP"),
+    (re.compile(r"\b(?:top|rank)[-_ ]?1\b", re.IGNORECASE), "rank-1"),
+    (re.compile(r"\baccuracy\b", re.IGNORECASE), "accuracy"),
 )
 MAX_EXPRESSION_LENGTH = 80
 
@@ -108,16 +116,23 @@ def extract_observations(notebook_path: Path) -> dict[str, Any]:
         "feature_ops": [],
     }
     declared_cv: list[str] = []
+    declared_cv_observations: list[DeclaredCvObservation] = []
     seen_cv: set[str] = set()
     parsed_code_cells = 0
     code_cell_index = 0
     has_syntax_error = False
 
-    for cell in cells:
+    for cell_index, cell in enumerate(cells):
         cell_type = _cell_value(cell, "cell_type")
         source = _cell_source(cell)
         if cell_type == "markdown":
-            _append_declared_cv(source, declared_cv, seen_cv)
+            _append_declared_cv(
+                source,
+                declared_cv,
+                seen_cv,
+                declared_cv_observations,
+                locator=f"cell_{cell_index}",
+            )
             continue
         if cell_type != "code":
             continue
@@ -139,7 +154,13 @@ def extract_observations(notebook_path: Path) -> dict[str, Any]:
         )
         visitor.visit(tree)
         for string_value in _string_literals_in_source_order(tree):
-            _append_declared_cv(string_value, declared_cv, seen_cv)
+            _append_declared_cv(
+                string_value,
+                declared_cv,
+                seen_cv,
+                declared_cv_observations,
+                locator=locator,
+            )
 
     if parsed_code_cells == 0:
         return _empty_result()
@@ -147,6 +168,7 @@ def extract_observations(notebook_path: Path) -> dict[str, Any]:
     return {
         **observations,
         "declared_cv": declared_cv,
+        "declared_cv_observations": declared_cv_observations,
         "parse_status": "partial" if has_syntax_error else "ok",
     }
 
@@ -360,13 +382,36 @@ def _string_literals_in_source_order(tree: ast.AST) -> list[str]:
     return [node.value for node in string_nodes]
 
 
-def _append_declared_cv(text: str, values: list[str], seen: set[str]) -> None:
+def _append_declared_cv(
+    text: str,
+    values: list[str],
+    seen: set[str],
+    observations: list[DeclaredCvObservation],
+    *,
+    locator: str,
+) -> None:
     for match in DECLARED_CV_PATTERN.finditer(text):
         score = match.group(1)
         if score in seen:
             continue
         seen.add(score)
         values.append(score)
+        raw_text = " ".join(match.group(0).strip().split())
+        observations.append(
+            DeclaredCvObservation(
+                value=float(score),
+                metric_name=_declared_cv_metric(raw_text),
+                locator=locator,
+                raw_text=raw_text,
+            )
+        )
+
+
+def _declared_cv_metric(text: str) -> str | None:
+    for pattern, metric_name in DECLARED_CV_METRICS:
+        if pattern.search(text):
+            return metric_name
+    return None
 
 
 def _without_leading_docstring(statements: list[ast.stmt]) -> list[ast.stmt]:
@@ -393,5 +438,6 @@ def _empty_result() -> dict[str, Any]:
         "metrics": [],
         "feature_ops": [],
         "declared_cv": [],
+        "declared_cv_observations": [],
         "parse_status": "failed",
     }

@@ -15,7 +15,6 @@ from kaggle_researcher.facts.notebook_ast import (
     extract_observations,
 )
 
-
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "facts"
 GROUP_FIXTURE = FIXTURE_DIR / "notebook_groupkfold.ipynb"
 TIMESERIES_FIXTURE = FIXTURE_DIR / "notebook_timeseries.ipynb"
@@ -84,6 +83,47 @@ def test_broken_cell_fixture_is_partial_and_keeps_valid_observations() -> None:
     assert result["declared_cv"] == ["0.7315"]
 
 
+def test_metric_function_mention_without_cv_context_is_not_declared_cv(
+    tmp_path: Path,
+) -> None:
+    notebook_path = _write_notebook(
+        tmp_path,
+        [
+            _code_cell(
+                "from sklearn.metrics import accuracy_score\n"
+                "score = accuracy_score(y_true, y_pred)\n"
+            )
+        ],
+    )
+
+    result = extract_observations(notebook_path)
+
+    assert [metric.name for metric in result["metrics"]] == ["accuracy_score"]
+    assert result["declared_cv"] == []
+    assert result["declared_cv_observations"] == []
+
+
+def test_validation_map_text_creates_grounded_declared_cv_observation(
+    tmp_path: Path,
+) -> None:
+    notebook_path = _write_notebook(
+        tmp_path,
+        [
+            _markdown_cell("Validation mAP: 0.8123"),
+            _code_cell("value = 1"),
+        ],
+    )
+
+    result = extract_observations(notebook_path)
+
+    assert result["declared_cv"] == ["0.8123"]
+    observation = result["declared_cv_observations"][0]
+    assert observation.value == pytest.approx(0.8123)
+    assert observation.metric_name == "mAP"
+    assert observation.locator == "cell_0"
+    assert observation.raw_text == "Validation mAP: 0.8123"
+
+
 def test_notebook_with_no_parseable_code_returns_empty_failed_result(tmp_path: Path) -> None:
     notebook_path = _write_notebook(
         tmp_path,
@@ -101,6 +141,7 @@ def test_notebook_with_no_parseable_code_returns_empty_failed_result(tmp_path: P
         "metrics": [],
         "feature_ops": [],
         "declared_cv": [],
+        "declared_cv_observations": [],
         "parse_status": "failed",
     }
 

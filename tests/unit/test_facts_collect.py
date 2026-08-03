@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from kaggle_researcher.facts import collect
+from kaggle_researcher.facts.discussions import DiscussionCollection
 from kaggle_researcher.facts.models import (
     CodeObservation,
     CompetitionMetadata,
@@ -48,7 +49,8 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
         calls.append(f"assign:{len(notebooks)}")
         return real_assign(notebooks)
 
-    def build_pairs(notebooks):
+    def build_pairs(notebooks, competition_metric_name=None):
+        assert competition_metric_name == "roc_auc"
         calls.append(f"pairs:{len({item.lineage_cluster_id for item in notebooks})}")
         return []
 
@@ -100,6 +102,9 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
     assert "task" not in facts.similar_competitions[0].not_computable_reason.lower()
     assert facts.user_constraints.vram_gb == 12
     assert facts.collection_errors == []
+    assert facts.discussion_collection_status == "collected"
+    assert facts.cv_lb_diagnostics.notebooks_total == 2
+    assert facts.cv_lb_diagnostics.notebooks_with_both == 2
 
 
 def test_nonfatal_stage_failures_are_recorded_and_collection_continues(
@@ -171,6 +176,34 @@ def test_single_notebook_pull_failure_does_not_drop_successful_notebooks(
 
     assert [notebook.ref for notebook in facts.notebooks] == ["author/good"]
     assert facts.collection_errors == ["notebook author/broken pull failed"]
+
+
+def test_discussion_forbidden_is_recorded_without_failing_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_successful_non_notebook_stages(monkeypatch)
+    monkeypatch.setattr(collect, "list_competition_notebooks", lambda slug, limit: [])
+    monkeypatch.setattr(
+        collect,
+        "fetch_competition_discussions",
+        lambda slug, limit: DiscussionCollection(
+            status="forbidden",
+            error="Kaggle Discussion API returned HTTP 403.",
+            limitation="Kaggle Discussion API returned HTTP 403.",
+        ),
+    )
+
+    facts = collect.collect_facts(
+        "example", 0, 5, [], UserConstraints(), max_sample_sub_bytes=1000
+    )
+
+    assert facts.discussions == []
+    assert facts.discussion_collection_status == "forbidden"
+    assert facts.discussion_collection_error == (
+        "Kaggle Discussion API returned HTTP 403."
+    )
+    assert facts.limitations == ["Kaggle Discussion API returned HTTP 403."]
+    assert facts.collection_errors == []
 
 
 def test_metadata_failure_is_the_only_fatal_stage(

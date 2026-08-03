@@ -10,9 +10,14 @@ from kaggle_researcher.facts.cv_lb import (
     _select_declared_cv,
     _spearman_correlation,
     build_cv_lb_pairs,
+    diagnose_cv_lb,
     summarize_cv_lb,
 )
-from kaggle_researcher.facts.models import CvLbPair, NotebookFacts
+from kaggle_researcher.facts.models import (
+    CvLbPair,
+    DeclaredCvObservation,
+    NotebookFacts,
+)
 
 
 def test_build_pairs_uses_first_declared_cv_and_preserves_notebook_order() -> None:
@@ -85,6 +90,51 @@ def test_build_pairs_uses_median_for_long_fold_like_list() -> None:
     )
 
     assert build_cv_lb_pairs([notebook])[0].declared_cv == pytest.approx(0.73)
+
+
+def test_incompatible_declared_and_competition_metrics_are_not_paired() -> None:
+    notebook = _notebook("author/accuracy", ["0.8123"], 0.8, "lc_a")
+    notebook.declared_cv_observations = [
+        DeclaredCvObservation(
+            value=0.8123,
+            metric_name="accuracy",
+            locator="cell_1",
+            raw_text="validation accuracy 0.8123",
+        )
+    ]
+
+    assert build_cv_lb_pairs([notebook], "mAP") == []
+    compatible = build_cv_lb_pairs([notebook], "accuracy")
+    assert len(compatible) == 1
+    assert compatible[0].metric_name == "accuracy"
+
+
+def test_diagnostics_count_public_cv_both_and_rejected_separately() -> None:
+    public_only = _notebook("author/public", [], 0.8, "lc_a")
+    cv_only = _notebook("author/cv", ["0.79"], None, "lc_b")
+    incompatible = _notebook("author/both", ["0.78"], 0.77, "lc_c")
+    incompatible.declared_cv_observations = [
+        DeclaredCvObservation(
+            value=0.78,
+            metric_name="accuracy",
+            locator="cell_0",
+            raw_text="local accuracy 0.78",
+        )
+    ]
+    notebooks = [public_only, cv_only, incompatible]
+    pairs = build_cv_lb_pairs(notebooks, "mAP")
+
+    diagnostics = diagnose_cv_lb(notebooks, pairs)
+
+    assert diagnostics.notebooks_total == 3
+    assert diagnostics.notebooks_with_public_score == 2
+    assert diagnostics.notebooks_with_declared_cv == 2
+    assert diagnostics.notebooks_with_both == 1
+    assert diagnostics.comparable_pairs == 0
+    assert diagnostics.rejected_non_comparable_pairs == 1
+    assert diagnostics.zero_pairs_reason == (
+        "CV and leaderboard metrics are not comparable."
+    )
 
 
 def test_summary_returns_none_statistics_for_empty_pairs() -> None:

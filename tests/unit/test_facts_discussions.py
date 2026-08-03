@@ -9,7 +9,6 @@ import pytest
 
 from kaggle_researcher.facts import discussions
 
-
 FIXTURE_PATH = (
     Path(__file__).resolve().parents[1] / "fixtures" / "facts" / "forum_topics.json"
 )
@@ -70,6 +69,61 @@ def test_competition_discussions_paginate_to_limit_and_join_thread_text(
         "This removed the leakage."
     )
     assert "Failed to fetch discussion topic 102" in caplog.text
+    assert facts.status == "collected"
+    assert facts.error is None
+
+
+def test_empty_discussion_response_is_distinct_from_forbidden(
+    fake_client: FakeForumsClient,
+) -> None:
+    fake_client.payload["competition_pages"]["first"] = {
+        "topics": [],
+        "next_page_token": None,
+    }
+
+    facts = discussions.fetch_competition_discussions("current-comp", max_topics=3)
+
+    assert facts == []
+    assert facts.status == "empty"
+    assert facts.error is None
+
+
+def test_discussion_403_is_nonfatal_forbidden_and_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ForbiddenError(RuntimeError):
+        status = 403
+
+    class ForbiddenClient:
+        def list_topics(self, **kwargs: Any) -> Any:
+            raise ForbiddenError("credential=must-not-leak")
+
+    monkeypatch.setattr(discussions, "_forums_client", ForbiddenClient)
+
+    facts = discussions.fetch_competition_discussions("restricted", max_topics=3)
+
+    assert facts == []
+    assert facts.status == "forbidden"
+    assert facts.error == "Kaggle Discussion API returned HTTP 403."
+    assert facts.limitation == "Kaggle Discussion API returned HTTP 403."
+    assert "credential" not in facts.error
+
+
+def test_unknown_discussion_error_is_failed_not_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailedClient:
+        def list_topics(self, **kwargs: Any) -> Any:
+            raise RuntimeError("secret-value")
+
+    monkeypatch.setattr(discussions, "_forums_client", FailedClient)
+
+    facts = discussions.fetch_competition_discussions("broken", max_topics=3)
+
+    assert facts == []
+    assert facts.status == "failed"
+    assert facts.error == "Kaggle Discussion API collection failed (RuntimeError)."
+    assert "secret-value" not in facts.error
 
 
 def test_discussion_pagination_accepts_camel_case_page_token(
@@ -92,6 +146,37 @@ def test_zero_limit_does_not_create_client(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert discussions.fetch_competition_discussions("current-comp", 0) == []
     assert discussions.fetch_winner_writeups(["past-one"], 0) == []
+
+
+def test_comment_pagination_uses_next_page_token() -> None:
+    class LowLevelClient:
+        def __init__(self) -> None:
+            self.tokens: list[str | None] = []
+
+        def get_topic(self, request: Any) -> Any:
+            return SimpleNamespace(topic=SimpleNamespace(id=request.id))
+
+        def list_comments(self, request: Any) -> Any:
+            token = request.page_token or None
+            self.tokens.append(token)
+            if token is None:
+                return SimpleNamespace(
+                    comments=[SimpleNamespace(content="first")],
+                    next_page_token="page-2",
+                )
+            return SimpleNamespace(
+                comments=[SimpleNamespace(content="second")],
+                next_page_token=None,
+            )
+
+    low_level = LowLevelClient()
+    client = object.__new__(discussions._KaggleForumsClient)
+    client._client = low_level
+
+    thread = client.get_topic("101")
+
+    assert low_level.tokens == [None, "page-2"]
+    assert [comment.content for comment in thread.comments] == ["first", "second"]
 
 
 def test_winner_writeups_use_category_top_sort_and_competition_ids(

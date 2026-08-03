@@ -20,7 +20,6 @@ from kaggle_researcher.facts.models import CompetitionFacts, UserConstraints
 from kaggle_researcher.render import render_brief, render_facts_section
 from kaggle_researcher.report.docx_generator import generate_report
 
-
 OBJECTIVES = ("medal", "top_percent", "learn", "fast_baseline")
 DEFAULT_MAX_NOTEBOOKS = 20
 DEFAULT_MAX_DISCUSSIONS = 200
@@ -288,7 +287,20 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
     print(f"lineage clusters: {len(clusters)}")
     print(f"splitters by lineage cluster: {dict(_splitter_distribution(facts))}")
     print(f"cv/lb: {summarize_cv_lb(facts.cv_lb_pairs)}")
+    diagnostics = facts.cv_lb_diagnostics
+    print(f"public notebook scores: {diagnostics.notebooks_with_public_score}")
+    print(f"cv observations: {diagnostics.notebooks_with_declared_cv}")
+    print(f"notebooks with both: {diagnostics.notebooks_with_both}")
+    print(f"comparable cv/lb pairs: {diagnostics.comparable_pairs}")
+    if diagnostics.zero_pairs_reason:
+        print(f"cv/lb diagnostic: {diagnostics.zero_pairs_reason}")
     print(f"discussions: {len(facts.discussions)}")
+    print(f"discussion status: {facts.discussion_collection_status}")
+    print(f"discussion auth: {facts.discussion_auth_mode}")
+    if facts.discussion_collection_error:
+        print(f"discussion error: {facts.discussion_collection_error}")
+    for limitation in facts.limitations:
+        print(f"limitation: {limitation}")
 
 
 def _splitter_distribution(facts: CompetitionFacts) -> Counter[str]:

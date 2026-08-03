@@ -13,7 +13,6 @@ from kaggle_researcher.facts.models import (
     FileManifest,
 )
 
-
 NOTEBOOK_FIXTURE = (
     Path(__file__).resolve().parents[1]
     / "fixtures"
@@ -66,12 +65,26 @@ def test_wave_facts_writes_offline_checkpoint_and_cluster_summary(
     )
     assert writeup_limits == [4]
     assert payload["collection_errors"] == []
+    assert payload["discussion_collection_status"] == "collected"
+    assert payload["cv_lb_diagnostics"] == {
+        "notebooks_total": 2,
+        "notebooks_with_public_score": 2,
+        "notebooks_with_declared_cv": 2,
+        "notebooks_with_both": 2,
+        "comparable_pairs": 2,
+        "rejected_non_comparable_pairs": 0,
+        "zero_pairs_reason": None,
+    }
     assert "deepseek" not in facts_path.read_text(encoding="utf-8").lower()
     assert "metric: roc_auc" in output
     assert "notebooks: 2" in output
     assert "lineage clusters: 1" in output
     assert "'StratifiedGroupKFold': 1" in output
     assert "discussions: 2" in output
+    assert "public notebook scores: 2" in output
+    assert "cv observations: 2" in output
+    assert "comparable cv/lb pairs: 2" in output
+    assert "discussion status: collected" in output
 
 
 def test_wave_facts_writes_checkpoint_after_stage_three_failure(

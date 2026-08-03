@@ -7,8 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from kaggle_researcher.facts.competition import fetch_competition_metadata
-from kaggle_researcher.facts.cv_lb import build_cv_lb_pairs
+from kaggle_researcher.facts.cv_lb import build_cv_lb_pairs, diagnose_cv_lb
 from kaggle_researcher.facts.discussions import (
+    discussion_auth_mode,
     fetch_competition_discussions,
     fetch_winner_writeups,
 )
@@ -26,7 +27,6 @@ from kaggle_researcher.facts.notebook_ast import (
     extract_observations,
 )
 from kaggle_researcher.facts.notebooks import list_competition_notebooks, pull_notebook
-
 
 NOTEBOOK_CONCURRENCY = 4
 
@@ -50,6 +50,7 @@ def collect_facts(
         ) from exc
 
     collection_errors: list[str] = []
+    limitations: list[str] = []
     try:
         files = fetch_file_manifest(slug, max_sample_sub_bytes)
     except Exception as exc:
@@ -73,16 +74,33 @@ def collect_facts(
         collection_errors.append(_stage_error("notebook lineage clustering", exc))
 
     try:
-        cv_lb_pairs = build_cv_lb_pairs(notebooks)
+        cv_lb_pairs = build_cv_lb_pairs(notebooks, metadata.metric_name)
     except Exception as exc:
         collection_errors.append(_stage_error("CV/LB pairing", exc))
         cv_lb_pairs = []
+    cv_lb_diagnostics = diagnose_cv_lb(notebooks, cv_lb_pairs)
 
     discussions = []
+    discussion_status = "empty"
+    discussion_error: str | None = None
     try:
-        discussions.extend(fetch_competition_discussions(slug, max_discussions))
+        discussion_result = fetch_competition_discussions(slug, max_discussions)
+        discussions.extend(discussion_result)
+        discussion_status = getattr(
+            discussion_result,
+            "status",
+            "collected" if discussion_result else "empty",
+        )
+        discussion_error = getattr(discussion_result, "error", None)
+        limitation = getattr(discussion_result, "limitation", None)
+        if limitation:
+            limitations.append(limitation)
+        if discussion_status in {"failed", "unavailable"} and discussion_error:
+            collection_errors.append(discussion_error)
     except Exception as exc:
         collection_errors.append(_stage_error("competition discussions", exc))
+        discussion_status = "failed"
+        discussion_error = _stage_error("competition discussions", exc)
     try:
         discussions.extend(fetch_winner_writeups(similar, writeups_per_competition))
     except Exception as exc:
@@ -107,6 +125,11 @@ def collect_facts(
         discussions=discussions,
         similar_competitions=similar_competitions,
         cv_lb_pairs=cv_lb_pairs,
+        cv_lb_diagnostics=cv_lb_diagnostics,
+        discussion_collection_status=discussion_status,
+        discussion_collection_error=discussion_error,
+        discussion_auth_mode=discussion_auth_mode(),
+        limitations=limitations,
         user_constraints=user_constraints,
         collection_errors=collection_errors,
     )
@@ -152,7 +175,7 @@ async def _collect_notebooks_async(
     ]
     results = await asyncio.gather(*tasks)
     notebooks: list[NotebookFacts] = []
-    for record, result in zip(notebook_records, results, strict=True):
+    for _record, result in zip(notebook_records, results, strict=True):
         if isinstance(result, str):
             collection_errors.append(result)
         else:
@@ -194,6 +217,10 @@ async def _collect_one_notebook(
             metrics=observations["metrics"],
             feature_ops=observations["feature_ops"],
             declared_cv=observations["declared_cv"],
+            declared_cv_observations=observations.get(
+                "declared_cv_observations",
+                [],
+            ),
             parse_status=observations["parse_status"],
         )
     except Exception as exc:
