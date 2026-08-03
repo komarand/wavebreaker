@@ -59,7 +59,13 @@ def test_facts_section_renders_computed_and_unavailable_shake_up_separately() ->
 
     assert "past-a: computed; Spearman=0.8" in markdown
     assert "top-10 retention=0.7" in markdown
-    assert "past-b: not computable (Meta Kaggle dumps not configured.)" in markdown
+    assert "match fraction=0.8" in markdown
+    assert "limitations=Synthetic stability limitation." in markdown
+    assert "limitations=No public snapshot." in markdown
+    assert (
+        "past-b: not computable (Meta Kaggle dumps not configured.); "
+        "matched teams=0, match fraction=unavailable"
+    ) in markdown
     assert "No data for similar competition" not in markdown
 
 
@@ -274,6 +280,7 @@ def _facts() -> CompetitionFacts:
                 matched_teams=0,
                 source="unavailable",
                 not_computable_reason="Meta Kaggle dumps not configured.",
+                limitations=["No public snapshot."],
             ),
             LeaderboardStability(
                 competition_id="past-a",
@@ -282,7 +289,9 @@ def _facts() -> CompetitionFacts:
                 top10_retention=0.7,
                 median_rank_change=4.0,
                 matched_teams=100,
+                match_fraction=0.8,
                 source="meta_kaggle",
+                limitations=["Synthetic stability limitation."],
             ),
         ],
         cv_lb_pairs=[

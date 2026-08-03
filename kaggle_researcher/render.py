@@ -10,7 +10,6 @@ from kaggle_researcher.facts.cv_lb import summarize_cv_lb
 from kaggle_researcher.facts.models import CompetitionFacts, LeaderboardStability
 from kaggle_researcher.research_scout_schemas import EdaTask, ResearchHypothesis
 
-
 NO_SUPPORTED_FINDINGS = "No supported findings."
 
 
@@ -240,15 +239,23 @@ def _shake_up_summary(facts: CompetitionFacts) -> str:
 
 
 def _format_stability(item: LeaderboardStability) -> str:
+    diagnostics = (
+        f"matched teams={item.matched_teams}, match fraction="
+        f"{_format_value(item.match_fraction)}"
+    )
     if item.status == "not_computable":
         reason = item.not_computable_reason or "reason unavailable"
-        return f"{item.competition_id}: not computable ({reason})"
-    return (
-        f"{item.competition_id}: computed; Spearman="
-        f"{_format_value(item.public_private_spearman)}, top-10 retention="
-        f"{_format_value(item.top10_retention)}, median rank change="
-        f"{_format_value(item.median_rank_change)}, matched teams={item.matched_teams}"
-    )
+        rendered = f"{item.competition_id}: not computable ({reason}); {diagnostics}"
+    else:
+        rendered = (
+            f"{item.competition_id}: computed; Spearman="
+            f"{_format_value(item.public_private_spearman)}, top-10 retention="
+            f"{_format_value(item.top10_retention)}, median rank change="
+            f"{_format_value(item.median_rank_change)}, {diagnostics}"
+        )
+    if item.limitations:
+        rendered += f"; limitations={' | '.join(item.limitations)}"
+    return rendered
 
 
 def _format_boolean(value: bool | None) -> str:

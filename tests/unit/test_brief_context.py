@@ -247,6 +247,33 @@ def test_writeups_and_leaderboard_availability_are_reported_separately() -> None
     )
 
 
+def test_context_includes_leaderboard_coverage_and_limitations() -> None:
+    stability = LeaderboardStability(
+        competition_id="past-comp",
+        status="computed",
+        public_private_spearman=0.8,
+        top10_retention=None,
+        median_rank_change=12.0,
+        matched_teams=80,
+        match_fraction=0.8,
+        source="meta_kaggle",
+        limitations=["Actual public top-10 matching is incomplete."],
+    )
+
+    packed = pack_brief_context(
+        _facts(similar_competitions=[stability]),
+        20_000,
+    )
+
+    assert '"status":"computed"' in packed.text
+    assert '"matched_teams":80' in packed.text
+    assert '"match_fraction":0.8' in packed.text
+    assert '"public_private_spearman":0.8' in packed.text
+    assert '"median_rank_change":12.0' in packed.text
+    assert '"top10_retention":null' in packed.text
+    assert "Actual public top-10 matching is incomplete." in packed.text
+
+
 def test_unavailable_and_partial_inputs_create_factual_limitations() -> None:
     facts = _facts(
         notebooks=[_notebook("author/partial", parse_status="partial")],

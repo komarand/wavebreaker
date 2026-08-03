@@ -134,6 +134,8 @@ def test_competition_facts_preserve_collected_values_and_errors() -> None:
     assert payload["schema_version"] == "1.0"
     assert payload["collected_at"] == "2026-07-29T10:30:00Z"
     assert payload["notebooks"][0]["splitters"][0]["kwargs"]["groups"] == "customer_id"
+    assert payload["similar_competitions"][0]["match_fraction"] is None
+    assert payload["similar_competitions"][0]["limitations"] == []
     assert payload["collection_errors"] == ["discussion collection failed: 403"]
 
 

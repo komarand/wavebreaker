@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
+
+MIN_LEADERBOARD_MATCH_FRACTION = 0.60
 
 
 class CodeObservation(BaseModel):
@@ -79,8 +81,48 @@ class LeaderboardStability(BaseModel):
     top10_retention: float | None = None
     median_rank_change: float | None = None
     matched_teams: int
+    match_fraction: float | None = Field(default=None, ge=0.0, le=1.0)
     source: Literal["meta_kaggle", "api_final_only", "unavailable"]
     not_computable_reason: str | None = None
+    limitations: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_status_contract(self) -> LeaderboardStability:
+        derived_metrics = (
+            self.public_private_spearman,
+            self.top10_retention,
+            self.median_rank_change,
+        )
+        if self.status == "computed":
+            if self.not_computable_reason:
+                raise ValueError(
+                    "computed leaderboard stability cannot have a "
+                    "not_computable_reason"
+                )
+            if self.match_fraction is None:
+                raise ValueError(
+                    "computed leaderboard stability requires match_fraction"
+                )
+            if self.match_fraction < MIN_LEADERBOARD_MATCH_FRACTION:
+                raise ValueError(
+                    "computed leaderboard stability requires match_fraction of at "
+                    f"least {MIN_LEADERBOARD_MATCH_FRACTION:.1%}"
+                )
+            if self.public_private_spearman is None or self.median_rank_change is None:
+                raise ValueError(
+                    "computed leaderboard stability requires Spearman and median rank "
+                    "change metrics"
+                )
+        else:
+            if not self.not_computable_reason or not self.not_computable_reason.strip():
+                raise ValueError(
+                    "not_computable leaderboard stability requires a reason"
+                )
+            if any(metric is not None for metric in derived_metrics):
+                raise ValueError(
+                    "not_computable leaderboard stability cannot contain derived metrics"
+                )
+        return self
 
 
 class CvLbPair(BaseModel):
