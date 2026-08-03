@@ -11,7 +11,6 @@ import pytest
 import kaggle_researcher.facts.competition as competition_module
 from kaggle_researcher.facts.competition import fetch_competition_metadata
 
-
 FIXTURE_PATH = (
     Path(__file__).resolve().parents[1] / "fixtures" / "facts" / "competition_object.json"
 )
@@ -30,7 +29,7 @@ METADATA_FIELDS = [
 
 class FakeKaggleApi:
     competitions: list[Any] = []
-    instances: list["FakeKaggleApi"] = []
+    instances: list[FakeKaggleApi] = []
 
     def __init__(self) -> None:
         self.authenticated = False
@@ -96,6 +95,8 @@ def test_kaggle_2_response_object_is_unwrapped() -> None:
 
     assert metadata.title == "Example Competition"
     assert metadata.metric_name == "ROC AUC"
+    assert metadata.evaluation_metric_raw == "ROC AUC"
+    assert metadata.metric_status == "available"
 
 
 def test_kaggle_2_metadata_fields_have_priority_and_preserve_false() -> None:
@@ -122,6 +123,8 @@ def test_kaggle_2_metadata_fields_have_priority_and_preserve_false() -> None:
     metadata = fetch_competition_metadata("kaggle-2-competition")
 
     assert metadata.metric_name == "mAP"
+    assert metadata.evaluation_metric_raw == "mAP"
+    assert metadata.metric_status == "available"
     assert metadata.is_code_competition is False
     assert metadata.submissions_per_day == 7
     assert metadata.max_team_size == 2
@@ -145,6 +148,10 @@ def test_metric_placeholders_are_unavailable(placeholder: str) -> None:
     metadata = fetch_competition_metadata("placeholder-metric")
 
     assert metadata.metric_name is None
+    assert metadata.evaluation_metric_raw == (placeholder.strip() or None)
+    assert metadata.metric_status == (
+        "unavailable" if not placeholder.strip() else "placeholder"
+    )
     assert "metric_name" in metadata.unavailable_fields
 
 
@@ -175,6 +182,8 @@ def test_missing_fields_are_none_and_reported_without_description_inference() ->
 
     assert metadata.title == "Sparse Competition"
     assert metadata.metric_name is None
+    assert metadata.evaluation_metric_raw is None
+    assert metadata.metric_status == "unavailable"
     assert metadata.is_code_competition is None
     assert metadata.submissions_per_day is None
     assert metadata.max_team_size is None

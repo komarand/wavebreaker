@@ -5,7 +5,6 @@ from typing import Any
 from kaggle_researcher.facts.kaggle_api import create_kaggle_api, unpack_list_response
 from kaggle_researcher.facts.models import CompetitionMetadata
 
-
 _FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
     "title": ("title", "competitionTitle", "competition_title"),
     "metric_name": (
@@ -73,7 +72,10 @@ def fetch_competition_metadata(
             else None
         )
         if field_name == "metric_name":
-            value = _normalize_metric_name(value)
+            raw_metric = _normalize_raw_metric(value)
+            values["evaluation_metric_raw"] = raw_metric
+            values["metric_status"] = _metric_status(raw_metric)
+            value = _normalize_metric_name(raw_metric)
         values[field_name] = value
         if value is None:
             unavailable_fields.append(field_name)
@@ -132,13 +134,28 @@ def _competition_ref_matches(value: Any, slug: str) -> bool:
 
 
 def _normalize_metric_name(value: Any) -> str | None:
-    if not isinstance(value, str):
+    metric_name = _normalize_raw_metric(value)
+    if metric_name is None:
         return None
-    metric_name = value.strip()
     normalized = " ".join(metric_name.lower().replace("_", " ").split())
     if normalized in {"", "metric", "metric template", "unknown"}:
         return None
     return metric_name
+
+
+def _normalize_raw_metric(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    metric_name = value.strip()
+    return metric_name or None
+
+
+def _metric_status(
+    raw_metric: str | None,
+) -> str:
+    if raw_metric is None:
+        return "unavailable"
+    return "available" if _normalize_metric_name(raw_metric) is not None else "placeholder"
 
 
 def _has_value(value: Any) -> bool:

@@ -25,6 +25,8 @@ class CompetitionMetadata(BaseModel):
     competition_id: str
     title: str | None = None
     metric_name: str | None = None
+    evaluation_metric_raw: str | None = None
+    metric_status: Literal["available", "placeholder", "unavailable"] = "unavailable"
     is_code_competition: bool | None = None
     submissions_per_day: int | None = None
     max_team_size: int | None = None
