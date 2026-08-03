@@ -19,6 +19,7 @@ from kaggle_researcher.facts.kaggle_api import (
     create_kaggle_api,
     extract_http_status,
     is_forbidden,
+    unpack_list_response,
 )
 from kaggle_researcher.facts.notebooks import (
     list_competition_notebooks,
@@ -27,6 +28,43 @@ from kaggle_researcher.facts.notebooks import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_unpack_list_response_accepts_kaggle_1_direct_list() -> None:
+    items = [{"ref": "one"}, {"ref": "two"}]
+
+    unpacked = unpack_list_response(items, "competitions")
+
+    assert unpacked.items == items
+    assert unpacked.next_page_token is None
+    assert unpacked.wrapped is False
+
+
+@pytest.mark.parametrize("collection_name", ["competitions", "files", "kernels"])
+def test_unpack_list_response_accepts_kaggle_2_envelopes(
+    collection_name: str,
+) -> None:
+    item = {"ref": collection_name}
+    response = SimpleNamespace(
+        **{collection_name: [item], "next_page_token": "next-token"}
+    )
+
+    unpacked = unpack_list_response(response, collection_name)
+
+    assert unpacked.items == [item]
+    assert unpacked.next_page_token == "next-token"
+    assert unpacked.wrapped is True
+
+
+def test_unpack_list_response_accepts_mapping_and_camel_case_token() -> None:
+    unpacked = unpack_list_response(
+        {"files": [{"name": "train.csv"}], "nextPageToken": "page-2"},
+        "files",
+    )
+
+    assert unpacked.items == [{"name": "train.csv"}]
+    assert unpacked.next_page_token == "page-2"
+    assert unpacked.wrapped is True
 
 
 def test_all_facts_modules_import_without_kaggle_credentials(tmp_path: Path) -> None:

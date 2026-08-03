@@ -136,6 +136,70 @@ def test_list_fetches_another_page_when_duplicates_leave_room() -> None:
     assert [call["page"] for call in FakeKaggleApi.instances[0].list_calls] == [1, 2]
 
 
+def test_kaggle_2_notebook_response_uses_page_tokens() -> None:
+    kernels = _load_kernels()
+
+    class PaginatedApi:
+        def __init__(self) -> None:
+            self.calls: list[str | None] = []
+
+        def kernels_list_with_response(self, **kwargs: Any) -> Any:
+            page_token = kwargs["page_token"]
+            self.calls.append(page_token)
+            if page_token is None:
+                return SimpleNamespace(
+                    kernels=[kernels[0], kernels[1], kernels[2]],
+                    next_page_token="page-2",
+                )
+            return SimpleNamespace(
+                kernels=[kernels[3]],
+                next_page_token=None,
+            )
+
+    api = PaginatedApi()
+
+    notebooks = list_competition_notebooks(
+        "example-competition",
+        max_notebooks=3,
+        api=api,
+    )
+
+    assert api.calls == [None, "page-2"]
+    assert [notebook["ref"] for notebook in notebooks] == [
+        "bob/high-score",
+        "alice/baseline",
+        "cara/no-score",
+    ]
+
+
+def test_direct_kernels_response_object_also_uses_page_tokens() -> None:
+    kernels = _load_kernels()
+
+    class DirectResponseApi:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def kernels_list(self, **kwargs: Any) -> Any:
+            self.calls.append(kwargs)
+            if "page_token" not in kwargs:
+                return SimpleNamespace(
+                    kernels=[kernels[0], kernels[1], kernels[2]],
+                    next_page_token="page-2",
+                )
+            return SimpleNamespace(kernels=[kernels[3]], next_page_token=None)
+
+    api = DirectResponseApi()
+
+    notebooks = list_competition_notebooks(
+        "example-competition",
+        max_notebooks=3,
+        api=api,
+    )
+
+    assert [call.get("page_token") for call in api.calls] == [None, "page-2"]
+    assert len(notebooks) == 3
+
+
 def test_list_supports_alternate_attribute_names_and_nested_author() -> None:
     FakeKaggleApi.list_pages = [
         [

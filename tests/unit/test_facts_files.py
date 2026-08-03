@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import pytest
@@ -37,7 +38,7 @@ class FakeKaggleApi:
     def authenticate(self) -> None:
         self.authenticated = True
 
-    def competition_list_files(self, competition: str) -> Any:
+    def competition_list_files(self, competition: str, **kwargs: Any) -> Any:
         self.list_calls.append(competition)
         if self.__class__.list_error is not None:
             raise self.__class__.list_error
@@ -124,6 +125,53 @@ def test_full_fixture_maps_files_ratio_and_api_columns_without_download() -> Non
     assert api.authenticated is True
     assert api.list_calls == ["example-competition"]
     assert api.download_calls == []
+
+
+def test_kaggle_2_file_response_paginates_with_next_page_token() -> None:
+    class PaginatedApi:
+        def __init__(self) -> None:
+            self.calls: list[str | None] = []
+
+        def competition_list_files(
+            self,
+            competition: str,
+            *,
+            page_token: str | None = None,
+        ) -> Any:
+            assert competition == "example-competition"
+            self.calls.append(page_token)
+            if page_token is None:
+                return SimpleNamespace(
+                    files=[{"name": "train.csv", "totalBytes": 100}],
+                    next_page_token="page-2",
+                )
+            return SimpleNamespace(
+                files=[
+                    {"name": "test.csv", "totalBytes": 50},
+                    {
+                        "name": "sample_submission.csv",
+                        "totalBytes": 5,
+                        "columns": ["id", "target"],
+                    },
+                ],
+                next_page_token=None,
+            )
+
+    api = PaginatedApi()
+
+    manifest = fetch_file_manifest(
+        "example-competition",
+        max_sample_sub_bytes=100,
+        api=api,
+    )
+
+    assert api.calls == [None, "page-2"]
+    assert [file.name for file in manifest.files] == [
+        "train.csv",
+        "test.csv",
+        "sample_submission.csv",
+    ]
+    assert manifest.train_test_size_ratio == 2.0
 
 
 def test_download_reads_sample_header_and_never_downloads_train_or_test() -> None:

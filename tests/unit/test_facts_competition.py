@@ -84,6 +84,20 @@ def test_full_fixture_maps_every_metadata_field() -> None:
     assert api.list_calls == [{"search": "example-competition"}]
 
 
+def test_kaggle_2_response_object_is_unwrapped() -> None:
+    competition = _load_full_competition()
+    competition["ref"] = "https://www.kaggle.com/competitions/example-competition"
+    FakeKaggleApi.competitions = SimpleNamespace(
+        competitions=[competition],
+        next_page_token=None,
+    )
+
+    metadata = fetch_competition_metadata("example-competition")
+
+    assert metadata.title == "Example Competition"
+    assert metadata.metric_name == "ROC AUC"
+
+
 def test_missing_fields_are_none_and_reported_without_description_inference() -> None:
     FakeKaggleApi.competitions = [
         {

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from kaggle_researcher.facts.kaggle_api import create_kaggle_api
+from kaggle_researcher.facts.kaggle_api import create_kaggle_api, unpack_list_response
 from kaggle_researcher.facts.models import CompetitionMetadata
 
 
@@ -48,12 +48,16 @@ def fetch_competition_metadata(
 ) -> CompetitionMetadata:
     if api is None:
         api = create_kaggle_api()
-    competitions = api.competitions_list(search=slug)
+    response = api.competitions_list(search=slug)
+    competitions = unpack_list_response(response, "competitions").items
     competition = next(
         (
             candidate
             for candidate in competitions or []
-            if _get_competition_value(candidate, *_REF_CANDIDATES) == slug
+            if _competition_ref_matches(
+                _get_competition_value(candidate, *_REF_CANDIDATES),
+                slug,
+            )
         ),
         None,
     )
@@ -111,6 +115,13 @@ def _get_competition_value(competition: Any, *names: str) -> Any:
             return value
 
     return None
+
+
+def _competition_ref_matches(value: Any, slug: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip().rstrip("/")
+    return normalized == slug or normalized.rsplit("/", 1)[-1] == slug
 
 
 def _has_value(value: Any) -> bool:

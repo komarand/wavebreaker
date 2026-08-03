@@ -10,7 +10,7 @@ pydantic==2.8.2
 pydantic-settings==2.4.0
 typing-extensions==4.12.2
 
-kaggle==1.6.14
+kaggle==2.2.3
 arxiv==2.1.0
 
 sentence-transformers

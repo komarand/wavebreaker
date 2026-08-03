@@ -72,6 +72,17 @@ def test_competition_discussions_paginate_to_limit_and_join_thread_text(
     assert "Failed to fetch discussion topic 102" in caplog.text
 
 
+def test_discussion_pagination_accepts_camel_case_page_token(
+    fake_client: FakeForumsClient,
+) -> None:
+    first_page = fake_client.payload["competition_pages"]["first"]
+    first_page["nextPageToken"] = first_page.pop("next_page_token")
+
+    discussions.fetch_competition_discussions("current-comp", max_topics=3)
+
+    assert [call["page_token"] for call in fake_client.list_calls] == [None, "page-2"]
+
+
 def test_zero_limit_does_not_create_client(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         discussions,

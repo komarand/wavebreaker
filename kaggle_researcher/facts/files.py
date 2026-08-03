@@ -7,7 +7,11 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from kaggle_researcher.facts.kaggle_api import create_kaggle_api, is_forbidden
+from kaggle_researcher.facts.kaggle_api import (
+    create_kaggle_api,
+    is_forbidden,
+    unpack_list_response,
+)
 from kaggle_researcher.facts.models import FileInfo, FileManifest
 
 
@@ -32,7 +36,7 @@ def fetch_file_manifest(
     limitations: list[str] = []
 
     try:
-        response = api.competition_list_files(slug)
+        raw_files = _list_competition_files(api, slug)
     except Exception as exc:
         if not is_forbidden(exc):
             raise
@@ -48,7 +52,7 @@ def fetch_file_manifest(
         )
 
     file_records: list[tuple[FileInfo, Any]] = []
-    for raw_file in _extract_files(response):
+    for raw_file in raw_files:
         name = _get_file_value(raw_file, "name", "fileName", "file_name", "filename", "ref")
         if not isinstance(name, str) or not name:
             limitations.append("A file entry without a readable name was omitted.")
@@ -134,15 +138,30 @@ def fetch_file_manifest(
     )
 
 
-def _extract_files(response: Any) -> list[Any]:
-    if response is None:
-        return []
-    if isinstance(response, list):
-        return response
-    files = _get_file_value(response, "files")
-    if isinstance(files, (list, tuple)):
-        return list(files)
-    return []
+def _list_competition_files(api: Any, slug: str) -> list[Any]:
+    files: list[Any] = []
+    page_token: str | None = None
+    seen_tokens: set[str] = set()
+
+    while True:
+        if page_token is None:
+            response = api.competition_list_files(slug)
+        else:
+            response = api.competition_list_files(slug, page_token=page_token)
+        unpacked = unpack_list_response(response, "files")
+        files.extend(unpacked.items)
+
+        next_page_token = unpacked.next_page_token
+        if (
+            not next_page_token
+            or next_page_token in seen_tokens
+            or not unpacked.items
+        ):
+            break
+        seen_tokens.add(next_page_token)
+        page_token = next_page_token
+
+    return files
 
 
 def _train_test_size_ratio(files: list[FileInfo]) -> float | None:

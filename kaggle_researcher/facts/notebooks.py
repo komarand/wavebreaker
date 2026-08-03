@@ -5,7 +5,11 @@ import math
 from pathlib import Path
 from typing import Any
 
-from kaggle_researcher.facts.kaggle_api import create_kaggle_api
+from kaggle_researcher.facts.kaggle_api import (
+    UnpackedListResponse,
+    create_kaggle_api,
+    unpack_list_response,
+)
 
 
 _REF_NAMES = ("ref", "kernelRef", "kernel_ref", "id")
@@ -24,20 +28,19 @@ def list_competition_notebooks(
         api = create_kaggle_api()
     page_size = min(max_notebooks, 100)
     page = 1
+    page_token: str | None = None
+    seen_tokens: set[str] = set()
     notebooks_by_ref: dict[str, dict[str, Any]] = {}
 
     while len(notebooks_by_ref) < max_notebooks:
-        kernels = list(
-            api.kernels_list(
-                competition=slug,
-                page=page,
-                page_size=page_size,
-                sort_by="voteCount",
-                language="python",
-                kernel_type="notebook",
-            )
-            or []
+        unpacked = _list_kernels_page(
+            api,
+            slug=slug,
+            page=page,
+            page_size=page_size,
+            page_token=page_token,
         )
+        kernels = unpacked.items
         for kernel in kernels:
             normalized = _normalize_kernel(kernel)
             if normalized is None:
@@ -47,7 +50,19 @@ def list_competition_notebooks(
             if existing is None or _votes_sort_key(normalized) > _votes_sort_key(existing):
                 notebooks_by_ref[ref] = normalized
 
-        if len(kernels) < page_size or len(notebooks_by_ref) >= max_notebooks:
+        if len(notebooks_by_ref) >= max_notebooks:
+            break
+
+        next_page_token = unpacked.next_page_token
+        if next_page_token:
+            if next_page_token in seen_tokens or not kernels:
+                break
+            seen_tokens.add(next_page_token)
+            page_token = next_page_token
+            page += 1
+            continue
+
+        if unpacked.wrapped or len(kernels) < page_size:
             break
         page += 1
 
@@ -55,6 +70,39 @@ def list_competition_notebooks(
         notebooks_by_ref.values(),
         key=lambda notebook: (-_votes_sort_key(notebook), notebook["ref"]),
     )[:max_notebooks]
+
+
+def _list_kernels_page(
+    api: Any,
+    *,
+    slug: str,
+    page: int,
+    page_size: int,
+    page_token: str | None,
+) -> UnpackedListResponse:
+    common_kwargs = {
+        "competition": slug,
+        "page_size": page_size,
+        "sort_by": "voteCount",
+        "language": "python",
+        "kernel_type": "notebook",
+    }
+    list_with_response = getattr(api, "kernels_list_with_response", None)
+    if callable(list_with_response):
+        response = list_with_response(
+            **common_kwargs,
+            page_token=page_token,
+        )
+        return unpack_list_response(response, "kernels")
+
+    if page_token is None:
+        response = api.kernels_list(**common_kwargs, page=page)
+    else:
+        try:
+            response = api.kernels_list(**common_kwargs, page_token=page_token)
+        except TypeError:
+            response = api.kernels_list(**common_kwargs, page=page)
+    return unpack_list_response(response, "kernels")
 
 
 def pull_notebook(
