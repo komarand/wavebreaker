@@ -16,6 +16,7 @@ from kaggle_researcher.facts.notebook_ast import (
     diagnose_scores,
     extract_observations,
     extract_score_observations,
+    recanonicalize_score_observations,
 )
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "facts"
@@ -198,6 +199,81 @@ def test_hyperparameter_labels_are_the_only_score_candidates_excluded() -> None:
     assert len(observations) == 1
     assert observations[0].metric_raw == "custom_distance"
     assert observations[0].value == pytest.approx(12.4)
+
+
+@pytest.mark.parametrize(
+    ("text", "metric_raw", "metric_canonical", "value"),
+    [
+        ("OOF RMSE 1.234", "OOF RMSE", "rmse", 1.234),
+        ("Validation MAE 12.5", "Validation MAE", "mae", 12.5),
+        ("Fold 3 logloss: 0.042", "Fold 3 logloss", "log_loss", 0.042),
+        ("Epoch 7 val_mAP: 0.941", "Epoch 7 val_mAP", "mAP", 0.941),
+        (
+            "laplace_log_likelihood 2.718",
+            "laplace_log_likelihood",
+            "Laplace Log Likelihood",
+            2.718,
+        ),
+        ("custom_metric -0.31", "custom_metric", None, -0.31),
+    ],
+)
+def test_domain_agnostic_score_positions_support_unbounded_signed_values(
+    text: str,
+    metric_raw: str,
+    metric_canonical: str | None,
+    value: float,
+) -> None:
+    observations, candidates_seen, candidates_excluded = extract_score_observations(
+        text,
+        locator="cell_0",
+        source="markdown",
+        metric_hints=("Laplace Log Likelihood",),
+    )
+
+    assert candidates_seen == 1
+    assert candidates_excluded == 0
+    assert len(observations) == 1
+    assert observations[0].metric_raw == metric_raw
+    assert observations[0].metric_canonical == metric_canonical
+    assert observations[0].value == pytest.approx(value)
+
+
+def test_fold_and_epoch_context_do_not_block_the_following_metric() -> None:
+    observations, candidates_seen, candidates_excluded = extract_score_observations(
+        "Fold 3 logloss: 0.042\nEpoch 7 val_mAP: 0.941",
+        locator="cell_0",
+        source="markdown",
+    )
+
+    assert candidates_seen == 2
+    assert candidates_excluded == 0
+    assert [item.metric_canonical for item in observations] == ["log_loss", "mAP"]
+
+
+def test_score_canonicalization_uses_metrics_from_the_whole_notebook_corpus() -> None:
+    observations, _, _ = extract_score_observations(
+        "custom_quality 12.5",
+        locator="cell_0",
+        source="markdown",
+    )
+    source_notebook = _notebook_facts(
+        ref="author/source",
+        metrics=[],
+        score_observations=observations,
+    )
+    metric_notebook = _notebook_facts(
+        ref="author/metric",
+        metrics=[CodeObservation(name="custom_quality", kwargs={}, locator="cell_1")],
+        score_observations=[],
+    )
+
+    canonicalized = recanonicalize_score_observations(
+        [source_notebook, metric_notebook],
+        competition_metric_name=None,
+    )
+
+    assert observations[0].metric_canonical is None
+    assert canonicalized[0].score_observations[0].metric_canonical == "custom_quality"
 
 
 def test_code_assignments_collect_score_positions_without_treating_all_numbers_as_scores(
@@ -567,6 +643,27 @@ def _markdown_cell(source: str) -> dict[str, object]:
         "metadata": {},
         "source": source,
     }
+
+
+def _notebook_facts(
+    *,
+    ref: str,
+    metrics: list[CodeObservation],
+    score_observations: list[Any],
+) -> NotebookFacts:
+    return NotebookFacts(
+        ref=ref,
+        title=ref,
+        ast_fingerprint="a" * 64,
+        lineage_cluster_id="lc_a",
+        splitters=[],
+        models=[],
+        metrics=metrics,
+        feature_ops=[],
+        declared_cv=[],
+        score_observations=score_observations,
+        parse_status="ok",
+    )
 
 
 def _list_result_keys() -> tuple[str, ...]:

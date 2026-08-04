@@ -8,6 +8,7 @@ import math
 import re
 import tokenize
 import warnings
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Literal
 
@@ -102,7 +103,7 @@ SCORE_EXPLICIT_PATTERN = re.compile(
 SCORE_ADJACENT_PATTERN = re.compile(
     r"(?P<label>[A-Za-z][A-Za-z0-9_.-]*"
     r"(?:[ /_-]+[A-Za-z][A-Za-z0-9_.-]*){0,4})\s+"
-    r"(?P<value>(?:0?\.\d+|1(?:\.0+)?|\d+(?:\.\d+)?%))"
+    rf"(?P<value>{_NUMBER_PATTERN})"
 )
 ENCODED_TITLE_SCORE_PATTERN = re.compile(
     r"^(?:(?P<decimal>0\.\d+)|0[-_](?P<fraction>\d{2,4}))(?:\b|[-_ ])"
@@ -178,7 +179,12 @@ CANONICAL_METRIC_ALIASES: dict[str, str] = {
 MAX_EXPRESSION_LENGTH = 80
 
 
-def extract_observations(notebook_path: Path) -> dict[str, Any]:
+def extract_observations(
+    notebook_path: Path,
+    *,
+    metric_hints: Iterable[str] = (),
+) -> dict[str, Any]:
+    metric_hints = _normalized_metric_hints(metric_hints)
     try:
         notebook = _read_notebook(notebook_path)
         cells = _notebook_cells(notebook)
@@ -209,6 +215,7 @@ def extract_observations(notebook_path: Path) -> dict[str, Any]:
                 source,
                 locator=f"cell_{cell_index}",
                 source="markdown",
+                metric_hints=metric_hints,
             )
             score_observations.extend(added)
             score_candidates_seen += candidates_seen
@@ -243,6 +250,7 @@ def extract_observations(notebook_path: Path) -> dict[str, Any]:
             tree,
             python_source,
             locator,
+            metric_hints=metric_hints,
         )
         score_observations.extend(added)
         score_candidates_seen += candidates_seen
@@ -252,6 +260,7 @@ def extract_observations(notebook_path: Path) -> dict[str, Any]:
                 string_value,
                 locator=locator,
                 source="code_string",
+                metric_hints=metric_hints,
             )
             score_observations.extend(added)
             score_candidates_seen += candidates_seen
@@ -491,7 +500,9 @@ def extract_score_observations(
     *,
     locator: str,
     source: Literal["markdown", "code", "code_string", "title", "ref"],
+    metric_hints: Iterable[str] = (),
 ) -> tuple[list[ScoreObservation], int, int]:
+    metric_hints = _normalized_metric_hints(metric_hints)
     observations: list[ScoreObservation] = []
     candidates_seen = 0
     candidates_excluded = 0
@@ -515,6 +526,7 @@ def extract_score_observations(
                 metric_raw,
                 value_raw,
                 implicit=implicit_position,
+                metric_hints=metric_hints,
             ):
                 candidates_excluded += 1
                 continue
@@ -527,7 +539,10 @@ def extract_score_observations(
                     value=value,
                     value_raw=value_raw,
                     metric_raw=metric_raw,
-                    metric_canonical=canonicalize_metric_label(metric_raw),
+                    metric_canonical=canonicalize_metric_label(
+                        metric_raw,
+                        metric_hints=metric_hints,
+                    ),
                     locator=locator,
                     raw_text=" ".join(match.group(0).strip().split()),
                     source=source,
@@ -559,7 +574,10 @@ def _code_score_observations(
     tree: ast.AST,
     source_text: str,
     locator: str,
+    *,
+    metric_hints: Iterable[str] = (),
 ) -> tuple[list[ScoreObservation], int, int]:
+    metric_hints = _normalized_metric_hints(metric_hints)
     observations: list[ScoreObservation] = []
     candidates_seen = 0
     candidates_excluded = 0
@@ -590,7 +608,8 @@ def _code_score_observations(
             continue
         candidates_seen += 1
         if _is_excluded_score_label(metric_raw) or not _is_code_score_label(
-            metric_raw
+            metric_raw,
+            metric_hints=metric_hints,
         ):
             candidates_excluded += 1
             continue
@@ -602,7 +621,10 @@ def _code_score_observations(
                 value=value,
                 value_raw=value_raw,
                 metric_raw=metric_raw,
-                metric_canonical=canonicalize_metric_label(metric_raw),
+                metric_canonical=canonicalize_metric_label(
+                    metric_raw,
+                    metric_hints=metric_hints,
+                ),
                 locator=locator,
                 raw_text=compact_text[:160],
                 source="code",
@@ -643,9 +665,24 @@ def _numeric_literal(value: ast.expr) -> tuple[float, str] | None:
     return number, value_raw
 
 
-def canonicalize_metric_label(metric_raw: str | None) -> str | None:
+def canonicalize_metric_label(
+    metric_raw: str | None,
+    *,
+    metric_hints: Iterable[str] = (),
+) -> str | None:
     if not metric_raw:
         return None
+    alias = _canonical_metric_alias(metric_raw)
+    if alias is not None:
+        return alias
+    match_key = _metric_match_key(metric_raw)
+    for metric_hint in _normalized_metric_hints(metric_hints):
+        if match_key and match_key == _metric_match_key(metric_hint):
+            return _canonical_metric_alias(metric_hint) or metric_hint
+    return None
+
+
+def _canonical_metric_alias(metric_raw: str) -> str | None:
     normalized = "".join(
         character for character in metric_raw.lower() if character.isalnum()
     )
@@ -664,6 +701,87 @@ def canonicalize_metric_label(metric_raw: str | None) -> str | None:
         if (canonical := CANONICAL_METRIC_ALIASES.get(token)) is not None
     }
     return next(iter(token_candidates)) if len(token_candidates) == 1 else None
+
+
+def _metric_match_key(metric_raw: str) -> str:
+    tokens = re.findall(r"[a-z]+\d*|\d+", metric_raw.lower())
+    context_tokens = {
+        "cv",
+        "epoch",
+        "fold",
+        "local",
+        "oof",
+        "val",
+        "validation",
+    }
+    while tokens and (tokens[0] in context_tokens or tokens[0].isdigit()):
+        tokens.pop(0)
+    return "".join(tokens)
+
+
+def _normalized_metric_hints(metric_hints: Iterable[str]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            metric_hint.strip()
+            for metric_hint in metric_hints
+            if metric_hint and metric_hint.strip()
+        )
+    )
+
+
+def recanonicalize_score_observations(
+    notebooks: list[NotebookFacts],
+    *,
+    competition_metric_name: str | None,
+) -> list[NotebookFacts]:
+    metric_hints = _normalized_metric_hints(
+        metric_hint
+        for metric_hint in (
+            competition_metric_name,
+            *(metric.name for notebook in notebooks for metric in notebook.metrics),
+        )
+        if metric_hint is not None
+    )
+    canonicalized_notebooks: list[NotebookFacts] = []
+    for notebook in notebooks:
+        score_observations = [
+            observation.model_copy(
+                update={
+                    "metric_canonical": canonicalize_metric_label(
+                        observation.metric_raw,
+                        metric_hints=metric_hints,
+                    )
+                    or observation.metric_canonical
+                }
+            )
+            for observation in notebook.score_observations
+        ]
+        canonical_by_evidence = {
+            (observation.locator, observation.raw_text, observation.value): (
+                observation.metric_canonical
+            )
+            for observation in score_observations
+        }
+        declared_cv_observations = [
+            observation.model_copy(
+                update={
+                    "metric_name": canonical_by_evidence.get(
+                        (observation.locator, observation.raw_text, observation.value),
+                        observation.metric_name,
+                    )
+                }
+            )
+            for observation in notebook.declared_cv_observations
+        ]
+        canonicalized_notebooks.append(
+            notebook.model_copy(
+                update={
+                    "score_observations": score_observations,
+                    "declared_cv_observations": declared_cv_observations,
+                }
+            )
+        )
+    return canonicalized_notebooks
 
 
 def diagnose_scores(notebooks: list[NotebookFacts]) -> ScoreDiagnostics:
@@ -745,23 +863,30 @@ def _is_excluded_score_label(metric_raw: str | None) -> bool:
     )
 
 
-def _is_code_score_label(metric_raw: str) -> bool:
+def _is_code_score_label(
+    metric_raw: str,
+    *,
+    metric_hints: Iterable[str] = (),
+) -> bool:
     normalized = re.sub(r"[^a-z0-9]+", "_", metric_raw.lower()).strip("_")
     tokens = set(normalized.split("_"))
-    return bool(
-        tokens
-        & {
-            "cv",
-            "lb",
-            "local",
-            "metric",
-            "oof",
-            "private",
-            "public",
-            "score",
-            "val",
-            "validation",
-        }
+    return (
+        bool(
+            tokens
+            & {
+                "cv",
+                "lb",
+                "local",
+                "metric",
+                "oof",
+                "private",
+                "public",
+                "score",
+                "val",
+                "validation",
+            }
+        )
+        or canonicalize_metric_label(metric_raw, metric_hints=metric_hints) is not None
     )
 
 
@@ -770,17 +895,25 @@ def _is_text_score_position(
     value_raw: str,
     *,
     implicit: bool,
+    metric_hints: Iterable[str] = (),
 ) -> bool:
     if not metric_raw:
         return False
     has_context = _has_score_position_marker(metric_raw) or (
-        canonicalize_metric_label(metric_raw) is not None
+        canonicalize_metric_label(metric_raw, metric_hints=metric_hints) is not None
     )
     if implicit:
-        return has_context
+        return has_context or _looks_like_metric_identifier(metric_raw)
     normalized_value = value_raw.lower()
     return has_context or any(
         marker in normalized_value for marker in (".", "%", "e")
+    )
+
+
+def _looks_like_metric_identifier(metric_raw: str) -> bool:
+    return (
+        re.fullmatch(r"[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+", metric_raw)
+        is not None
     )
 
 

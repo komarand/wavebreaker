@@ -41,7 +41,9 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
         lambda slug, limit: calls.append("list_notebooks") or records,
     )
     monkeypatch.setattr(collect, "pull_notebook", _fake_pull)
-    monkeypatch.setattr(collect, "extract_observations", lambda path: _observations())
+    monkeypatch.setattr(
+        collect, "extract_observations", lambda path, **kwargs: _observations()
+    )
     monkeypatch.setattr(collect, "ast_fingerprint", lambda path: "a" * 64)
     real_assign = collect.assign_lineage_clusters
 
@@ -167,7 +169,9 @@ def test_single_notebook_pull_failure_does_not_drop_successful_notebooks(
         return None if ref.endswith("broken") else _fake_pull(ref, destination)
 
     monkeypatch.setattr(collect, "pull_notebook", pull)
-    monkeypatch.setattr(collect, "extract_observations", lambda path: _observations())
+    monkeypatch.setattr(
+        collect, "extract_observations", lambda path, **kwargs: _observations()
+    )
     monkeypatch.setattr(collect, "ast_fingerprint", lambda path: "b" * 64)
 
     facts = collect.collect_facts(
@@ -190,7 +194,9 @@ def test_title_and_ref_scores_are_collected_once_with_context(
         lambda slug, limit: [record],
     )
     monkeypatch.setattr(collect, "pull_notebook", _fake_pull)
-    monkeypatch.setattr(collect, "extract_observations", lambda path: _observations())
+    monkeypatch.setattr(
+        collect, "extract_observations", lambda path, **kwargs: _observations()
+    )
     monkeypatch.setattr(collect, "ast_fingerprint", lambda path: "f" * 64)
 
     facts = collect.collect_facts(
@@ -204,6 +210,30 @@ def test_title_and_ref_scores_are_collected_once_with_context(
     assert facts.score_diagnostics.observations_total == 1
     assert facts.score_diagnostics.title_or_ref_observations == 1
     assert facts.score_diagnostics.candidates_seen == 2
+
+
+def test_competition_metric_is_passed_to_notebook_score_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_successful_non_notebook_stages(monkeypatch)
+    monkeypatch.setattr(
+        collect,
+        "list_competition_notebooks",
+        lambda slug, limit: [_record("author/one")],
+    )
+    monkeypatch.setattr(collect, "pull_notebook", _fake_pull)
+    received_hints: list[tuple[str, ...]] = []
+
+    def extract(path: Path, *, metric_hints: tuple[str, ...]) -> dict[str, Any]:
+        received_hints.append(metric_hints)
+        return _observations()
+
+    monkeypatch.setattr(collect, "extract_observations", extract)
+    monkeypatch.setattr(collect, "ast_fingerprint", lambda path: "f" * 64)
+
+    collect.collect_facts("example", 1, 0, [], UserConstraints(), max_sample_sub_bytes=1000)
+
+    assert received_hints == [("roc_auc",)]
 
 
 def test_discussion_forbidden_is_recorded_without_failing_collection(
@@ -273,7 +303,9 @@ def test_notebook_work_is_concurrent_and_bounded_to_four(
         return path
 
     monkeypatch.setattr(collect, "pull_notebook", pull)
-    monkeypatch.setattr(collect, "extract_observations", lambda path: _observations())
+    monkeypatch.setattr(
+        collect, "extract_observations", lambda path, **kwargs: _observations()
+    )
     monkeypatch.setattr(collect, "ast_fingerprint", lambda path: "c" * 64)
 
     facts = collect.collect_facts("example", 8, 0, [], UserConstraints(), 1000)
@@ -294,7 +326,9 @@ def test_concurrency_one_collects_multiple_notebooks_without_hanging(
         lambda slug, limit: records,
     )
     monkeypatch.setattr(collect, "pull_notebook", _fake_pull)
-    monkeypatch.setattr(collect, "extract_observations", lambda path: _observations())
+    monkeypatch.setattr(
+        collect, "extract_observations", lambda path, **kwargs: _observations()
+    )
     monkeypatch.setattr(collect, "ast_fingerprint", lambda path: "d" * 64)
 
     facts = collect.collect_facts("example", 3, 0, [], UserConstraints(), 1000)
@@ -328,7 +362,7 @@ def test_download_semaphore_is_not_reacquired_for_ast_analysis(
         calls.append("pull")
         return _fake_pull(ref, destination)
 
-    def extract(path: Path) -> dict[str, Any]:
+    def extract(path: Path, **kwargs: Any) -> dict[str, Any]:
         calls.append("extract")
         return _observations()
 

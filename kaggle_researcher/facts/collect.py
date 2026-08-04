@@ -28,6 +28,7 @@ from kaggle_researcher.facts.notebook_ast import (
     diagnose_scores,
     extract_observations,
     extract_score_observations,
+    recanonicalize_score_observations,
 )
 from kaggle_researcher.facts.notebooks import list_competition_notebooks, pull_notebook
 
@@ -70,6 +71,11 @@ def collect_facts(
         slug=slug,
         max_notebooks=max_notebooks,
         collection_errors=collection_errors,
+        competition_metric_name=metadata.metric_name,
+    )
+    notebooks = recanonicalize_score_observations(
+        notebooks,
+        competition_metric_name=metadata.metric_name,
     )
     try:
         notebooks = assign_lineage_clusters(notebooks)
@@ -145,6 +151,7 @@ def _collect_notebooks(
     slug: str,
     max_notebooks: int,
     collection_errors: list[str],
+    competition_metric_name: str | None = None,
 ) -> list[NotebookFacts]:
     try:
         notebook_records = list_competition_notebooks(slug, max_notebooks)
@@ -160,6 +167,7 @@ def _collect_notebooks(
                 notebook_records,
                 Path(temp_dir),
                 collection_errors,
+                competition_metric_name,
             )
         )
 
@@ -168,6 +176,7 @@ async def _collect_notebooks_async(
     notebook_records: list[dict[str, Any]],
     temp_dir: Path,
     collection_errors: list[str],
+    competition_metric_name: str | None = None,
 ) -> list[NotebookFacts]:
     semaphore = asyncio.Semaphore(NOTEBOOK_CONCURRENCY)
     tasks = [
@@ -175,6 +184,7 @@ async def _collect_notebooks_async(
             record=record,
             destination=temp_dir / f"notebook_{index:04d}",
             semaphore=semaphore,
+            competition_metric_name=competition_metric_name,
         )
         for index, record in enumerate(notebook_records)
     ]
@@ -193,6 +203,7 @@ async def _collect_one_notebook(
     record: dict[str, Any],
     destination: Path,
     semaphore: asyncio.Semaphore,
+    competition_metric_name: str | None = None,
 ) -> NotebookFacts | str:
     ref = str(record.get("ref") or "<unknown>")
     try:
@@ -207,9 +218,10 @@ async def _collect_one_notebook(
         observations, fingerprint = await asyncio.to_thread(
             _analyze_downloaded_notebook,
             notebook_path,
+            competition_metric_name,
         )
-        context_scores, context_candidates, context_excluded = (
-            _notebook_context_scores(record)
+        context_scores, context_candidates, context_excluded = _notebook_context_scores(
+            record, competition_metric_name
         )
         return NotebookFacts(
             ref=ref,
@@ -249,14 +261,20 @@ async def _collect_one_notebook(
 
 def _analyze_downloaded_notebook(
     notebook_path: Path,
+    competition_metric_name: str | None = None,
 ) -> tuple[dict[str, Any], str]:
-    observations = extract_observations(notebook_path)
+    metric_hints = (competition_metric_name,) if competition_metric_name is not None else ()
+    observations = extract_observations(
+        notebook_path,
+        metric_hints=metric_hints,
+    )
     fingerprint = ast_fingerprint(notebook_path)
     return observations, fingerprint
 
 
 def _notebook_context_scores(
     record: dict[str, Any],
+    competition_metric_name: str | None = None,
 ) -> tuple[list[ScoreObservation], int, int]:
     observations: list[ScoreObservation] = []
     candidates_seen = 0
@@ -272,6 +290,9 @@ def _notebook_context_scores(
             text,
             locator=source,
             source=source,
+            metric_hints=(
+                (competition_metric_name,) if competition_metric_name is not None else ()
+            ),
         )
         candidates_seen += source_candidates
         candidates_excluded += source_excluded
