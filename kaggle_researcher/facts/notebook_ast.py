@@ -8,7 +8,7 @@ import math
 import re
 import tokenize
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -18,6 +18,7 @@ from kaggle_researcher.facts.models import (
     NotebookFacts,
     ScoreDiagnostics,
     ScoreObservation,
+    ScoreSplit,
 )
 
 SPLITTER_NAMES = {
@@ -97,8 +98,7 @@ MODEL_KWARGS = {
 }
 _NUMBER_PATTERN = r"[-+]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?%?"
 SCORE_EXPLICIT_PATTERN = re.compile(
-    rf"(?P<label>[A-Za-z][A-Za-z0-9_./ -]{{0,48}}?)\s*(?::|=)\s*"
-    rf"(?P<value>{_NUMBER_PATTERN})"
+    rf"(?P<label>[A-Za-z][A-Za-z0-9_./ -]{{0,48}}?)\s*(?::|=)\s*" rf"(?P<value>{_NUMBER_PATTERN})"
 )
 SCORE_ADJACENT_PATTERN = re.compile(
     r"(?P<label>[A-Za-z][A-Za-z0-9_.-]*"
@@ -106,11 +106,38 @@ SCORE_ADJACENT_PATTERN = re.compile(
     rf"(?P<value>{_NUMBER_PATTERN})"
 )
 ENCODED_TITLE_SCORE_PATTERN = re.compile(
-    r"^(?:(?P<decimal>0\.\d+)|0[-_](?P<fraction>\d{2,4}))(?:\b|[-_ ])"
+    r"(?<!\d)(?:(?P<decimal>0\.\d+)|0[-_](?P<fraction>\d{2,4}))(?:\b|[-_ ])"
 )
 VALIDATION_CONTEXT_PATTERN = re.compile(
-    r"(?<![a-z0-9])(?:cv|oof|local|fold|validation|val)(?:\b|_)",
+    r"(?<![a-z0-9])(?:cv|oof|local|fold|validation|valid|val|holdout|offline|"
+    r"cross[-_ ]validation)(?![a-z0-9])",
     re.IGNORECASE,
+)
+LEADERBOARD_CONTEXT_PATTERN = re.compile(
+    r"(?<![a-z0-9])(?:lb|leaderboard|public|private|submission|online|"
+    r"public[-_ ]score|private[-_ ]score|public[-_ ]lb|private[-_ ]lb)"
+    r"(?![a-z0-9])",
+    re.IGNORECASE,
+)
+_CV_SPLIT_SIGNALS = (
+    ("cv", re.compile(r"\bcv\b")),
+    ("oof", re.compile(r"\boof\b")),
+    ("local", re.compile(r"\blocal\b")),
+    ("fold", re.compile(r"\bfold\b")),
+    ("validation", re.compile(r"\bvalidation\b")),
+    ("valid", re.compile(r"\bvalid\b")),
+    ("val", re.compile(r"\bval\b")),
+    ("holdout", re.compile(r"\bholdout\b")),
+    ("offline", re.compile(r"\boffline\b")),
+    ("cross-validation", re.compile(r"\bcross validation\b")),
+)
+_LB_SPLIT_SIGNALS = (
+    ("lb", re.compile(r"\blb\b")),
+    ("leaderboard", re.compile(r"\bleaderboard\b")),
+    ("public", re.compile(r"\bpublic\b")),
+    ("private", re.compile(r"\bprivate\b")),
+    ("submission", re.compile(r"\bsubmission\b")),
+    ("online", re.compile(r"\bonline\b")),
 )
 EXCLUDED_SCORE_LABELS = frozenset(
     {
@@ -415,9 +442,7 @@ def _strip_magics(source: str) -> str:
 
     stripped_lines: list[str] = []
     for line_number, line in enumerate(source.splitlines(keepends=True), start=1):
-        if line_number in string_lines or not line.lstrip().startswith(
-            ("!", "%", "%%")
-        ):
+        if line_number in string_lines or not line.lstrip().startswith(("!", "%", "%%")):
             stripped_lines.append(line)
             continue
         if line.endswith("\r\n"):
@@ -513,10 +538,7 @@ def extract_score_observations(
         (SCORE_ADJACENT_PATTERN, True),
     ):
         for match in pattern.finditer(text):
-            if any(
-                match.start() < end and match.end() > start
-                for start, end in occupied_ranges
-            ):
+            if any(match.start() < end and match.end() > start for start, end in occupied_ranges):
                 continue
             occupied_ranges.append(match.span())
             candidates_seen += 1
@@ -534,6 +556,7 @@ def extract_score_observations(
             if value is None:
                 candidates_excluded += 1
                 continue
+            raw_text = " ".join(match.group(0).strip().split())
             observations.append(
                 ScoreObservation(
                     value=value,
@@ -544,8 +567,10 @@ def extract_score_observations(
                         metric_hints=metric_hints,
                     ),
                     locator=locator,
-                    raw_text=" ".join(match.group(0).strip().split()),
+                    raw_text=raw_text,
                     source=source,
+                    source_kind=source,
+                    context_text=_score_context(text, match.start(), match.end()),
                 )
             )
 
@@ -564,10 +589,21 @@ def extract_score_observations(
                     locator=locator,
                     raw_text=title_match.group(0).rstrip("-_"),
                     source=source,
+                    source_kind=source,
+                    context_text=" ".join(text.strip().split())[:320],
                 )
             )
 
     return observations, candidates_seen, candidates_excluded
+
+
+def _score_context(text: str, start: int, end: int) -> str:
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end < 0:
+        line_end = len(text)
+    context = text[line_start:line_end]
+    return " ".join(context.strip().split())[:320]
 
 
 def _code_score_observations(
@@ -628,6 +664,8 @@ def _code_score_observations(
                 locator=locator,
                 raw_text=compact_text[:160],
                 source="code",
+                source_kind="code",
+                context_text=compact_text[:320],
             )
         )
     return observations, candidates_seen, candidates_excluded
@@ -683,9 +721,7 @@ def canonicalize_metric_label(
 
 
 def _canonical_metric_alias(metric_raw: str) -> str | None:
-    normalized = "".join(
-        character for character in metric_raw.lower() if character.isalnum()
-    )
+    normalized = "".join(character for character in metric_raw.lower() if character.isalnum())
     for prefix in ("validation", "local", "oof", "fold", "val", "cv"):
         if normalized.startswith(prefix):
             normalized = normalized[len(prefix) :]
@@ -729,6 +765,103 @@ def _normalized_metric_hints(metric_hints: Iterable[str]) -> tuple[str, ...]:
     )
 
 
+def classify_score_split(
+    *,
+    source_kind: str,
+    context_text: str,
+    context_signals: Sequence[str],
+    metric_raw: str | None,
+    locator: str,
+) -> tuple[ScoreSplit, list[str]]:
+    primary_text = " ".join(
+        part
+        for part in (
+            metric_raw or "",
+            " ".join(context_signals),
+        )
+        if part
+    )
+    primary_cv, primary_lb = _score_split_signals(primary_text)
+    if primary_cv or primary_lb:
+        context_cv, context_lb = _score_split_signals(context_text)
+        return _split_from_signals(
+            list(dict.fromkeys([*context_cv, *primary_cv])),
+            list(dict.fromkeys([*context_lb, *primary_lb])),
+        )
+
+    context_has_multiple_values = len(list(SCORE_EXPLICIT_PATTERN.finditer(context_text))) > 1
+    context_cv, context_lb = (
+        ([], [])
+        if context_has_multiple_values
+        else _score_split_signals(" ".join((context_text, locator)))
+    )
+    if context_cv or context_lb:
+        return _split_from_signals(context_cv, context_lb)
+    if source_kind in {"title", "ref", "notebook_title", "notebook_ref"}:
+        return "lb", [f"source:{source_kind}"]
+    return "unknown", []
+
+
+def _score_split_signals(searchable: str) -> tuple[list[str], list[str]]:
+    searchable = searchable.lower()
+    searchable = re.sub(r"[-_/]+", " ", searchable)
+    searchable = re.sub(r"\s+", " ", searchable)
+    cv_signals = [name for name, pattern in _CV_SPLIT_SIGNALS if pattern.search(searchable)]
+    lb_signals = [name for name, pattern in _LB_SPLIT_SIGNALS if pattern.search(searchable)]
+    return cv_signals, lb_signals
+
+
+def _split_from_signals(
+    cv_signals: list[str],
+    lb_signals: list[str],
+) -> tuple[ScoreSplit, list[str]]:
+    signals = list(dict.fromkeys([*cv_signals, *lb_signals]))
+    if cv_signals and not lb_signals:
+        return "cv", signals
+    if lb_signals and not cv_signals:
+        return "lb", signals
+    if cv_signals and lb_signals:
+        return "unknown", signals
+    return "unknown", []
+
+
+def metric_optimization_direction(
+    metric_name: str | None,
+) -> Literal["maximize", "minimize"] | None:
+    canonical = canonicalize_metric_label(metric_name) or (
+        metric_name.strip().lower() if metric_name else None
+    )
+    if canonical in {"log_loss", "logloss", "mae", "mse", "rmse", "mape"}:
+        return "minimize"
+    if canonical in {
+        "accuracy",
+        "f1",
+        "mAP",
+        "map",
+        "rank-1",
+        "roc_auc",
+        "r2",
+        "ndcg",
+    }:
+        return "maximize"
+    return None
+
+
+def _score_observation_id(notebook_ref: str, observation: ScoreObservation) -> str:
+    identity = "\x1f".join(
+        (
+            notebook_ref,
+            observation.source_kind or observation.source,
+            observation.locator,
+            observation.value_raw,
+            observation.metric_raw or "",
+            observation.raw_text,
+        )
+    )
+    digest = hashlib.sha256(identity.encode()).hexdigest()[:20]
+    return f"score-observation:{digest}"
+
+
 def recanonicalize_score_observations(
     notebooks: list[NotebookFacts],
     *,
@@ -744,39 +877,82 @@ def recanonicalize_score_observations(
     )
     canonicalized_notebooks: list[NotebookFacts] = []
     for notebook in notebooks:
-        score_observations = [
-            observation.model_copy(
+        score_observations: list[ScoreObservation] = []
+        for observation in notebook.score_observations:
+            metric_canonical = (
+                canonicalize_metric_label(
+                    observation.metric_raw,
+                    metric_hints=metric_hints,
+                )
+                or observation.metric_canonical
+            )
+            split, split_signals = classify_score_split(
+                source_kind=observation.source_kind or observation.source,
+                context_text=observation.context_text or observation.raw_text,
+                context_signals=[],
+                metric_raw=observation.metric_raw,
+                locator=observation.locator,
+            )
+            updated = observation.model_copy(
                 update={
-                    "metric_canonical": canonicalize_metric_label(
-                        observation.metric_raw,
-                        metric_hints=metric_hints,
-                    )
-                    or observation.metric_canonical
+                    "metric_canonical": metric_canonical,
+                    "split": split,
+                    "split_signals": split_signals,
+                    "source_kind": observation.source_kind or observation.source,
+                    "optimization_direction": metric_optimization_direction(
+                        metric_canonical or observation.metric_raw
+                    ),
                 }
             )
-            for observation in notebook.score_observations
-        ]
+            score_observations.append(
+                updated.model_copy(
+                    update={
+                        "observation_id": observation.observation_id
+                        or _score_observation_id(notebook.ref, updated)
+                    }
+                )
+            )
         canonical_by_evidence = {
             (observation.locator, observation.raw_text, observation.value): (
                 observation.metric_canonical
             )
             for observation in score_observations
         }
-        declared_cv_observations = [
-            observation.model_copy(
-                update={
-                    "metric_name": canonical_by_evidence.get(
-                        (observation.locator, observation.raw_text, observation.value),
-                        observation.metric_name,
-                    )
-                }
-            )
-            for observation in notebook.declared_cv_observations
+        cv_score_observations = [
+            observation for observation in score_observations if observation.split == "cv"
         ]
+        if cv_score_observations:
+            declared_cv: list[str] = []
+            declared_cv_observations: list[DeclaredCvObservation] = []
+            seen_cv: set[str] = set()
+            _append_declared_cv_from_scores(
+                cv_score_observations,
+                declared_cv,
+                seen_cv,
+                declared_cv_observations,
+            )
+        else:
+            declared_cv = notebook.declared_cv
+            declared_cv_observations = [
+                observation.model_copy(
+                    update={
+                        "metric_name": canonical_by_evidence.get(
+                            (
+                                observation.locator,
+                                observation.raw_text,
+                                observation.value,
+                            ),
+                            observation.metric_name,
+                        )
+                    }
+                )
+                for observation in notebook.declared_cv_observations
+            ]
         canonicalized_notebooks.append(
             notebook.model_copy(
                 update={
                     "score_observations": score_observations,
+                    "declared_cv": declared_cv,
                     "declared_cv_observations": declared_cv_observations,
                 }
             )
@@ -786,9 +962,7 @@ def recanonicalize_score_observations(
 
 def diagnose_scores(notebooks: list[NotebookFacts]) -> ScoreDiagnostics:
     observations = [
-        observation
-        for notebook in notebooks
-        for observation in notebook.score_observations
+        observation for notebook in notebooks for observation in notebook.score_observations
     ]
     return ScoreDiagnostics(
         notebooks_total=len(notebooks),
@@ -809,8 +983,22 @@ def diagnose_scores(notebooks: list[NotebookFacts]) -> ScoreDiagnostics:
             observation.source in {"title", "ref"} for observation in observations
         ),
         candidates_seen=sum(notebook.score_candidates_seen for notebook in notebooks),
-        candidates_excluded=sum(
-            notebook.score_candidates_excluded for notebook in notebooks
+        candidates_excluded=sum(notebook.score_candidates_excluded for notebook in notebooks),
+        split_cv=sum(observation.split == "cv" for observation in observations),
+        split_lb=sum(observation.split == "lb" for observation in observations),
+        split_unknown=sum(observation.split == "unknown" for observation in observations),
+        notebooks_with_cv_scores=sum(
+            any(observation.split == "cv" for observation in notebook.score_observations)
+            for notebook in notebooks
+        ),
+        notebooks_with_lb_scores=sum(
+            any(observation.split == "lb" for observation in notebook.score_observations)
+            for notebook in notebooks
+        ),
+        notebooks_with_both_sides=sum(
+            any(observation.split == "cv" for observation in notebook.score_observations)
+            and any(observation.split == "lb" for observation in notebook.score_observations)
+            for notebook in notebooks
         ),
     )
 
@@ -822,7 +1010,12 @@ def _append_declared_cv_from_scores(
     observations: list[DeclaredCvObservation],
 ) -> None:
     for score_observation in score_observations:
-        if not VALIDATION_CONTEXT_PATTERN.search(score_observation.raw_text):
+        has_legacy_cv_signal = VALIDATION_CONTEXT_PATTERN.search(
+            score_observation.context_text or score_observation.raw_text
+        )
+        if score_observation.split != "cv" and not (
+            score_observation.split == "unknown" and has_legacy_cv_signal
+        ):
             continue
         score = (
             f"{score_observation.value:.12g}"
@@ -905,23 +1098,19 @@ def _is_text_score_position(
     if implicit:
         return has_context or _looks_like_metric_identifier(metric_raw)
     normalized_value = value_raw.lower()
-    return has_context or any(
-        marker in normalized_value for marker in (".", "%", "e")
-    )
+    return has_context or any(marker in normalized_value for marker in (".", "%", "e"))
 
 
 def _looks_like_metric_identifier(metric_raw: str) -> bool:
-    return (
-        re.fullmatch(r"[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+", metric_raw)
-        is not None
-    )
+    return re.fullmatch(r"[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+", metric_raw) is not None
 
 
 def _has_score_position_marker(metric_raw: str) -> bool:
     tokens = re.findall(r"[a-z]+\d*", metric_raw.lower())
     position_tokens = tokens[-2:]
     return any(
-        token in {
+        token
+        in {
             "cv",
             "lb",
             "local",

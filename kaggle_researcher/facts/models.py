@@ -6,6 +6,8 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 MIN_LEADERBOARD_MATCH_FRACTION = 0.60
+ScoreSplit = Literal["cv", "lb", "unknown"]
+OptimizationDirection = Literal["maximize", "minimize"]
 
 
 class CodeObservation(BaseModel):
@@ -29,6 +31,13 @@ class ScoreObservation(BaseModel):
     locator: str
     raw_text: str
     source: Literal["markdown", "code", "code_string", "title", "ref"]
+    split: ScoreSplit = "unknown"
+    split_signals: list[str] = Field(default_factory=list)
+    observation_id: str | None = None
+    optimization_direction: OptimizationDirection | None = None
+    source_kind: str | None = None
+    context_text: str = ""
+    context_signals: list[str] = Field(default_factory=list)
 
 
 class CompetitionMetadata(BaseModel):
@@ -185,6 +194,25 @@ class CvLbPair(BaseModel):
     public_score: float
     lineage_cluster_id: str
     metric_name: str | None = None
+    metric_raw: str | None = None
+    metric_canonical: str | None = None
+    optimization_direction: OptimizationDirection | None = None
+    cv_score: float | None = None
+    lb_score: float | None = None
+    cv_observation_ids: list[str] = Field(default_factory=list)
+    lb_observation_ids: list[str] = Field(default_factory=list)
+    cv_representative_observation_id: str | None = None
+    lb_representative_observation_id: str | None = None
+    cv_source: str = "declared_cv_legacy"
+    lb_source: str = "public_score_api"
+    cv_aggregation: str = "legacy"
+    lb_aggregation: str = "single"
+    cv_selection_reason: str | None = None
+    lb_selection_reason: str | None = None
+    gap: float | None = None
+    absolute_gap: float | None = None
+    comparability_status: str = "comparable"
+    comparability_reason: str | None = None
 
 
 class CvLbDiagnostics(BaseModel):
@@ -195,6 +223,20 @@ class CvLbDiagnostics(BaseModel):
     comparable_pairs: int = 0
     rejected_non_comparable_pairs: int = 0
     zero_pairs_reason: str | None = None
+    notebooks_with_cv_scores: int = 0
+    notebooks_with_lb_scores: int = 0
+    notebooks_with_both_sides: int = 0
+    pairs_created: int = 0
+    pairs_created_from_api_lb: int = 0
+    pairs_created_from_observation_lb: int = 0
+    pairs_rejected_missing_cv: int = 0
+    pairs_rejected_missing_lb: int = 0
+    pairs_rejected_metric_mismatch: int = 0
+    pairs_rejected_scale_mismatch: int = 0
+    pairs_rejected_ambiguous_metric: int = 0
+    pairs_rejected_ambiguous_split: int = 0
+    fold_series_aggregated: int = 0
+    unknown_direction_fallbacks: int = 0
 
 
 class ScoreDiagnostics(BaseModel):
@@ -207,6 +249,12 @@ class ScoreDiagnostics(BaseModel):
     title_or_ref_observations: int = 0
     candidates_seen: int = 0
     candidates_excluded: int = 0
+    split_cv: int = 0
+    split_lb: int = 0
+    split_unknown: int = 0
+    notebooks_with_cv_scores: int = 0
+    notebooks_with_lb_scores: int = 0
+    notebooks_with_both_sides: int = 0
 
 
 class UserConstraints(BaseModel):

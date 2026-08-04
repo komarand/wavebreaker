@@ -63,7 +63,18 @@ def test_wave_facts_writes_offline_checkpoint_and_cluster_summary(
     assert writeup_limits == [4]
     assert payload["collection_errors"] == []
     assert payload["discussion_collection_status"] == "collected"
-    assert payload["cv_lb_diagnostics"] == {
+    assert {
+        key: payload["cv_lb_diagnostics"][key]
+        for key in (
+            "notebooks_total",
+            "notebooks_with_public_score",
+            "notebooks_with_declared_cv",
+            "notebooks_with_both",
+            "comparable_pairs",
+            "rejected_non_comparable_pairs",
+            "zero_pairs_reason",
+        )
+    } == {
         "notebooks_total": 2,
         "notebooks_with_public_score": 2,
         "notebooks_with_declared_cv": 2,
@@ -87,6 +98,10 @@ def test_wave_facts_writes_offline_checkpoint_and_cluster_summary(
     assert "cv observations: 2" in output
     assert "comparable cv/lb pairs: 2" in output
     assert "discussion status: collected" in output
+    assert "notebooks with CV: 2" in output
+    assert "notebooks with LB: 2" in output
+    assert "cv/lb pairs: 2" in output
+    assert "  API LB: 2" in output
 
 
 def test_wave_facts_writes_checkpoint_after_stage_three_failure(

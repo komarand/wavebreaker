@@ -87,7 +87,11 @@ def collect_facts(
     except Exception as exc:
         collection_errors.append(_stage_error("CV/LB pairing", exc))
         cv_lb_pairs = []
-    cv_lb_diagnostics = diagnose_cv_lb(notebooks, cv_lb_pairs)
+    cv_lb_diagnostics = diagnose_cv_lb(
+        notebooks,
+        cv_lb_pairs,
+        metadata.metric_name,
+    )
     score_diagnostics = diagnose_scores(notebooks)
 
     discussions = []

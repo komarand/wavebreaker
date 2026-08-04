@@ -280,10 +280,19 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
     print(f"cv observations: {diagnostics.notebooks_with_declared_cv}")
     print(f"notebooks with both: {diagnostics.notebooks_with_both}")
     print(f"comparable cv/lb pairs: {diagnostics.comparable_pairs}")
+    print(f"notebooks with CV: {diagnostics.notebooks_with_cv_scores}")
+    print(f"notebooks with LB: {diagnostics.notebooks_with_lb_scores}")
+    print(f"notebooks with both sides: {diagnostics.notebooks_with_both_sides}")
+    print(f"cv/lb pairs: {diagnostics.pairs_created}")
+    print(f"  API LB: {diagnostics.pairs_created_from_api_lb}")
+    print(f"  observation LB: {diagnostics.pairs_created_from_observation_lb}")
     if diagnostics.zero_pairs_reason:
         print(f"cv/lb diagnostic: {diagnostics.zero_pairs_reason}")
     score_diagnostics = facts.score_diagnostics
     print(f"score observations: {score_diagnostics.observations_total}")
+    print(f"  cv: {score_diagnostics.split_cv}")
+    print(f"  lb: {score_diagnostics.split_lb}")
+    print(f"  unknown: {score_diagnostics.split_unknown}")
     print(
         "notebooks with score observations: "
         f"{score_diagnostics.notebooks_with_score_observations}"
@@ -295,6 +304,16 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
     )
     print("title/ref score observations: " f"{score_diagnostics.title_or_ref_observations}")
     print(f"excluded score candidates: {score_diagnostics.candidates_excluded}")
+    if not facts.cv_lb_pairs:
+        print(
+            "cv/lb rejections: "
+            f"missing_cv={diagnostics.pairs_rejected_missing_cv}, "
+            f"missing_lb={diagnostics.pairs_rejected_missing_lb}, "
+            f"metric_mismatch={diagnostics.pairs_rejected_metric_mismatch}, "
+            f"ambiguous_metric={diagnostics.pairs_rejected_ambiguous_metric}, "
+            f"scale_mismatch={diagnostics.pairs_rejected_scale_mismatch}, "
+            f"ambiguous_split={diagnostics.pairs_rejected_ambiguous_split}"
+        )
     competition_discussions = [
         discussion
         for discussion in facts.discussions

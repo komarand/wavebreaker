@@ -12,6 +12,7 @@ from kaggle_researcher.facts.models import (
     FileManifest,
     LeaderboardStability,
     NotebookFacts,
+    ScoreSplit,
     UserConstraints,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "FileManifest",
     "LeaderboardStability",
     "NotebookFacts",
+    "ScoreSplit",
     "UserConstraints",
 ]

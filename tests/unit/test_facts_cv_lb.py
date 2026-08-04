@@ -17,6 +17,7 @@ from kaggle_researcher.facts.models import (
     CvLbPair,
     DeclaredCvObservation,
     NotebookFacts,
+    ScoreObservation,
 )
 
 
@@ -28,19 +29,11 @@ def test_build_pairs_uses_first_declared_cv_and_preserves_notebook_order() -> No
 
     pairs = build_cv_lb_pairs(notebooks)
 
-    assert pairs == [
-        CvLbPair(
-            notebook_ref="author/first",
-            declared_cv=0.8123,
-            public_score=0.8,
-            lineage_cluster_id="lc_a",
-        ),
-        CvLbPair(
-            notebook_ref="author/second",
-            declared_cv=0.745,
-            public_score=0.75,
-            lineage_cluster_id="lc_b",
-        ),
+    assert [
+        (pair.notebook_ref, pair.declared_cv, pair.public_score, pair.cv_source) for pair in pairs
+    ] == [
+        ("author/first", 0.8123, 0.8, "declared_cv_legacy"),
+        ("author/second", 0.745, 0.75, "declared_cv_legacy"),
     ]
 
 
@@ -53,14 +46,12 @@ def test_build_pairs_filters_invalid_values_before_selecting_cv() -> None:
         _notebook("author/infinite-lb", ["0.8"], float("inf"), "lc_e"),
     ]
 
-    assert build_cv_lb_pairs(notebooks) == [
-        CvLbPair(
-            notebook_ref="author/bad-first",
-            declared_cv=0.8,
-            public_score=0.75,
-            lineage_cluster_id="lc_c",
-        )
-    ]
+    pairs = build_cv_lb_pairs(notebooks)
+
+    assert len(pairs) == 1
+    assert pairs[0].notebook_ref == "author/bad-first"
+    assert pairs[0].declared_cv == pytest.approx(0.8)
+    assert pairs[0].public_score == pytest.approx(0.75)
 
 
 @pytest.mark.parametrize(
@@ -85,9 +76,7 @@ def test_select_declared_cv(values: list[object], expected: float | None) -> Non
 
 
 def test_build_pairs_uses_median_for_long_fold_like_list() -> None:
-    notebook = _notebook(
-        "author/folds", ["0.70", "bad", "0.72", "0.74", "9.0"], 0.71, "lc_a"
-    )
+    notebook = _notebook("author/folds", ["0.70", "bad", "0.72", "0.74", "9.0"], 0.71, "lc_a")
 
     assert build_cv_lb_pairs([notebook])[0].declared_cv == pytest.approx(0.73)
 
@@ -124,7 +113,7 @@ def test_diagnostics_count_public_cv_both_and_rejected_separately() -> None:
     notebooks = [public_only, cv_only, incompatible]
     pairs = build_cv_lb_pairs(notebooks, "mAP")
 
-    diagnostics = diagnose_cv_lb(notebooks, pairs)
+    diagnostics = diagnose_cv_lb(notebooks, pairs, "mAP")
 
     assert diagnostics.notebooks_total == 3
     assert diagnostics.notebooks_with_public_score == 2
@@ -132,9 +121,9 @@ def test_diagnostics_count_public_cv_both_and_rejected_separately() -> None:
     assert diagnostics.notebooks_with_both == 1
     assert diagnostics.comparable_pairs == 0
     assert diagnostics.rejected_non_comparable_pairs == 1
-    assert diagnostics.zero_pairs_reason == (
-        "CV and leaderboard metrics are not comparable."
-    )
+    assert diagnostics.zero_pairs_reason is not None
+    assert "metric mismatch: 1" in diagnostics.zero_pairs_reason
+    assert "missing CV side: 1" in diagnostics.zero_pairs_reason
 
 
 def test_summary_returns_none_statistics_for_empty_pairs() -> None:
@@ -217,12 +206,7 @@ def test_module_imports_when_scipy_is_unavailable(
     module = importlib.import_module("kaggle_researcher.facts.cv_lb")
 
     importlib.reload(module)
-    module_path = (
-        Path(__file__).resolve().parents[2]
-        / "kaggle_researcher"
-        / "facts"
-        / "cv_lb.py"
-    )
+    module_path = Path(__file__).resolve().parents[2] / "kaggle_researcher" / "facts" / "cv_lb.py"
 
     assert "scipy" not in module_path.read_text(encoding="utf-8")
 
@@ -240,18 +224,225 @@ def test_summary_constant_values_produce_no_spearman_number() -> None:
 def test_module_has_no_text_output_or_pipeline_dependencies() -> None:
     from pathlib import Path
 
-    module_path = (
-        Path(__file__).resolve().parents[2]
-        / "kaggle_researcher"
-        / "facts"
-        / "cv_lb.py"
-    )
+    module_path = Path(__file__).resolve().parents[2] / "kaggle_researcher" / "facts" / "cv_lb.py"
     source = module_path.read_text(encoding="utf-8")
 
     assert "print(" not in source
     assert "logging" not in source
     for forbidden in ("deepseek_client", "retriever", "embedder", "store"):
         assert forbidden not in source
+
+
+def test_observation_pair_requires_same_notebook_and_compatible_metric() -> None:
+    first = _notebook("author/first", [], None, "lc_a")
+    first.score_observations = [
+        _score("cv-1", 0.80, "cv", "mAP"),
+        _score("lb-1", 0.82, "lb", "mAP", source="title"),
+    ]
+    second = _notebook("author/second", [], None, "lc_b")
+    second.score_observations = [_score("cv-2", 0.7, "cv", "accuracy")]
+
+    pairs = build_cv_lb_pairs([second, first], "mAP")
+
+    assert len(pairs) == 1
+    pair = pairs[0]
+    assert pair.notebook_ref == "author/first"
+    assert pair.cv_source == "score_observation"
+    assert pair.lb_source == "score_observation_title"
+    assert pair.cv_observation_ids == ["cv-1"]
+    assert pair.lb_observation_ids == ["lb-1"]
+    assert pair.metric_canonical == "mAP"
+
+
+def test_different_metrics_and_unknown_splits_do_not_pair() -> None:
+    mismatch = _notebook("author/mismatch", [], None, "lc_a")
+    mismatch.score_observations = [
+        _score("cv-map", 0.8, "cv", "mAP"),
+        _score("lb-acc", 0.8, "lb", "accuracy"),
+    ]
+    unknown = _notebook("author/unknown", [], None, "lc_b")
+    unknown.score_observations = [
+        _score("unknown", 0.8, "unknown", "mAP"),
+        _score("lb", 0.81, "lb", "mAP"),
+    ]
+
+    assert build_cv_lb_pairs([mismatch, unknown], "mAP") == []
+    diagnostics = diagnose_cv_lb([mismatch, unknown], [], "mAP")
+    assert diagnostics.pairs_rejected_metric_mismatch == 1
+    assert diagnostics.pairs_rejected_missing_cv == 1
+    assert diagnostics.pairs_rejected_ambiguous_split == 1
+
+
+def test_matching_normalized_raw_metric_creates_pair() -> None:
+    notebook = _notebook("author/raw", [], None, "lc")
+    notebook.score_observations = [
+        _score("cv", 2.0, "cv", None, metric_raw="Custom Quality"),
+        _score("lb", 3.0, "lb", None, metric_raw="custom-quality"),
+    ]
+
+    pair = build_cv_lb_pairs([notebook])[0]
+
+    assert pair.metric_raw in {"Custom Quality", "custom-quality"}
+    assert pair.cv_score == pytest.approx(2.0)
+    assert pair.lb_score == pytest.approx(3.0)
+    assert pair.cv_selection_reason == "unknown_direction_max_fallback"
+
+
+def test_api_public_score_has_priority_over_author_reported_lb() -> None:
+    notebook = _notebook("author/api", ["0.70"], 0.81, "lc")
+    notebook.score_observations = [
+        _score("cv", 0.80, "cv", "mAP"),
+        _score("title", 0.99, "lb", "mAP", source="title"),
+    ]
+
+    pair = build_cv_lb_pairs([notebook], "mAP")[0]
+
+    assert pair.declared_cv == pytest.approx(0.80)
+    assert pair.public_score == pytest.approx(0.81)
+    assert pair.cv_source == "score_observation"
+    assert pair.lb_source == "public_score_api"
+    assert pair.lb_observation_ids == []
+
+
+def test_legacy_declared_cv_and_public_score_remain_fallbacks() -> None:
+    notebook = _notebook("author/legacy", ["0.72"], 0.70, "lc")
+
+    pair = build_cv_lb_pairs([notebook])[0]
+
+    assert pair.cv_source == "declared_cv_legacy"
+    assert pair.lb_source == "public_score_api"
+    assert pair.declared_cv == pytest.approx(0.72)
+    assert pair.public_score == pytest.approx(0.70)
+
+
+@pytest.mark.parametrize(
+    ("metric", "cv_values", "lb_values", "expected_cv", "expected_lb"),
+    [
+        ("roc_auc", [0.80, 0.82], [0.81, 0.84], 0.82, 0.84),
+        ("rmse", [1.4, 1.2], [1.3, 1.1], 1.2, 1.1),
+    ],
+)
+def test_representative_score_respects_optimization_direction(
+    metric: str,
+    cv_values: list[float],
+    lb_values: list[float],
+    expected_cv: float,
+    expected_lb: float,
+) -> None:
+    notebook = _notebook(f"author/{metric}", [], None, "lc")
+    notebook.score_observations = [
+        *[_score(f"cv-{index}", value, "cv", metric) for index, value in enumerate(cv_values)],
+        *[_score(f"lb-{index}", value, "lb", metric) for index, value in enumerate(lb_values)],
+    ]
+
+    pair = build_cv_lb_pairs([notebook], metric)[0]
+
+    assert pair.cv_score == pytest.approx(expected_cv)
+    assert pair.lb_score == pytest.approx(expected_lb)
+    expected_aggregation = "min" if metric == "rmse" else "max"
+    assert pair.cv_aggregation == expected_aggregation
+    assert pair.lb_aggregation == expected_aggregation
+
+
+def test_fold_series_uses_median_instead_of_best_fold() -> None:
+    notebook = _notebook("author/folds-observed", [], None, "lc")
+    notebook.score_observations = [
+        _score("fold-1", 0.80, "cv", "mAP", signals=["fold"]),
+        _score("fold-2", 0.82, "cv", "mAP", signals=["fold"]),
+        _score("fold-3", 0.78, "cv", "mAP", signals=["fold"]),
+        _score("lb", 0.81, "lb", "mAP"),
+    ]
+
+    pair = build_cv_lb_pairs([notebook], "mAP")[0]
+
+    assert pair.cv_score == pytest.approx(0.80)
+    assert pair.cv_aggregation == "median_fold_series"
+    assert pair.cv_representative_observation_id is None
+    assert pair.lb_score == pytest.approx(0.81)
+
+
+def test_unknown_direction_fallback_and_diagnostics_are_explicit() -> None:
+    notebook = _notebook("author/custom", [], None, "lc")
+    notebook.score_observations = [
+        _score("cv-1", -2.0, "cv", None, metric_raw="custom"),
+        _score("cv-2", -1.0, "cv", None, metric_raw="custom"),
+        _score("lb-1", -3.0, "lb", None, metric_raw="custom"),
+        _score("lb-2", -0.5, "lb", None, metric_raw="custom"),
+    ]
+
+    pairs = build_cv_lb_pairs([notebook])
+    diagnostics = diagnose_cv_lb([notebook], pairs)
+
+    assert pairs[0].cv_score == pytest.approx(-1.0)
+    assert pairs[0].lb_score == pytest.approx(-0.5)
+    assert pairs[0].optimization_direction is None
+    assert diagnostics.unknown_direction_fallbacks == 2
+
+
+def test_percent_normalization_is_compatible_but_unclear_bounded_scale_is_not() -> None:
+    normalized = _notebook("author/normalized", [], None, "lc_a")
+    normalized.score_observations = [
+        _score("cv-percent", 0.945, "cv", "accuracy", value_raw="94.5%"),
+        _score("lb-fraction", 0.94, "lb", "accuracy", value_raw="0.94"),
+    ]
+    unclear = _notebook("author/unclear", [], None, "lc_b")
+    unclear.score_observations = [
+        _score("cv-large", 94.5, "cv", "accuracy", value_raw="94.5"),
+        _score("lb-small", 0.94, "lb", "accuracy", value_raw="0.94"),
+    ]
+
+    pairs = build_cv_lb_pairs([normalized, unclear], "accuracy")
+    diagnostics = diagnose_cv_lb([normalized, unclear], pairs, "accuracy")
+
+    assert [pair.notebook_ref for pair in pairs] == ["author/normalized"]
+    assert diagnostics.pairs_rejected_scale_mismatch == 1
+
+
+def test_pairing_is_deterministic_under_notebook_and_observation_permutation() -> None:
+    first = _notebook("author/z", [], None, "lc_z")
+    first.score_observations = [
+        _score("lb-z", 0.8, "lb", "mAP"),
+        _score("cv-z", 0.7, "cv", "mAP"),
+    ]
+    second = _notebook("author/a", [], None, "lc_a")
+    second.score_observations = [
+        _score("cv-a", 0.6, "cv", "mAP"),
+        _score("lb-a", 0.65, "lb", "mAP"),
+    ]
+
+    forward = build_cv_lb_pairs([first, second], "mAP")
+    first.score_observations.reverse()
+    second.score_observations.reverse()
+    reverse = build_cv_lb_pairs([second, first], "mAP")
+
+    assert forward == reverse
+    assert [pair.notebook_ref for pair in forward] == ["author/a", "author/z"]
+
+
+def _score(
+    observation_id: str,
+    value: float,
+    split: str,
+    metric_canonical: str | None,
+    *,
+    metric_raw: str | None = None,
+    source: str = "markdown",
+    signals: list[str] | None = None,
+    value_raw: str | None = None,
+) -> ScoreObservation:
+    return ScoreObservation(
+        value=value,
+        value_raw=value_raw or str(value),
+        metric_raw=metric_raw or metric_canonical,
+        metric_canonical=metric_canonical,
+        locator=source,
+        raw_text=f"{metric_raw or metric_canonical or 'score'}: {value}",
+        source=source,
+        source_kind=source,
+        split=split,
+        split_signals=signals or [],
+        observation_id=observation_id,
+    )
 
 
 def _notebook(

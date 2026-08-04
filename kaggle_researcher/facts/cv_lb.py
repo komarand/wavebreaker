@@ -1,80 +1,145 @@
 from __future__ import annotations
 
 import math
+import re
 import statistics
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
-from kaggle_researcher.facts.models import CvLbDiagnostics, CvLbPair, NotebookFacts
+from kaggle_researcher.facts.models import (
+    CvLbDiagnostics,
+    CvLbPair,
+    NotebookFacts,
+    OptimizationDirection,
+    ScoreObservation,
+)
+from kaggle_researcher.facts.notebook_ast import (
+    canonicalize_metric_label,
+    metric_optimization_direction,
+)
+
+_BOUNDED_METRICS = frozenset({"accuracy", "f1", "mAP", "rank-1", "roc_auc"})
+_METRIC_CONTEXT_TOKENS = frozenset(
+    {
+        "cv",
+        "fold",
+        "leaderboard",
+        "lb",
+        "local",
+        "metric",
+        "offline",
+        "online",
+        "oof",
+        "private",
+        "public",
+        "score",
+        "submission",
+        "val",
+        "valid",
+        "validation",
+    }
+)
+
+
+@dataclass(frozen=True)
+class _Representative:
+    value: float
+    metric_canonical: str | None
+    metric_raw: str | None
+    direction: OptimizationDirection | None
+    observation_ids: tuple[str, ...]
+    representative_observation_id: str | None
+    source: str
+    aggregation: str
+    selection_reason: str
+    values: tuple[float, ...]
+    raw_values: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _PairingResult:
+    pairs: tuple[CvLbPair, ...]
+    rejections: frozenset[str]
 
 
 def build_cv_lb_pairs(
     notebooks: list[NotebookFacts],
     competition_metric_name: str | None = None,
 ) -> list[CvLbPair]:
-    pairs: list[CvLbPair] = []
-    for notebook in notebooks:
-        if notebook.public_score is None:
-            continue
-        declared_cv = _select_declared_cv(notebook.declared_cv)
-        public_score = _finite_float(notebook.public_score)
-        if declared_cv is None or public_score is None:
-            continue
-        notebook_metric_name = _notebook_cv_metric(notebook)
-        if not _metrics_are_comparable(
-            notebook_metric_name,
-            competition_metric_name,
-        ):
-            continue
-        pairs.append(
-            CvLbPair(
-                notebook_ref=notebook.ref,
-                declared_cv=declared_cv,
-                public_score=public_score,
-                lineage_cluster_id=notebook.lineage_cluster_id,
-                metric_name=notebook_metric_name,
-            )
-        )
-    return pairs
+    pairs = [
+        pair
+        for notebook in notebooks
+        for pair in _pair_notebook(notebook, competition_metric_name).pairs
+    ]
+    return sorted(
+        pairs,
+        key=lambda pair: (
+            pair.notebook_ref,
+            pair.metric_canonical or pair.metric_raw or "",
+            pair.cv_score if pair.cv_score is not None else pair.declared_cv,
+            pair.lb_score if pair.lb_score is not None else pair.public_score,
+        ),
+    )
 
 
 def diagnose_cv_lb(
     notebooks: list[NotebookFacts],
     pairs: list[CvLbPair],
+    competition_metric_name: str | None = None,
 ) -> CvLbDiagnostics:
+    results = [_pair_notebook(notebook, competition_metric_name) for notebook in notebooks]
     with_public_score = sum(notebook.public_score is not None for notebook in notebooks)
     with_declared_cv = sum(bool(notebook.declared_cv) for notebook in notebooks)
-    with_both = sum(
-        notebook.public_score is not None and bool(notebook.declared_cv)
-        for notebook in notebooks
-    )
-    rejected = max(0, with_both - len(pairs))
-
-    zero_pairs_reason = None
-    if not pairs:
-        if not notebooks:
-            zero_pairs_reason = "No notebooks were collected."
-        elif with_public_score == 0 and with_declared_cv == 0:
-            zero_pairs_reason = (
-                "Kaggle kernel objects expose no public scores and no notebooks "
-                "contain declared CV observations."
-            )
-        elif with_public_score == 0:
-            zero_pairs_reason = "Kaggle kernel objects expose no public scores."
-        elif with_declared_cv == 0:
-            zero_pairs_reason = "No notebooks contain declared CV observations."
-        elif rejected:
-            zero_pairs_reason = "CV and leaderboard metrics are not comparable."
-        else:
-            zero_pairs_reason = "No finite comparable CV/LB values were available."
-
+    with_cv = sum(_has_cv_side(notebook) for notebook in notebooks)
+    with_lb = sum(_has_lb_side(notebook) for notebook in notebooks)
+    with_both = sum(_has_cv_side(notebook) and _has_lb_side(notebook) for notebook in notebooks)
+    rejection_counts = {
+        reason: sum(reason in result.rejections for result in results)
+        for reason in (
+            "missing_cv",
+            "missing_lb",
+            "metric_mismatch",
+            "scale_mismatch",
+            "ambiguous_metric",
+            "ambiguous_split",
+        )
+    }
+    zero_pairs_reason = _zero_pairs_reason(notebooks, rejection_counts) if not pairs else None
     return CvLbDiagnostics(
         notebooks_total=len(notebooks),
         notebooks_with_public_score=with_public_score,
         notebooks_with_declared_cv=with_declared_cv,
-        notebooks_with_both=with_both,
+        notebooks_with_both=sum(
+            notebook.public_score is not None and bool(notebook.declared_cv)
+            for notebook in notebooks
+        ),
         comparable_pairs=len(pairs),
-        rejected_non_comparable_pairs=rejected,
+        rejected_non_comparable_pairs=(
+            rejection_counts["metric_mismatch"]
+            + rejection_counts["scale_mismatch"]
+            + rejection_counts["ambiguous_metric"]
+        ),
         zero_pairs_reason=zero_pairs_reason,
+        notebooks_with_cv_scores=with_cv,
+        notebooks_with_lb_scores=with_lb,
+        notebooks_with_both_sides=with_both,
+        pairs_created=len(pairs),
+        pairs_created_from_api_lb=sum(pair.lb_source == "public_score_api" for pair in pairs),
+        pairs_created_from_observation_lb=sum(
+            pair.lb_source.startswith("score_observation") for pair in pairs
+        ),
+        pairs_rejected_missing_cv=rejection_counts["missing_cv"],
+        pairs_rejected_missing_lb=rejection_counts["missing_lb"],
+        pairs_rejected_metric_mismatch=rejection_counts["metric_mismatch"],
+        pairs_rejected_scale_mismatch=rejection_counts["scale_mismatch"],
+        pairs_rejected_ambiguous_metric=rejection_counts["ambiguous_metric"],
+        pairs_rejected_ambiguous_split=rejection_counts["ambiguous_split"],
+        fold_series_aggregated=sum(pair.cv_aggregation == "median_fold_series" for pair in pairs),
+        unknown_direction_fallbacks=sum(
+            reason == "unknown_direction_max_fallback"
+            for pair in pairs
+            for reason in (pair.cv_selection_reason, pair.lb_selection_reason)
+        ),
     )
 
 
@@ -93,10 +158,410 @@ def summarize_cv_lb(pairs: list[CvLbPair]) -> dict[str, int | float | None]:
             if count >= 3
             else None
         ),
-        "distinct_lineage_clusters": len(
-            {pair.lineage_cluster_id for pair in pairs}
-        ),
+        "distinct_lineage_clusters": len({pair.lineage_cluster_id for pair in pairs}),
     }
+
+
+def _pair_notebook(
+    notebook: NotebookFacts,
+    competition_metric_name: str | None,
+) -> _PairingResult:
+    cv_observations = _deduplicate_observations(
+        observation
+        for observation in notebook.score_observations
+        if observation.split == "cv" and _finite_float(observation.value) is not None
+    )
+    lb_observations = _deduplicate_observations(
+        observation
+        for observation in notebook.score_observations
+        if observation.split == "lb" and _finite_float(observation.value) is not None
+    )
+    unknown_observations = [
+        observation for observation in notebook.score_observations if observation.split == "unknown"
+    ]
+    cv_groups = _observation_groups(
+        cv_observations,
+        side="cv",
+        competition_metric_name=competition_metric_name,
+    )
+    if not cv_groups:
+        legacy_cv = _legacy_cv_representative(notebook, competition_metric_name)
+        if legacy_cv is not None:
+            cv_groups = {_representative_key(legacy_cv): legacy_cv}
+
+    public_score = _finite_float(notebook.public_score)
+    if public_score is not None:
+        lb_groups = {
+            _metric_key(competition_metric_name, competition_metric_name): (
+                _api_lb_representative(public_score, competition_metric_name)
+            )
+        }
+    else:
+        lb_groups = _observation_groups(
+            lb_observations,
+            side="lb",
+            competition_metric_name=competition_metric_name,
+        )
+
+    rejections: set[str] = set()
+    if not cv_groups:
+        rejections.add("missing_cv")
+    if not lb_groups:
+        rejections.add("missing_lb")
+    if unknown_observations and (not cv_groups or not lb_groups):
+        rejections.add("ambiguous_split")
+    if not cv_groups or not lb_groups:
+        return _PairingResult((), frozenset(rejections))
+
+    matches, match_rejection = _match_groups(
+        cv_groups,
+        lb_groups,
+        competition_metric_name,
+    )
+    if match_rejection is not None:
+        rejections.add(match_rejection)
+
+    pairs: list[CvLbPair] = []
+    for cv_side, lb_side in matches:
+        metric_canonical = (
+            cv_side.metric_canonical
+            or lb_side.metric_canonical
+            or canonicalize_metric_label(competition_metric_name)
+        )
+        if not _scales_are_compatible(cv_side, lb_side, metric_canonical):
+            rejections.add("scale_mismatch")
+            continue
+        direction = _resolve_direction(
+            cv_side.direction,
+            lb_side.direction,
+            metric_canonical or competition_metric_name,
+        )
+        gap = cv_side.value - lb_side.value
+        pairs.append(
+            CvLbPair(
+                notebook_ref=notebook.ref,
+                declared_cv=cv_side.value,
+                public_score=lb_side.value,
+                lineage_cluster_id=notebook.lineage_cluster_id,
+                metric_name=metric_canonical or cv_side.metric_raw or lb_side.metric_raw,
+                metric_raw=cv_side.metric_raw or lb_side.metric_raw,
+                metric_canonical=metric_canonical,
+                optimization_direction=direction,
+                cv_score=cv_side.value,
+                lb_score=lb_side.value,
+                cv_observation_ids=list(cv_side.observation_ids),
+                lb_observation_ids=list(lb_side.observation_ids),
+                cv_representative_observation_id=(cv_side.representative_observation_id),
+                lb_representative_observation_id=(lb_side.representative_observation_id),
+                cv_source=cv_side.source,
+                lb_source=lb_side.source,
+                cv_aggregation=cv_side.aggregation,
+                lb_aggregation=lb_side.aggregation,
+                cv_selection_reason=cv_side.selection_reason,
+                lb_selection_reason=lb_side.selection_reason,
+                gap=gap,
+                absolute_gap=abs(gap),
+            )
+        )
+    return _PairingResult(tuple(pairs), frozenset(rejections))
+
+
+def _observation_groups(
+    observations: list[ScoreObservation],
+    *,
+    side: Literal["cv", "lb"],
+    competition_metric_name: str | None,
+) -> dict[tuple[str, str] | None, _Representative]:
+    grouped: dict[tuple[str, str] | None, list[ScoreObservation]] = {}
+    for observation in observations:
+        grouped.setdefault(_observation_metric_key(observation), []).append(observation)
+    return {
+        key: _represent_observations(
+            group,
+            side=side,
+            fallback_metric_name=(competition_metric_name if key is None else None),
+        )
+        for key, group in sorted(grouped.items(), key=lambda item: str(item[0]))
+    }
+
+
+def _represent_observations(
+    observations: list[ScoreObservation],
+    *,
+    side: Literal["cv", "lb"],
+    fallback_metric_name: str | None,
+) -> _Representative:
+    ordered = sorted(
+        observations,
+        key=lambda observation: (
+            observation.observation_id or "",
+            observation.value,
+            observation.value_raw,
+            observation.raw_text,
+        ),
+    )
+    values = [float(observation.value) for observation in ordered]
+    directions = {
+        observation.optimization_direction
+        for observation in ordered
+        if observation.optimization_direction is not None
+    }
+    metric_canonical = next(
+        iter(
+            sorted(
+                {
+                    observation.metric_canonical
+                    for observation in ordered
+                    if observation.metric_canonical
+                }
+            )
+        ),
+        None,
+    )
+    metric_raw = next(
+        iter(sorted({observation.metric_raw for observation in ordered if observation.metric_raw})),
+        None,
+    )
+    direction = (
+        next(iter(directions))
+        if len(directions) == 1
+        else metric_optimization_direction(metric_canonical or metric_raw or fallback_metric_name)
+    )
+    fold_observations = [
+        observation for observation in ordered if "fold" in observation.split_signals
+    ]
+    if side == "cv" and len(fold_observations) >= 2 and len(fold_observations) == len(ordered):
+        selected_value = statistics.median(values)
+        aggregation = "median_fold_series"
+        selection_reason = "fold_series_median"
+        representative_id = None
+    else:
+        selector = min if direction == "minimize" else max
+        selected_value = selector(values)
+        aggregation = "min" if direction == "minimize" else "max"
+        selection_reason = (
+            f"best_by_{direction}" if direction is not None else "unknown_direction_max_fallback"
+        )
+        selected = [observation for observation in ordered if observation.value == selected_value][
+            0
+        ]
+        representative_id = selected.observation_id
+    representative = next(
+        (observation for observation in ordered if observation.observation_id == representative_id),
+        ordered[0],
+    )
+    source = "score_observation" if side == "cv" else _lb_observation_source(representative)
+    return _Representative(
+        value=selected_value,
+        metric_canonical=metric_canonical,
+        metric_raw=metric_raw,
+        direction=direction,
+        observation_ids=tuple(
+            sorted(
+                observation.observation_id
+                for observation in ordered
+                if observation.observation_id is not None
+            )
+        ),
+        representative_observation_id=representative_id,
+        source=source,
+        aggregation=aggregation,
+        selection_reason=selection_reason,
+        values=tuple(values),
+        raw_values=tuple(observation.value_raw for observation in ordered),
+    )
+
+
+def _legacy_cv_representative(
+    notebook: NotebookFacts,
+    competition_metric_name: str | None,
+) -> _Representative | None:
+    value = _select_declared_cv(notebook.declared_cv)
+    if value is None:
+        return None
+    metric = _notebook_cv_metric(notebook)
+    numeric_values = tuple(
+        number
+        for raw_value in notebook.declared_cv
+        if (number := _finite_float(raw_value)) is not None
+    )
+    return _Representative(
+        value=value,
+        metric_canonical=canonicalize_metric_label(metric),
+        metric_raw=metric,
+        direction=metric_optimization_direction(metric or competition_metric_name),
+        observation_ids=(),
+        representative_observation_id=None,
+        source="declared_cv_legacy",
+        aggregation="median_legacy" if len(numeric_values) > 3 else "first_legacy",
+        selection_reason="legacy_declared_cv_fallback",
+        values=numeric_values,
+        raw_values=tuple(str(value) for value in notebook.declared_cv),
+    )
+
+
+def _api_lb_representative(
+    public_score: float,
+    competition_metric_name: str | None,
+) -> _Representative:
+    return _Representative(
+        value=public_score,
+        metric_canonical=canonicalize_metric_label(competition_metric_name),
+        metric_raw=competition_metric_name,
+        direction=metric_optimization_direction(competition_metric_name),
+        observation_ids=(),
+        representative_observation_id=None,
+        source="public_score_api",
+        aggregation="single",
+        selection_reason="api_public_score_priority",
+        values=(public_score,),
+        raw_values=(str(public_score),),
+    )
+
+
+def _match_groups(
+    cv_groups: dict[tuple[str, str] | None, _Representative],
+    lb_groups: dict[tuple[str, str] | None, _Representative],
+    competition_metric_name: str | None,
+) -> tuple[list[tuple[_Representative, _Representative]], str | None]:
+    exact_keys = sorted(
+        (set(cv_groups) & set(lb_groups)) - {None},
+        key=str,
+    )
+    if exact_keys:
+        return [(cv_groups[key], lb_groups[key]) for key in exact_keys], None
+
+    competition_canonical = canonicalize_metric_label(competition_metric_name)
+    if len(cv_groups) == 1 and len(lb_groups) == 1 and competition_canonical:
+        cv_side = next(iter(cv_groups.values()))
+        lb_side = next(iter(lb_groups.values()))
+        if all(
+            side.metric_canonical in {None, competition_canonical} for side in (cv_side, lb_side)
+        ):
+            return [(cv_side, lb_side)], None
+        return [], "metric_mismatch"
+    if len(cv_groups) == 1 and len(lb_groups) == 1:
+        cv_side = next(iter(cv_groups.values()))
+        lb_side = next(iter(lb_groups.values()))
+        if lb_side.source == "public_score_api":
+            return [(cv_side, lb_side)], None
+    if len(cv_groups) > 1 or len(lb_groups) > 1:
+        return [], "ambiguous_metric"
+    return [], "metric_mismatch"
+
+
+def _scales_are_compatible(
+    cv_side: _Representative,
+    lb_side: _Representative,
+    metric_canonical: str | None,
+) -> bool:
+    if metric_canonical not in _BOUNDED_METRICS:
+        return True
+    cv_large = any(abs(value) > 1 for value in cv_side.values)
+    lb_large = any(abs(value) > 1 for value in lb_side.values)
+    return cv_large == lb_large
+
+
+def _resolve_direction(
+    cv_direction: OptimizationDirection | None,
+    lb_direction: OptimizationDirection | None,
+    metric_name: str | None,
+) -> OptimizationDirection | None:
+    directions = {direction for direction in (cv_direction, lb_direction) if direction is not None}
+    if len(directions) == 1:
+        return next(iter(directions))
+    if len(directions) > 1:
+        return None
+    return metric_optimization_direction(metric_name)
+
+
+def _observation_metric_key(
+    observation: ScoreObservation,
+) -> tuple[str, str] | None:
+    return _metric_key(observation.metric_canonical, observation.metric_raw)
+
+
+def _representative_key(
+    representative: _Representative,
+) -> tuple[str, str] | None:
+    return _metric_key(representative.metric_canonical, representative.metric_raw)
+
+
+def _metric_key(
+    metric_canonical: str | None,
+    metric_raw: str | None,
+) -> tuple[str, str] | None:
+    if metric_canonical:
+        return "canonical", metric_canonical.lower()
+    normalized_raw = _normalized_metric_raw(metric_raw)
+    return ("raw", normalized_raw) if normalized_raw else None
+
+
+def _normalized_metric_raw(metric_raw: str | None) -> str | None:
+    if not metric_raw:
+        return None
+    tokens = [
+        token
+        for token in re.findall(r"[a-z]+\d*|\d+", metric_raw.lower())
+        if token not in _METRIC_CONTEXT_TOKENS and not token.isdigit()
+    ]
+    return "".join(tokens) or None
+
+
+def _deduplicate_observations(
+    observations: Any,
+) -> list[ScoreObservation]:
+    unique: dict[tuple[Any, ...], ScoreObservation] = {}
+    for observation in observations:
+        key = (
+            observation.observation_id,
+            observation.value,
+            observation.metric_canonical,
+            observation.metric_raw,
+            observation.source,
+            observation.locator,
+            observation.raw_text,
+        )
+        unique.setdefault(key, observation)
+    return list(unique.values())
+
+
+def _lb_observation_source(observation: ScoreObservation) -> str:
+    source = observation.source_kind or observation.source
+    if source in {"title", "notebook_title"}:
+        return "score_observation_title"
+    if source in {"ref", "notebook_ref"}:
+        return "score_observation_ref"
+    return "score_observation_text"
+
+
+def _has_cv_side(notebook: NotebookFacts) -> bool:
+    return any(observation.split == "cv" for observation in notebook.score_observations) or bool(
+        notebook.declared_cv
+    )
+
+
+def _has_lb_side(notebook: NotebookFacts) -> bool:
+    return notebook.public_score is not None or any(
+        observation.split == "lb" for observation in notebook.score_observations
+    )
+
+
+def _zero_pairs_reason(
+    notebooks: list[NotebookFacts],
+    rejection_counts: dict[str, int],
+) -> str:
+    if not notebooks:
+        return "No notebooks were collected."
+    reasons = [
+        f"missing CV side: {rejection_counts['missing_cv']}",
+        f"missing leaderboard side: {rejection_counts['missing_lb']}",
+        f"metric mismatch: {rejection_counts['metric_mismatch']}",
+        f"ambiguous metric: {rejection_counts['ambiguous_metric']}",
+        f"scale mismatch: {rejection_counts['scale_mismatch']}",
+        f"unknown/conflicting split: {rejection_counts['ambiguous_split']}",
+    ]
+    return "No comparable CV/LB pairs (" + "; ".join(reasons) + ")."
 
 
 def _finite_float(value: Any) -> float | None:
@@ -108,14 +573,11 @@ def _finite_float(value: Any) -> float | None:
 
 
 def _select_declared_cv(values: list[Any]) -> float | None:
-    numeric_values = [
-        number for value in values if (number := _finite_float(value)) is not None
-    ]
+    numeric_values = [number for value in values if (number := _finite_float(value)) is not None]
     if not numeric_values:
         return None
     if len(numeric_values) <= 3:
         return numeric_values[0]
-    # Long lists are usually fold-like scores; the median limits outlier influence.
     return statistics.median(numeric_values)
 
 
@@ -136,36 +598,10 @@ def _notebook_cv_metric(notebook: NotebookFacts) -> str | None:
     return next(iter(code_metrics)) if len(code_metrics) == 1 else None
 
 
-def _metrics_are_comparable(
-    notebook_metric_name: str | None,
-    competition_metric_name: str | None,
-) -> bool:
-    notebook_metric = _canonical_metric_name(notebook_metric_name)
-    competition_metric = _canonical_metric_name(competition_metric_name)
-    return (
-        notebook_metric is None
-        or competition_metric is None
-        or notebook_metric == competition_metric
-    )
-
-
 def _canonical_metric_name(value: str | None) -> str | None:
-    if not value:
-        return None
-    normalized = "".join(character for character in value.lower() if character.isalnum())
-    if normalized in {"map", "meanaverageprecision", "averageprecisionscore"}:
-        return "mAP"
-    if normalized in {"top1", "rank1"}:
-        return "rank-1"
-    if normalized in {"accuracy", "accuracyscore"}:
-        return "accuracy"
-    if normalized in {"rocauc", "rocaucscore", "auc"}:
-        return "roc_auc"
-    if normalized in {"logloss"}:
-        return "log_loss"
-    if normalized in {"f1", "f1score"}:
-        return "f1"
-    return value.strip().lower() or None
+    return canonicalize_metric_label(value) or (
+        value.strip().lower() if value and value.strip() else None
+    )
 
 
 def _spearman_correlation(
