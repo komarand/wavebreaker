@@ -8,6 +8,7 @@ __pycache__/
 .Python
 
 # Virtual environments
+.venv*/
 .venv-win/
 .venv/
 venv/
@@ -16,6 +17,7 @@ ENV/
 
 
 runs/
+journal/
 # Build / packaging
 build/
 dist/
