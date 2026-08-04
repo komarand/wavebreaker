@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -9,273 +9,487 @@ import pytest
 
 from kaggle_researcher.facts import discussions
 
-FIXTURE_PATH = (
-    Path(__file__).resolve().parents[1] / "fixtures" / "facts" / "forum_topics.json"
-)
+
+class HttpError(RuntimeError):
+    def __init__(self, status: int) -> None:
+        super().__init__(f"secret response body for HTTP {status}")
+        self.status = status
 
 
-class FakeForumsClient:
-    def __init__(self, payload: dict[str, Any]) -> None:
-        self.payload = payload
-        self.list_calls: list[dict[str, Any]] = []
-        self.get_calls: list[str] = []
+class FakeCompetitionClient:
+    def __init__(
+        self,
+        *,
+        topic_pages: dict[int, Any],
+        messages: dict[int, Any],
+    ) -> None:
+        self.topic_pages = topic_pages
+        self.message_responses = messages
+        self.topic_calls: list[tuple[str, int | None]] = []
+        self.message_calls: list[tuple[str, int, int | None]] = []
 
-    def list_topics(self, **kwargs: Any) -> SimpleNamespace:
-        self.list_calls.append(kwargs)
-        slug = kwargs["forum_slug"]
-        if slug == "listing-fails":
-            raise RuntimeError("list unavailable")
-        if kwargs["category"] == "competition_write_ups":
-            page = self.payload["writeup_pages"][slug]
-        else:
-            token = kwargs["page_token"] or "first"
-            page = self.payload["competition_pages"][token]
-        return SimpleNamespace(**page)
+    def list_topics(self, slug: str, *, page: int | None = None) -> Any:
+        self.topic_calls.append((slug, page))
+        response = self.topic_pages.get(page or 1, SimpleNamespace(topics=[]))
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
-    def get_topic(self, topic_id: str) -> SimpleNamespace:
-        self.get_calls.append(topic_id)
-        if int(topic_id) in self.payload["failed_topic_ids"]:
-            raise RuntimeError("thread unavailable")
-        return SimpleNamespace(**self.payload["threads"][topic_id])
-
-
-@pytest.fixture
-def fake_client(monkeypatch: pytest.MonkeyPatch) -> FakeForumsClient:
-    payload = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
-    client = FakeForumsClient(payload)
-    monkeypatch.setattr(discussions, "_forums_client", lambda: client)
-    return client
-
-
-def test_competition_discussions_paginate_to_limit_and_join_thread_text(
-    fake_client: FakeForumsClient,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    facts = discussions.fetch_competition_discussions("current-comp", max_topics=3)
-
-    assert [fact.topic_id for fact in facts] == ["101", "103"]
-    assert [call["page_token"] for call in fake_client.list_calls] == [None, "page-2"]
-    assert [call["page_size"] for call in fake_client.list_calls] == [3, 1]
-    assert fake_client.get_calls == ["101", "102", "103"]
-    assert facts[0].author == "competition-host"
-    assert facts[0].author_is_host is True
-    assert facts[0].votes == 35
-    assert facts[0].created_at is not None
-    assert facts[0].source_type == "discussion"
-    assert facts[0].competition_id == "current-comp"
-    assert facts[0].text == (
-        "Use grouped validation.\n\n"
-        "Groups must not cross folds.\n\n"
-        "This removed the leakage."
-    )
-    assert "Failed to fetch discussion topic 102" in caplog.text
-    assert facts.status == "collected"
-    assert facts.error is None
+    def list_topic_messages(
+        self,
+        slug: str,
+        topic_id: int,
+        *,
+        page_size: int | None = None,
+    ) -> Any:
+        self.message_calls.append((slug, topic_id, page_size))
+        response = self.message_responses.get(
+            topic_id,
+            SimpleNamespace(messages=[]),
+        )
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
-def test_empty_discussion_response_is_distinct_from_forbidden(
-    fake_client: FakeForumsClient,
-) -> None:
-    fake_client.payload["competition_pages"]["first"] = {
-        "topics": [],
-        "next_page_token": None,
+def _topic(
+    topic_id: int,
+    title: str = "Useful discussion",
+    **overrides: Any,
+) -> SimpleNamespace:
+    payload = {
+        "id": topic_id,
+        "title": title,
+        "topic_url": "",
+        "author_name": "topic-author",
+        "comment_count": 1,
+        "votes": 4,
+        "post_date": None,
+        "last_comment_post_date": None,
     }
+    payload.update(overrides)
+    return SimpleNamespace(**payload)
 
-    facts = discussions.fetch_competition_discussions("current-comp", max_topics=3)
+
+def _message(
+    message_id: int,
+    content: str = "<p>Hello</p>",
+    **overrides: Any,
+) -> SimpleNamespace:
+    payload = {
+        "id": message_id,
+        "content": content,
+        "author_name": None,
+        "post_date": None,
+        "votes": 1,
+        "replies": [],
+    }
+    payload.update(overrides)
+    return SimpleNamespace(**payload)
+
+
+def _install_client(
+    monkeypatch: pytest.MonkeyPatch,
+    client: FakeCompetitionClient,
+) -> None:
+    monkeypatch.setattr(discussions, "_competition_discussions_client", lambda: client)
+    monkeypatch.setattr(discussions, "_between_topics_sleep", lambda seconds: None)
+
+
+def test_competition_route_paginates_topics_and_collects_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    html = (
+        "<p>A beginner-friendly tour of computer vision...</p>"
+        '<p>Read it here: <a href="https://medium.com/@author/example">'
+        "Article</a></p>"
+    )
+    client = FakeCompetitionClient(
+        topic_pages={
+            1: SimpleNamespace(topics=[_topic(101), _topic(102)], total_count=3),
+            2: SimpleNamespace(topics=[_topic(102), _topic(103)], total_count=3),
+        },
+        messages={
+            101: SimpleNamespace(messages=[_message(1001, html)]),
+            102: SimpleNamespace(messages=[]),
+            103: SimpleNamespace(messages=[_message(1003, "<p>Third</p>")]),
+        },
+    )
+    _install_client(monkeypatch, client)
+
+    facts = discussions.fetch_competition_discussions("jaguar-re-id", 10)
+
+    assert facts.status == "collected"
+    assert [fact.topic_id for fact in facts] == ["101", "102", "103"]
+    assert client.topic_calls == [("jaguar-re-id", 1), ("jaguar-re-id", 2)]
+    assert client.message_calls == [
+        ("jaguar-re-id", 101, -1),
+        ("jaguar-re-id", 102, -1),
+        ("jaguar-re-id", 103, -1),
+    ]
+    assert facts[0].evidence_id == "discussion-topic:jaguar-re-id:101"
+    assert facts[0].messages[0].evidence_id == ("discussion-message:jaguar-re-id:101:1001")
+    assert "<p>" not in facts[0].text
+    assert facts[0].messages[0].links[0].kind == "external"
+    assert facts[1].collection_status == "empty"
+
+
+def test_empty_topic_response_is_not_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeCompetitionClient(
+        topic_pages={1: SimpleNamespace(topics=[], total_count=0)},
+        messages={},
+    )
+    _install_client(monkeypatch, client)
+
+    facts = discussions.fetch_competition_discussions("empty", 10)
 
     assert facts == []
     assert facts.status == "empty"
     assert facts.error is None
 
 
-def test_discussion_403_is_nonfatal_forbidden_and_sanitized(
+def test_repeated_topic_ids_stop_page_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeCompetitionClient(
+        topic_pages={
+            1: SimpleNamespace(topics=[_topic(1)], total_count=99),
+            2: SimpleNamespace(topics=[_topic(1)], total_count=99),
+            3: pytest.fail,
+        },
+        messages={1: SimpleNamespace(messages=[])},
+    )
+    _install_client(monkeypatch, client)
+
+    facts = discussions.fetch_competition_discussions("repeat", 20)
+
+    assert [fact.topic_id for fact in facts] == ["1"]
+    assert client.topic_calls == [("repeat", 1), ("repeat", 2)]
+
+
+def test_topic_page_safety_cap_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeCompetitionClient(
+        topic_pages={
+            page: SimpleNamespace(topics=[_topic(page)], total_count=999) for page in range(1, 5)
+        },
+        messages={1: SimpleNamespace(messages=[]), 2: SimpleNamespace(messages=[])},
+    )
+    _install_client(monkeypatch, client)
+    monkeypatch.setattr(discussions, "TOPICS_PAGE_SAFETY_CAP", 2)
+
+    facts = discussions.fetch_competition_discussions("bounded", 20)
+
+    assert [fact.topic_id for fact in facts] == ["1", "2"]
+    assert facts.status == "partial"
+    assert "safety cap" in (facts.limitation or "")
+    assert client.topic_calls == [("bounded", 1), ("bounded", 2)]
+
+
+def test_max_topics_stops_without_requesting_second_page(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class ForbiddenError(RuntimeError):
-        status = 403
+    client = FakeCompetitionClient(
+        topic_pages={
+            1: SimpleNamespace(topics=[_topic(1), _topic(2)], total_count=10),
+        },
+        messages={1: SimpleNamespace(messages=[])},
+    )
+    _install_client(monkeypatch, client)
 
-    class ForbiddenClient:
-        def list_topics(self, **kwargs: Any) -> Any:
-            raise ForbiddenError("credential=must-not-leak")
+    facts = discussions.fetch_competition_discussions("limited", 1)
 
-    monkeypatch.setattr(discussions, "_forums_client", ForbiddenClient)
-
-    facts = discussions.fetch_competition_discussions("restricted", max_topics=3)
-
-    assert facts == []
-    assert facts.status == "forbidden"
-    assert facts.error == "Kaggle Discussion API returned HTTP 403."
-    assert facts.limitation == "Kaggle Discussion API returned HTTP 403."
-    assert "credential" not in facts.error
+    assert [fact.topic_id for fact in facts] == ["1"]
+    assert client.topic_calls == [("limited", 1)]
 
 
-def test_unknown_discussion_error_is_failed_not_empty(
+def test_nested_and_duplicate_messages_are_deduplicated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FailedClient:
-        def list_topics(self, **kwargs: Any) -> Any:
-            raise RuntimeError("secret-value")
+    reply = _message(2, "<p>Reply</p>")
+    root = _message(1, "<p>Root</p>", replies=[reply, reply])
+    client = FakeCompetitionClient(
+        topic_pages={1: SimpleNamespace(topics=[_topic(10)], total_count=1)},
+        messages={10: SimpleNamespace(messages=[root, root])},
+    )
+    _install_client(monkeypatch, client)
 
-    monkeypatch.setattr(discussions, "_forums_client", FailedClient)
+    facts = discussions.fetch_competition_discussions("nested", 10)
 
-    facts = discussions.fetch_competition_discussions("broken", max_topics=3)
+    assert [message.message_id for message in facts[0].messages] == ["1", "2"]
+    assert facts[0].text == "Root\n\nReply"
+
+
+def test_one_failed_topic_preserves_other_topics_and_marks_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeCompetitionClient(
+        topic_pages={
+            1: SimpleNamespace(topics=[_topic(1), _topic(2)], total_count=2),
+        },
+        messages={
+            1: HttpError(503),
+            2: SimpleNamespace(messages=[_message(20)]),
+        },
+    )
+    _install_client(monkeypatch, client)
+
+    facts = discussions.fetch_competition_discussions("partial", 10)
+
+    assert facts.status == "partial"
+    assert [fact.topic_id for fact in facts] == ["1", "2"]
+    assert facts[0].collection_status == "failed"
+    assert facts[1].collection_status == "collected"
+    assert "secret response body" not in (facts.error or "")
+    assert "HTTP 503" in (facts.limitation or "")
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_status"),
+    [(429, "rate_limited"), (403, "forbidden"), (500, "failed")],
+)
+def test_initial_topic_error_has_specific_status_and_no_generic_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    expected_status: str,
+) -> None:
+    client = FakeCompetitionClient(
+        topic_pages={1: HttpError(status_code)},
+        messages={},
+    )
+    _install_client(monkeypatch, client)
+
+    facts = discussions.fetch_competition_discussions("broken", 10)
 
     assert facts == []
-    assert facts.status == "failed"
-    assert facts.error == "Kaggle Discussion API collection failed (RuntimeError)."
-    assert "secret-value" not in facts.error
+    assert facts.status == expected_status
+    assert "secret response body" not in (facts.error or "")
 
 
-def test_discussion_pagination_accepts_camel_case_page_token(
-    fake_client: FakeForumsClient,
+def test_inter_topic_delay_is_injectable(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeCompetitionClient(
+        topic_pages={1: SimpleNamespace(topics=[_topic(1), _topic(2), _topic(3)], total_count=3)},
+        messages={},
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(discussions, "_competition_discussions_client", lambda: client)
+    monkeypatch.setattr(discussions, "_between_topics_sleep", sleeps.append)
+
+    discussions.fetch_competition_discussions("paced", 10)
+
+    assert sleeps == [discussions.BETWEEN_TOPICS_DELAY_SECONDS] * 2
+
+
+def test_html_parser_normalizes_blocks_entities_and_unsafe_links() -> None:
+    raw_html = (
+        "<p>Hello &amp; welcome<br>Read it<a href='https://medium.com/x'>here</a></p>"
+        "<div><a href='/competitions/example'>Kaggle</a></div>"
+        "<a href='https://medium.com/x'>duplicate</a>"
+        "<a href='javascript:alert(1)'>unsafe</a>"
+        "<a href='data:text/plain,bad'>bad</a>"
+        "<script>secret()</script><style>.hidden{}</style>"
+    )
+
+    text, links = discussions._parse_discussion_html(raw_html)
+
+    assert text == "Hello & welcome\nRead it here\n\nKaggle\nduplicate unsafe bad"
+    assert [(link.url, link.kind) for link in links] == [
+        ("https://medium.com/x", "external"),
+        ("/competitions/example", "relative"),
+    ]
+    assert "secret" not in text
+    assert "hidden" not in text
+
+
+@pytest.mark.parametrize(
+    ("raw_html", "expected"),
+    [
+        ("<p>Hello</p><p>World</p>", "Hello\n\nWorld"),
+        ("<p>One<br>Two", "One\nTwo"),
+        ("<div><strong>Malformed", "Malformed"),
+        ("", ""),
+    ],
+)
+def test_html_parser_is_deterministic_and_tolerant(
+    raw_html: str,
+    expected: str,
 ) -> None:
-    first_page = fake_client.payload["competition_pages"]["first"]
-    first_page["nextPageToken"] = first_page.pop("next_page_token")
+    assert discussions._parse_discussion_html(raw_html)[0] == expected
+    assert discussions._parse_discussion_html(raw_html)[0] == expected
 
-    discussions.fetch_competition_discussions("current-comp", max_topics=3)
 
-    assert [call["page_token"] for call in fake_client.list_calls] == [None, "page-2"]
+def test_long_html_is_explicitly_truncated_and_hashes_original(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(discussions, "MAX_DISCUSSION_HTML_CHARS", 12)
+    raw_html = "<p>abcdefghijklmnopqrstuvwxyz</p>"
+
+    result = discussions._normalize_messages(
+        [_message(1, raw_html)],
+        slug="example",
+        topic_id="10",
+    )[0]
+
+    assert result.content_truncated is True
+    assert result.content_original_length == len(raw_html)
+    assert result.content_html == raw_html[:12]
+    assert result.content_sha256 == hashlib.sha256(raw_html.encode()).hexdigest()
+
+
+def test_message_author_uses_confirmed_author_name_only() -> None:
+    with_author = _message(1, author_name="actual-author")
+    missing_author = {"id": 2, "content": "<p>None</p>", "author": "guessed"}
+
+    facts = discussions._normalize_messages(
+        [with_author, missing_author],
+        slug="example",
+        topic_id="10",
+    )
+
+    assert facts[0].author_name == "actual-author"
+    assert facts[1].author_name is None
+    assert facts[1].author_slug is None
+    assert facts[1].author_id is None
+
+
+@pytest.mark.parametrize(
+    ("title", "candidate"),
+    [
+        ("1st Place Solution", True),
+        ("4th Place Solution WriteUp", True),
+        ("Winning solution", True),
+        ("Model improvement plan", False),
+        ("How do I load the data?", False),
+        ("SOLUTION", True),
+    ],
+)
+def test_writeup_candidate_classification(title: str, candidate: bool) -> None:
+    actual, signals = discussions._writeup_candidate(title)
+
+    assert actual is candidate
+    assert bool(signals) is candidate
+
+
+def test_low_level_competition_requests_use_confirmed_fields() -> None:
+    class LowLevelClient:
+        def __init__(self) -> None:
+            self.topic_request: Any = None
+            self.message_request: Any = None
+
+        def list_competition_topics(self, request: Any) -> Any:
+            self.topic_request = request
+            return SimpleNamespace(topics=[], total_count=0)
+
+        def list_topic_messages(self, request: Any) -> Any:
+            self.message_request = request
+            return SimpleNamespace(messages=[])
+
+    low_level = LowLevelClient()
+    client = object.__new__(discussions._KaggleCompetitionDiscussionsClient)
+    client._client = low_level
+    client._request_policy = discussions.KaggleRequestPolicy(min_interval_seconds=0)
+
+    client.list_topics("jaguar-re-id", page=2)
+    client.list_topic_messages("jaguar-re-id", 727017, page_size=-1)
+
+    assert low_level.topic_request.competition_name == "jaguar-re-id"
+    assert low_level.topic_request.page == 2
+    assert low_level.message_request.competition_name == "jaguar-re-id"
+    assert low_level.message_request.topic_id == 727017
+    assert low_level.message_request.page_size == -1
+
+
+@pytest.mark.parametrize(
+    ("method_name", "failures"),
+    [
+        ("list_competition_topics", [429]),
+        ("list_topic_messages", [429, 429]),
+        ("list_topic_messages", [503]),
+    ],
+)
+def test_low_level_competition_requests_retry_transient_errors(
+    method_name: str,
+    failures: list[int],
+) -> None:
+    class LowLevelClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def _call(self) -> Any:
+            self.calls += 1
+            if self.calls <= len(failures):
+                raise HttpError(failures[self.calls - 1])
+            return SimpleNamespace(topics=[], total_count=0, messages=[])
+
+        def list_competition_topics(self, request: Any) -> Any:
+            return self._call()
+
+        def list_topic_messages(self, request: Any) -> Any:
+            return self._call()
+
+    low_level = LowLevelClient()
+    client = object.__new__(discussions._KaggleCompetitionDiscussionsClient)
+    client._client = low_level
+    client._request_policy = discussions.KaggleRequestPolicy(
+        max_attempts=5,
+        base_delay_seconds=0,
+        min_interval_seconds=0,
+    )
+
+    if method_name == "list_competition_topics":
+        client.list_topics("example", page=1)
+    else:
+        client.list_topic_messages("example", 1, page_size=-1)
+
+    assert low_level.calls == len(failures) + 1
+
+
+def test_403_is_not_retried_and_five_429s_are_bounded() -> None:
+    class LowLevelClient:
+        def __init__(self, status: int) -> None:
+            self.status = status
+            self.calls = 0
+
+        def list_competition_topics(self, request: Any) -> Any:
+            self.calls += 1
+            raise HttpError(self.status)
+
+    for status, expected_calls in ((403, 1), (429, 5)):
+        low_level = LowLevelClient(status)
+        client = object.__new__(discussions._KaggleCompetitionDiscussionsClient)
+        client._client = low_level
+        client._request_policy = discussions.KaggleRequestPolicy(
+            max_attempts=5,
+            base_delay_seconds=0,
+            min_interval_seconds=0,
+        )
+        with pytest.raises(HttpError):
+            client.list_topics("example", page=1)
+        assert low_level.calls == expected_calls
+
+
+def test_competition_collector_source_has_no_generic_fallback() -> None:
+    source = Path(discussions.__file__).read_text(encoding="utf-8")
+    collector_source = source.split("def _collect_competition_topics", 1)[1].split(
+        "def _collect_forum_topics", 1
+    )[0]
+
+    assert "discussion_api_client" not in collector_source
+    assert "forum_slug" not in collector_source
+    assert "list_forums" not in collector_source
 
 
 def test_zero_limit_does_not_create_client(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         discussions,
-        "_forums_client",
+        "_competition_discussions_client",
         lambda: pytest.fail("client must not be created"),
     )
 
-    assert discussions.fetch_competition_discussions("current-comp", 0) == []
-    assert discussions.fetch_winner_writeups(["past-one"], 0) == []
+    assert discussions.fetch_competition_discussions("example", 0) == []
 
 
-def test_comment_pagination_uses_next_page_token() -> None:
-    class LowLevelClient:
-        def __init__(self) -> None:
-            self.tokens: list[str | None] = []
-
-        def get_topic(self, request: Any) -> Any:
-            return SimpleNamespace(topic=SimpleNamespace(id=request.id))
-
-        def list_comments(self, request: Any) -> Any:
-            token = request.page_token or None
-            self.tokens.append(token)
-            if token is None:
-                return SimpleNamespace(
-                    comments=[SimpleNamespace(content="first")],
-                    next_page_token="page-2",
-                )
-            return SimpleNamespace(
-                comments=[SimpleNamespace(content="second")],
-                next_page_token=None,
-            )
-
-    low_level = LowLevelClient()
-    client = object.__new__(discussions._KaggleForumsClient)
-    client._client = low_level
-    client._request_policy = discussions.KaggleRequestPolicy(min_interval_seconds=0)
-
-    thread = client.get_topic("101")
-
-    assert low_level.tokens == [None, "page-2"]
-    assert [comment.content for comment in thread.comments] == ["first", "second"]
-
-
-def test_low_level_forums_calls_retry_http_429() -> None:
-    class RateLimited(RuntimeError):
-        status = 429
-
-    class LowLevelClient:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def list_topics(self, request: Any) -> Any:
-            self.calls += 1
-            if self.calls < 3:
-                raise RateLimited("rate limited")
-            return SimpleNamespace(topics=[], next_page_token=None)
-
-    low_level = LowLevelClient()
-    client = object.__new__(discussions._KaggleForumsClient)
-    client._client = low_level
-    client._request_policy = discussions.KaggleRequestPolicy(
-        base_delay_seconds=0,
-        min_interval_seconds=0,
-    )
-
-    response = client.list_topics(
-        forum_slug="competition",
-        page_size=10,
-        page_token=None,
-        category=None,
-        sort_by=None,
-    )
-
-    assert response.topics == []
-    assert low_level.calls == 3
-
-
-def test_winner_writeups_use_category_top_sort_and_competition_ids(
-    fake_client: FakeForumsClient,
-) -> None:
-    facts = discussions.fetch_winner_writeups(
-        ["past-one", "past-two"],
-        per_competition=2,
-    )
-
-    assert [fact.topic_id for fact in facts] == ["201", "202", "203"]
-    assert [fact.competition_id for fact in facts] == [
-        "past-one",
-        "past-one",
-        "past-two",
-    ]
-    assert all(fact.source_type == "winner_writeup" for fact in facts)
-    assert all(call["category"] == "competition_write_ups" for call in fake_client.list_calls)
-    assert all(call["sort_by"] == "top" for call in fake_client.list_calls)
-
-
-def test_listing_failure_for_one_competition_does_not_abort_later_writeups(
-    fake_client: FakeForumsClient,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    facts = discussions.fetch_winner_writeups(
-        ["listing-fails", "past-two"],
-        per_competition=1,
-    )
-
-    assert [fact.topic_id for fact in facts] == ["203"]
-    assert "Failed to list discussion topics for listing-fails" in caplog.text
-
-
-def test_topic_missing_required_source_fields_is_skipped(
-    fake_client: FakeForumsClient,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    fake_client.payload["competition_pages"]["first"]["topics"] = [
-        {"id": 105, "title": "Missing host flag", "votes": 4}
-    ]
-    fake_client.payload["competition_pages"]["first"]["next_page_token"] = None
-    fake_client.payload["threads"]["105"] = {
-        "topic": {"id": 105, "content": "No host flag in the full topic either."},
-        "comments": [],
-    }
-
-    facts = discussions.fetch_competition_discussions("current-comp", max_topics=1)
-
-    assert facts == []
-    assert "missing valid author_is_host" in caplog.text
-
-
-def test_fixture_is_valid_json_with_required_sections() -> None:
-    payload = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
-
-    assert payload["competition_pages"]["first"]["topics"]
-    assert payload["writeup_pages"]["past-one"]["topics"]
-    assert payload["threads"]
-
-
-def test_module_does_not_use_subprocess_or_kaggle_cli() -> None:
+def test_module_does_not_scrape_or_download_external_links() -> None:
     source = Path(discussions.__file__).read_text(encoding="utf-8")
 
-    assert "subprocess" not in source
-    assert "kaggle.api" not in source
-    assert "kaggle competitions" not in source
+    assert "BeautifulSoup" not in source
+    assert "selenium" not in source.lower()
+    assert "playwright" not in source.lower()
+    assert "requests.get" not in source

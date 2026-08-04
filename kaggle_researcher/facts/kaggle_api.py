@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import re
 import threading
 import time
@@ -32,19 +33,31 @@ class KaggleRequestPolicy:
         base_delay_seconds: float = 1.0,
         max_delay_seconds: float = 30.0,
         min_interval_seconds: float = 0.5,
+        jitter_fraction: float = 0.0,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
+        random_value: Callable[[], float] = random.random,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
-        if min(base_delay_seconds, max_delay_seconds, min_interval_seconds) < 0:
+        if (
+            min(
+                base_delay_seconds,
+                max_delay_seconds,
+                min_interval_seconds,
+                jitter_fraction,
+            )
+            < 0
+        ):
             raise ValueError("request policy delays cannot be negative")
         self.max_attempts = max_attempts
         self.base_delay_seconds = base_delay_seconds
         self.max_delay_seconds = max_delay_seconds
         self.min_interval_seconds = min_interval_seconds
+        self.jitter_fraction = jitter_fraction
         self._sleep = sleep
         self._monotonic = monotonic
+        self._random_value = random_value
         self._lock = threading.Lock()
         self._last_started_at: float | None = None
 
@@ -63,9 +76,7 @@ class KaggleRequestPolicy:
         with self._lock:
             now = self._monotonic()
             if self._last_started_at is not None:
-                wait_seconds = (
-                    self._last_started_at + self.min_interval_seconds - now
-                )
+                wait_seconds = self._last_started_at + self.min_interval_seconds - now
                 if wait_seconds > 0:
                     self._sleep(wait_seconds)
                     now = self._monotonic()
@@ -76,7 +87,8 @@ class KaggleRequestPolicy:
         if retry_after is not None:
             return min(retry_after, self.max_delay_seconds)
         exponential = self.base_delay_seconds * (2 ** (attempt - 1))
-        return min(exponential, self.max_delay_seconds)
+        jitter = exponential * self.jitter_fraction * self._random_value()
+        return min(exponential + jitter, self.max_delay_seconds)
 
 
 def create_kaggle_api() -> Any:
@@ -144,11 +156,7 @@ def extract_retry_after(exc: BaseException) -> float | None:
         if not isinstance(candidate, Mapping):
             continue
         raw_value = next(
-            (
-                value
-                for key, value in candidate.items()
-                if str(key).lower() == "retry-after"
-            ),
+            (value for key, value in candidate.items() if str(key).lower() == "retry-after"),
             None,
         )
         try:
@@ -184,9 +192,7 @@ def _safe_attribute(value: Any, name: str) -> Any:
 
 def _response_field(response: Any, *names: str) -> Any:
     if isinstance(response, dict):
-        normalized = {
-            _normalize_response_key(str(key)): value for key, value in response.items()
-        }
+        normalized = {_normalize_response_key(str(key)): value for key, value in response.items()}
         for name in names:
             key = _normalize_response_key(name)
             if key in normalized:

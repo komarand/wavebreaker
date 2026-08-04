@@ -105,7 +105,16 @@ def collect_facts(
         limitation = getattr(discussion_result, "limitation", None)
         if limitation:
             limitations.append(limitation)
-        if discussion_status in {"failed", "unavailable"} and discussion_error:
+        if (
+            discussion_status
+            in {
+                "partial",
+                "rate_limited",
+                "failed",
+                "unavailable",
+            }
+            and discussion_error
+        ):
             collection_errors.append(discussion_error)
     except Exception as exc:
         collection_errors.append(_stage_error("competition discussions", exc))

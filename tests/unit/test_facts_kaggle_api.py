@@ -47,9 +47,7 @@ def test_unpack_list_response_accepts_kaggle_2_envelopes(
     collection_name: str,
 ) -> None:
     item = {"ref": collection_name}
-    response = SimpleNamespace(
-        **{collection_name: [item], "next_page_token": "next-token"}
-    )
+    response = SimpleNamespace(**{collection_name: [item], "next_page_token": "next-token"})
 
     unpacked = unpack_list_response(response, collection_name)
 
@@ -169,9 +167,7 @@ def test_non_retryable_kaggle_statuses_are_not_retried(status: int) -> None:
 
 
 def test_retry_after_is_read_without_exposing_response_body() -> None:
-    exc = SimpleNamespace(
-        response=SimpleNamespace(headers={"Retry-After": "12.5"})
-    )
+    exc = SimpleNamespace(response=SimpleNamespace(headers={"Retry-After": "12.5"}))
 
     assert extract_retry_after(exc) == pytest.approx(12.5)
 
@@ -202,6 +198,35 @@ def test_request_policy_retries_with_bounded_exponential_backoff() -> None:
     assert policy.call(operation) == "ok"
     assert attempts == 3
     assert clock.sleeps == [1, 2]
+
+
+def test_request_policy_can_add_bounded_deterministic_jitter() -> None:
+    clock = _FakeClock()
+    attempts = 0
+
+    class RateLimited(RuntimeError):
+        status = 429
+
+    def operation() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RateLimited("rate limited")
+        return "ok"
+
+    policy = KaggleRequestPolicy(
+        max_attempts=2,
+        base_delay_seconds=2,
+        max_delay_seconds=10,
+        min_interval_seconds=0,
+        jitter_fraction=0.25,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+        random_value=lambda: 0.5,
+    )
+
+    assert policy.call(operation) == "ok"
+    assert clock.sleeps == [2.25]
 
 
 def test_request_policy_caps_retry_after_and_attempt_count() -> None:

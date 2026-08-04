@@ -14,10 +14,7 @@ from kaggle_researcher.facts.models import (
 )
 
 NOTEBOOK_FIXTURE = (
-    Path(__file__).resolve().parents[1]
-    / "fixtures"
-    / "facts"
-    / "notebook_groupkfold.ipynb"
+    Path(__file__).resolve().parents[1] / "fixtures" / "facts" / "notebook_groupkfold.ipynb"
 )
 
 
@@ -81,6 +78,11 @@ def test_wave_facts_writes_offline_checkpoint_and_cluster_summary(
     assert "lineage clusters: 1" in output
     assert "'StratifiedGroupKFold': 1" in output
     assert "discussions: 2" in output
+    assert "topics: 1" in output
+    assert "messages: 0" in output
+    assert "writeup candidates: 0" in output
+    assert "external links: 0" in output
+    assert "failed topics: 0" in output
     assert "public notebook scores: 2" in output
     assert "cv observations: 2" in output
     assert "comparable cv/lb pairs: 2" in output
@@ -156,9 +158,7 @@ def _patch_offline_stages(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         collect,
         "fetch_winner_writeups",
-        lambda slugs, limit: [
-            _discussion(slug, "winner_writeup") for slug in slugs
-        ],
+        lambda slugs, limit: [_discussion(slug, "winner_writeup") for slug in slugs],
     )
 
 

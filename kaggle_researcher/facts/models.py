@@ -85,16 +85,52 @@ class NotebookFacts(BaseModel):
     parse_status: Literal["ok", "partial", "failed"]
 
 
+class DiscussionLink(BaseModel):
+    url: str
+    text: str | None = None
+    kind: Literal["kaggle", "external", "relative"]
+
+
+class DiscussionMessageFacts(BaseModel):
+    evidence_id: str
+    message_id: str
+    topic_id: str
+    author_name: str | None = None
+    author_slug: str | None = None
+    author_id: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    votes: int | None = None
+    content_html: str | None = None
+    content_text: str = ""
+    content_sha256: str
+    content_truncated: bool = False
+    content_original_length: int = 0
+    links: list[DiscussionLink] = Field(default_factory=list)
+
+
 class DiscussionFacts(BaseModel):
     topic_id: str
     title: str
     author: str | None = None
-    author_is_host: bool
-    votes: int
+    author_is_host: bool | None = None
+    votes: int = 0
     created_at: datetime | None = None
+    updated_at: datetime | None = None
     source_type: Literal["discussion", "winner_writeup"]
     competition_id: str
-    text: str
+    text: str = ""
+    evidence_id: str | None = None
+    url: str | None = None
+    url_constructed: bool = False
+    comment_count: int | None = None
+    is_writeup_candidate: bool = False
+    writeup_signals: list[str] = Field(default_factory=list)
+    messages: list[DiscussionMessageFacts] = Field(default_factory=list)
+    collection_status: Literal["collected", "empty", "rate_limited", "forbidden", "failed"] = (
+        "collected"
+    )
+    collection_error: str | None = None
 
 
 class LeaderboardStability(BaseModel):
@@ -119,13 +155,10 @@ class LeaderboardStability(BaseModel):
         if self.status == "computed":
             if self.not_computable_reason:
                 raise ValueError(
-                    "computed leaderboard stability cannot have a "
-                    "not_computable_reason"
+                    "computed leaderboard stability cannot have a " "not_computable_reason"
                 )
             if self.match_fraction is None:
-                raise ValueError(
-                    "computed leaderboard stability requires match_fraction"
-                )
+                raise ValueError("computed leaderboard stability requires match_fraction")
             if self.match_fraction < MIN_LEADERBOARD_MATCH_FRACTION:
                 raise ValueError(
                     "computed leaderboard stability requires match_fraction of at "
@@ -138,9 +171,7 @@ class LeaderboardStability(BaseModel):
                 )
         else:
             if not self.not_computable_reason or not self.not_computable_reason.strip():
-                raise ValueError(
-                    "not_computable leaderboard stability requires a reason"
-                )
+                raise ValueError("not_computable leaderboard stability requires a reason")
             if any(metric is not None for metric in derived_metrics):
                 raise ValueError(
                     "not_computable leaderboard stability cannot contain derived metrics"
@@ -200,7 +231,13 @@ class CompetitionFacts(BaseModel):
     score_diagnostics: ScoreDiagnostics = Field(default_factory=ScoreDiagnostics)
 
     discussion_collection_status: Literal[
-        "collected", "empty", "forbidden", "unavailable", "failed"
+        "collected",
+        "partial",
+        "empty",
+        "rate_limited",
+        "forbidden",
+        "unavailable",
+        "failed",
     ] = "empty"
     discussion_collection_error: str | None = None
     discussion_auth_mode: Literal["legacy", "oauth", "unknown"] = "unknown"

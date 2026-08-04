@@ -102,14 +102,10 @@ def _run_facts(args: argparse.Namespace) -> None:
     facts = collect_facts(
         slug=args.slug,
         max_notebooks=(
-            args.max_notebooks
-            if args.max_notebooks is not None
-            else DEFAULT_MAX_NOTEBOOKS
+            args.max_notebooks if args.max_notebooks is not None else DEFAULT_MAX_NOTEBOOKS
         ),
         max_discussions=(
-            args.max_discussions
-            if args.max_discussions is not None
-            else DEFAULT_MAX_DISCUSSIONS
+            args.max_discussions if args.max_discussions is not None else DEFAULT_MAX_DISCUSSIONS
         ),
         writeups_per_competition=args.writeups_per_competition,
         similar=_parse_similar(args.similar),
@@ -170,14 +166,10 @@ def _facts_for_brief(args: argparse.Namespace) -> CompetitionFacts:
     return collect_facts(
         slug=args.slug,
         max_notebooks=(
-            args.max_notebooks
-            if args.max_notebooks is not None
-            else DEFAULT_MAX_NOTEBOOKS
+            args.max_notebooks if args.max_notebooks is not None else DEFAULT_MAX_NOTEBOOKS
         ),
         max_discussions=(
-            args.max_discussions
-            if args.max_discussions is not None
-            else DEFAULT_MAX_DISCUSSIONS
+            args.max_discussions if args.max_discussions is not None else DEFAULT_MAX_DISCUSSIONS
         ),
         writeups_per_competition=args.writeups_per_competition,
         similar=_parse_similar(args.similar),
@@ -235,11 +227,7 @@ def _print_brief_paths(
 
 
 def _run_journal(args: argparse.Namespace) -> None:
-    useful = (
-        args.brief_was_useful == "yes"
-        if args.brief_was_useful is not None
-        else None
-    )
+    useful = args.brief_was_useful == "yes" if args.brief_was_useful is not None else None
     journal.append_entry(
         competition_id=args.slug,
         brief_run_id=args.brief_run_id,
@@ -300,21 +288,40 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
         "notebooks with score observations: "
         f"{score_diagnostics.notebooks_with_score_observations}"
     )
-    print(
-        "canonical score metrics: "
-        f"{score_diagnostics.observations_with_canonical_metric}"
-    )
+    print("canonical score metrics: " f"{score_diagnostics.observations_with_canonical_metric}")
     print(
         "uncanonicalized score metrics: "
         f"{score_diagnostics.observations_without_canonical_metric}"
     )
-    print(
-        "title/ref score observations: "
-        f"{score_diagnostics.title_or_ref_observations}"
-    )
+    print("title/ref score observations: " f"{score_diagnostics.title_or_ref_observations}")
     print(f"excluded score candidates: {score_diagnostics.candidates_excluded}")
+    competition_discussions = [
+        discussion
+        for discussion in facts.discussions
+        if discussion.source_type == "discussion"
+        and discussion.competition_id == facts.competition_id
+    ]
+    message_count = sum(len(discussion.messages) for discussion in competition_discussions)
+    writeup_candidates = sum(
+        discussion.is_writeup_candidate for discussion in competition_discussions
+    )
+    external_links = sum(
+        link.kind == "external"
+        for discussion in competition_discussions
+        for message in discussion.messages
+        for link in message.links
+    )
+    failed_topics = sum(
+        discussion.collection_status not in {"collected", "empty"}
+        for discussion in competition_discussions
+    )
     print(f"discussions: {len(facts.discussions)}")
     print(f"discussion status: {facts.discussion_collection_status}")
+    print(f"topics: {len(competition_discussions)}")
+    print(f"messages: {message_count}")
+    print(f"writeup candidates: {writeup_candidates}")
+    print(f"external links: {external_links}")
+    print(f"failed topics: {failed_topics}")
     print(f"discussion auth: {facts.discussion_auth_mode}")
     if facts.discussion_collection_error:
         print(f"discussion error: {facts.discussion_collection_error}")
