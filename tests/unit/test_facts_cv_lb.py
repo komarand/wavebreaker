@@ -567,6 +567,92 @@ def test_unavailable_leaderboard_has_no_matches() -> None:
     assert match_leaderboard_scores([_notebook("alice/n", [], None, "lc")], leaderboard) == {}
 
 
+def test_implausible_bounded_metric_gap_is_rejected_and_counted() -> None:
+    notebook = _notebook("author/tolerance", [], 0.97085, "lc")
+    notebook.score_observations = [
+        _score("tol", 0.00001, "cv", None, metric_raw="tol")
+    ]
+
+    pairs = build_cv_lb_pairs([notebook], "Roc Auc Score")
+    diagnostics = diagnose_cv_lb([notebook], pairs, "Roc Auc Score")
+
+    assert pairs == []
+    assert diagnostics.pairs_rejected_implausible_gap == 1
+    assert diagnostics.leaderboard_pairs_rejected_implausible_gap == 0
+    assert diagnostics.zero_pairs_reason is not None
+    assert "implausible gap: 1" in diagnostics.zero_pairs_reason
+    assert summarize_cv_lb(pairs)["median_gap"] is None
+
+
+def test_implausible_leaderboard_match_gap_is_rejected_and_counted() -> None:
+    notebook = _notebook("author/tolerance", [], None, "lc")
+    notebook.score_observations = [
+        _score("tol", 0.00001, "cv", None, metric_raw="tol")
+    ]
+    match = LeaderboardMatch(
+        notebook_ref=notebook.ref,
+        team_name="author",
+        score=0.97085,
+        match_confidence="exact",
+    )
+    matches = {notebook.ref: match}
+
+    pairs = build_leaderboard_cv_lb_pairs(
+        [notebook],
+        matches,
+        "Roc Auc Score",
+    )
+    diagnostics = diagnose_cv_lb(
+        [notebook],
+        pairs,
+        "Roc Auc Score",
+        matches,
+    )
+
+    assert pairs == []
+    assert diagnostics.pairs_rejected_implausible_gap == 0
+    assert diagnostics.leaderboard_pairs_rejected_implausible_gap == 1
+    summary = summarize_cv_lb(pairs)
+    assert summary["leaderboard_pair_count"] == 0
+    assert summary["leaderboard_median_gap"] is None
+
+
+def test_gap_threshold_applies_only_to_bounded_metrics() -> None:
+    plausible_auc = _notebook("author/auc", [], 0.95, "lc_auc")
+    plausible_auc.score_observations = [
+        _score("cv", 0.45, "cv", None, metric_raw="score")
+    ]
+    unbounded = _notebook("author/rmse", [], 0.95, "lc_rmse")
+    unbounded.score_observations = [
+        _score("cv", 0.01, "cv", None, metric_raw="score")
+    ]
+
+    auc_pairs = build_cv_lb_pairs([plausible_auc], "roc_auc")
+    rmse_pairs = build_cv_lb_pairs([unbounded], "rmse")
+
+    assert len(auc_pairs) == 1
+    assert auc_pairs[0].gap == pytest.approx(-0.5)
+    assert len(rmse_pairs) == 1
+    assert rmse_pairs[0].gap == pytest.approx(-0.94)
+
+
+def test_implausible_score_observation_does_not_build_cv_lb_pair() -> None:
+    notebook = _notebook("author/implausible", [], None, "lc_bad")
+    notebook.score_observations = [
+        _score(
+            "bad-cv",
+            1e-5,
+            "cv",
+            "roc_auc",
+            plausible=False,
+            implausible_reason="excluded_label",
+        ),
+        _score("good-lb", 0.97, "lb", "roc_auc"),
+    ]
+
+    assert build_cv_lb_pairs([notebook], "roc_auc") == []
+
+
 def _score(
     observation_id: str,
     value: float,
@@ -577,6 +663,8 @@ def _score(
     source: str = "markdown",
     signals: list[str] | None = None,
     value_raw: str | None = None,
+    plausible: bool = True,
+    implausible_reason: str | None = None,
 ) -> ScoreObservation:
     return ScoreObservation(
         value=value,
@@ -590,6 +678,8 @@ def _score(
         split=split,
         split_signals=signals or [],
         observation_id=observation_id,
+        plausible=plausible,
+        implausible_reason=implausible_reason,
     )
 
 

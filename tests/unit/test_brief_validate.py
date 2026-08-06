@@ -14,6 +14,7 @@ from kaggle_researcher.facts.models import (
     DiscussionFacts,
     FileManifest,
     NotebookFacts,
+    ScoreObservation,
     UserConstraints,
 )
 from kaggle_researcher.research_scout_schemas import EdaTask, ResearchHypothesis
@@ -149,6 +150,42 @@ def test_mixed_trusted_and_discussion_fact_is_not_downgraded() -> None:
     assert validated.validation[0].kind == "fact"
     assert validated.validation[0].source_ids == ["facts", "topic-101"]
     assert not any("downgraded" in item for item in validated.limitations)
+
+
+def test_implausible_observation_only_fact_is_downgraded_without_rewriting() -> None:
+    facts = _facts(with_sources=True)
+    facts.notebooks[0].score_observations = [
+        ScoreObservation(
+            value=100.0,
+            value_raw="100.0",
+            metric_raw="ROC AUC",
+            metric_canonical=None,
+            locator="cell_0",
+            raw_text="ROC AUC: 100.0",
+            source="markdown",
+            plausible=False,
+            implausible_reason="value_out_of_range",
+        )
+    ]
+    claim = _claim(
+        "claim_bad_observation",
+        [facts.notebooks[0].ref],
+        text="The reported score is 100.0.",
+    )
+
+    validated = brief_validate.validate_brief(
+        _brief(validation=[claim], thesis_support=[claim.claim_id]),
+        facts,
+    )
+
+    result = validated.validation[0]
+    assert result.kind == "claim"
+    assert result.text == claim.text
+    assert result.source_ids == claim.source_ids
+    assert (
+        "Claim claim_bad_observation was downgraded from fact to claim: supporting "
+        "observations failed plausibility checks (value_out_of_range)."
+    ) in validated.limitations
 
 
 def test_validation_returns_a_new_brief_without_mutating_input() -> None:

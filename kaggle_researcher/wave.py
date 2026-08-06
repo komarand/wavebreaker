@@ -341,6 +341,16 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
     )
     print("title/ref score observations: " f"{score_diagnostics.title_or_ref_observations}")
     print(f"excluded score candidates: {score_diagnostics.candidates_excluded}")
+    if score_diagnostics.implausible_observations:
+        implausible_details = ", ".join(
+            f"{reason} {count}"
+            for reason, count in sorted(score_diagnostics.implausible_observations.items())
+        )
+        print(
+            "implausible observations: "
+            f"{sum(score_diagnostics.implausible_observations.values())} "
+            f"({implausible_details})"
+        )
     if score_diagnostics.notebooks_failed_by_status:
         print(
             "notebook pull failures by HTTP status: "
@@ -359,6 +369,9 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
             f"metric_mismatch={diagnostics.pairs_rejected_metric_mismatch}, "
             f"ambiguous_metric={diagnostics.pairs_rejected_ambiguous_metric}, "
             f"scale_mismatch={diagnostics.pairs_rejected_scale_mismatch}, "
+            f"implausible_gap={diagnostics.pairs_rejected_implausible_gap}, "
+            "leaderboard_implausible_gap="
+            f"{diagnostics.leaderboard_pairs_rejected_implausible_gap}, "
             f"ambiguous_split={diagnostics.pairs_rejected_ambiguous_split}"
         )
     competition_discussions = [

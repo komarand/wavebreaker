@@ -298,6 +298,7 @@ def _score_observation_summary(notebooks: list[NotebookFacts]) -> dict[str, Any]
         (notebook.ref, observation)
         for notebook in notebooks
         for observation in notebook.score_observations
+        if observation.plausible
     ]
     by_split: dict[str, list[tuple[str, ScoreObservation]]] = {
         split: [item for item in observations if item[1].split == split]

@@ -100,6 +100,41 @@ def test_conflicting_and_duplicate_signals_are_unknown_and_deterministic() -> No
     assert first[1] == ["cv", "lb", "public"]
 
 
+@pytest.mark.parametrize(
+    ("metric_raw", "context_text", "expected", "signal"),
+    [
+        (
+            "Out-of-fold ROC AUC",
+            "Out-of-fold ROC AUC 0.969687; public submission scored 0.97084.",
+            "cv",
+            "fold",
+        ),
+        (
+            "Public LB",
+            "Public LB 0.97084 after OOF AUC 0.969687.",
+            "lb",
+            "lb",
+        ),
+    ],
+)
+def test_explicit_observation_side_takes_priority_over_neighboring_context(
+    metric_raw: str,
+    context_text: str,
+    expected: str,
+    signal: str,
+) -> None:
+    split, signals = classify_score_split(
+        source_kind="markdown",
+        context_text=context_text,
+        context_signals=[],
+        metric_raw=metric_raw,
+        locator="cell_0",
+    )
+
+    assert split == expected
+    assert signal in signals
+
+
 def test_recognized_metric_next_to_explicit_lb_is_classified_as_cv() -> None:
     split, signals = classify_score_split(
         source_kind="code_string",

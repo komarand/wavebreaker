@@ -74,6 +74,32 @@ def test_score_observations_are_passed_to_existing_reasoning_context() -> None:
     assert '"raw_text":"custom wildlife score: 0.8123"' in packed.text
 
 
+def test_implausible_score_observations_are_not_sent_to_model_context() -> None:
+    notebook = _notebook("author/notebook")
+    notebook.score_observations = [
+        ScoreObservation(
+            value=100.0,
+            value_raw="100.0",
+            metric_raw="ROC AUC",
+            metric_canonical=None,
+            locator="cell_0",
+            raw_text="ROC AUC: 100.0",
+            source="markdown",
+            plausible=False,
+            implausible_reason="value_out_of_range",
+        )
+    ]
+
+    packed = pack_brief_context(_facts(notebooks=[notebook]), 20_000)
+    ast_payload = _ast_payloads(packed.text)[0]
+
+    assert ast_payload["score_observations"] == {
+        "unknown": {"count": 0},
+        "examples": [],
+    }
+    assert "ROC AUC: 100.0" not in packed.text
+
+
 def test_ast_score_observations_are_summarized_with_three_small_examples() -> None:
     notebook = _notebook("author/notebook")
     notebook.score_observations = [

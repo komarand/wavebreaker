@@ -38,6 +38,8 @@ class ScoreObservation(BaseModel):
     source_kind: str | None = None
     context_text: str = ""
     context_signals: list[str] = Field(default_factory=list)
+    plausible: bool = True
+    implausible_reason: str | None = None
 
 
 class CompetitionMetadata(BaseModel):
@@ -265,6 +267,8 @@ class CvLbDiagnostics(BaseModel):
     pairs_rejected_missing_lb: int = 0
     pairs_rejected_metric_mismatch: int = 0
     pairs_rejected_scale_mismatch: int = 0
+    pairs_rejected_implausible_gap: int = 0
+    leaderboard_pairs_rejected_implausible_gap: int = 0
     pairs_rejected_ambiguous_metric: int = 0
     pairs_rejected_ambiguous_split: int = 0
     fold_series_aggregated: int = 0
@@ -287,6 +291,7 @@ class ScoreDiagnostics(BaseModel):
     notebooks_with_cv_scores: int = 0
     notebooks_with_lb_scores: int = 0
     notebooks_with_both_sides: int = 0
+    implausible_observations: dict[str, int] = Field(default_factory=dict)
     notebooks_failed_by_status: dict[int, int] = Field(default_factory=dict)
     notebooks_failed_by_exception: dict[str, int] = Field(default_factory=dict)
 

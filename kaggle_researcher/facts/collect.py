@@ -156,6 +156,7 @@ def collect_facts(
         notebooks,
         cv_lb_pairs,
         metadata.metric_name,
+        leaderboard_matches,
     )
     score_diagnostics = diagnose_scores(notebooks).model_copy(
         update={

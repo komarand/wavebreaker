@@ -28,6 +28,7 @@ def validate_brief(
     """Return a source-validated copy using drop, move, and record operations only."""
     valid_source_ids = _valid_source_ids(facts)
     discussion_source_ids = {discussion.topic_id for discussion in facts.discussions}
+    implausible_observation_sources = _implausible_observation_sources(facts)
     limitations = list(brief.limitations)
     unknowns = list(brief.unknowns)
     cv_lb_summary = summarize_cv_lb(facts.cv_lb_pairs)
@@ -65,6 +66,23 @@ def validate_brief(
                 limitations.append(
                     f"Claim {claim.claim_id} was downgraded from fact to claim because "
                     "it is supported only by discussion or writeup sources."
+                )
+            if (
+                validated_claim.kind == "fact"
+                and set(retained_source_ids) <= implausible_observation_sources.keys()
+            ):
+                reasons = sorted(
+                    {
+                        reason
+                        for source_id in retained_source_ids
+                        for reason in implausible_observation_sources[source_id]
+                    }
+                )
+                validated_claim = validated_claim.model_copy(update={"kind": "claim"})
+                limitations.append(
+                    f"Claim {claim.claim_id} was downgraded from fact to claim: "
+                    "supporting observations failed plausibility checks "
+                    f"({', '.join(reasons)})."
                 )
             validated_claims.append(validated_claim)
         validated_sections[section_name] = validated_claims
@@ -165,6 +183,20 @@ def _valid_source_ids(facts: CompetitionFacts) -> set[str]:
         *(notebook.ref for notebook in facts.notebooks),
         *(discussion.topic_id for discussion in facts.discussions),
     }
+
+
+def _implausible_observation_sources(
+    facts: CompetitionFacts,
+) -> dict[str, set[str]]:
+    sources: dict[str, set[str]] = {}
+    for notebook in facts.notebooks:
+        observations = notebook.score_observations
+        if not observations or any(observation.plausible for observation in observations):
+            continue
+        sources[notebook.ref] = {
+            observation.implausible_reason or "unspecified" for observation in observations
+        }
+    return sources
 
 
 def _invalid_source_limitation(claim: Claim, source_id: str) -> str:

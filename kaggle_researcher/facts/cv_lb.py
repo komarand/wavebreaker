@@ -183,6 +183,7 @@ def diagnose_cv_lb(
     notebooks: list[NotebookFacts],
     pairs: list[CvLbPair],
     competition_metric_name: str | None = None,
+    leaderboard_matches: dict[str, LeaderboardMatch] | None = None,
 ) -> CvLbDiagnostics:
     observation_pairs = [pair for pair in pairs if pair.lb_source == "observation"]
     leaderboard_pairs = [pair for pair in pairs if pair.lb_source == "leaderboard_match"]
@@ -199,10 +200,22 @@ def diagnose_cv_lb(
             "missing_lb",
             "metric_mismatch",
             "scale_mismatch",
+            "implausible_gap",
             "ambiguous_metric",
             "ambiguous_split",
         )
     }
+    leaderboard_results = [
+        _pair_notebook(
+            notebook.model_copy(update={"public_score": match.score}),
+            competition_metric_name,
+        )
+        for notebook in notebooks
+        if (match := (leaderboard_matches or {}).get(notebook.ref)) is not None
+    ]
+    leaderboard_implausible_gap_rejections = sum(
+        "implausible_gap" in result.rejections for result in leaderboard_results
+    )
     zero_pairs_reason = (
         _zero_pairs_reason(notebooks, rejection_counts) if not observation_pairs else None
     )
@@ -218,6 +231,7 @@ def diagnose_cv_lb(
         rejected_non_comparable_pairs=(
             rejection_counts["metric_mismatch"]
             + rejection_counts["scale_mismatch"]
+            + rejection_counts["implausible_gap"]
             + rejection_counts["ambiguous_metric"]
         ),
         zero_pairs_reason=zero_pairs_reason,
@@ -240,6 +254,10 @@ def diagnose_cv_lb(
         pairs_rejected_missing_lb=rejection_counts["missing_lb"],
         pairs_rejected_metric_mismatch=rejection_counts["metric_mismatch"],
         pairs_rejected_scale_mismatch=rejection_counts["scale_mismatch"],
+        pairs_rejected_implausible_gap=rejection_counts["implausible_gap"],
+        leaderboard_pairs_rejected_implausible_gap=(
+            leaderboard_implausible_gap_rejections
+        ),
         pairs_rejected_ambiguous_metric=rejection_counts["ambiguous_metric"],
         pairs_rejected_ambiguous_split=rejection_counts["ambiguous_split"],
         fold_series_aggregated=sum(
@@ -319,15 +337,21 @@ def _pair_notebook(
     cv_observations = _deduplicate_observations(
         observation
         for observation in notebook.score_observations
-        if observation.split == "cv" and _finite_float(observation.value) is not None
+        if observation.plausible
+        and observation.split == "cv"
+        and _finite_float(observation.value) is not None
     )
     lb_observations = _deduplicate_observations(
         observation
         for observation in notebook.score_observations
-        if observation.split == "lb" and _finite_float(observation.value) is not None
+        if observation.plausible
+        and observation.split == "lb"
+        and _finite_float(observation.value) is not None
     )
     unknown_observations = [
-        observation for observation in notebook.score_observations if observation.split == "unknown"
+        observation
+        for observation in notebook.score_observations
+        if observation.plausible and observation.split == "unknown"
     ]
     cv_groups = _observation_groups(
         cv_observations,
@@ -386,6 +410,9 @@ def _pair_notebook(
             metric_canonical or competition_metric_name,
         )
         gap = cv_side.value - lb_side.value
+        if not _gap_is_plausible(gap, metric_canonical):
+            rejections.add("implausible_gap")
+            continue
         pairs.append(
             CvLbPair(
                 notebook_ref=notebook.ref,
@@ -608,6 +635,10 @@ def _scales_are_compatible(
     return cv_large == lb_large
 
 
+def _gap_is_plausible(gap: float, metric_canonical: str | None) -> bool:
+    return metric_canonical not in _BOUNDED_METRICS or abs(gap) <= 0.5
+
+
 def _resolve_direction(
     cv_direction: OptimizationDirection | None,
     lb_direction: OptimizationDirection | None,
@@ -705,6 +736,7 @@ def _zero_pairs_reason(
         f"metric mismatch: {rejection_counts['metric_mismatch']}",
         f"ambiguous metric: {rejection_counts['ambiguous_metric']}",
         f"scale mismatch: {rejection_counts['scale_mismatch']}",
+        f"implausible gap: {rejection_counts['implausible_gap']}",
         f"unknown/conflicting split: {rejection_counts['ambiguous_split']}",
     ]
     return "No comparable CV/LB pairs (" + "; ".join(reasons) + ")."

@@ -8,6 +8,7 @@ import math
 import re
 import tokenize
 import warnings
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, Literal
@@ -141,19 +142,27 @@ _LB_SPLIT_SIGNALS = (
 )
 EXCLUDED_SCORE_LABELS = frozenset(
     {
+        "abs_tol",
+        "atol",
         "batch_size",
         "default",
         "dimension",
         "dropout",
+        "delta",
         "embed_dim",
         "embedding_dimension",
         "epoch",
         "epochs",
+        "early_stopping_min_delta",
+        "eps",
+        "epsilon",
         "fold",
         "factor",
         "frac",
         "frac_per_id",
         "fraction",
+        "ftol",
+        "gtol",
         "image_size",
         "img_size",
         "input_size",
@@ -165,11 +174,14 @@ EXCLUDED_SCORE_LABELS = frozenset(
         "lr",
         "margin",
         "max_epochs",
+        "min_delta",
         "n_splits",
         "num_folds",
         "num_workers",
         "patience",
         "random_state",
+        "rel_tol",
+        "rtol",
         "resolution",
         "scale",
         "seed",
@@ -177,6 +189,7 @@ EXCLUDED_SCORE_LABELS = frozenset(
         "steps",
         "test_split",
         "threshold",
+        "tol",
         "top_k",
         "total_steps",
         "train_split",
@@ -185,6 +198,7 @@ EXCLUDED_SCORE_LABELS = frozenset(
         "warmup_steps",
         "weight_decay",
         "workers",
+        "xtol",
     }
 )
 CANONICAL_METRIC_ALIASES: dict[str, str] = {
@@ -206,7 +220,50 @@ CANONICAL_METRIC_ALIASES: dict[str, str] = {
     "rocauc": "roc_auc",
     "top1": "rank-1",
 }
+GENERIC_METRIC_LABELS = frozenset(
+    {
+        "bestscore",
+        "cv",
+        "lb",
+        "leaderboard",
+        "oof",
+        "privatelb",
+        "privatescore",
+        "publiclb",
+        "publicscore",
+        "score",
+        "scored",
+        "scores",
+        "validation",
+    }
+)
 MAX_EXPRESSION_LENGTH = 80
+MAX_METRIC_LABEL_CHARS = 24
+MAX_METRIC_LABEL_TOKENS = 3
+METRIC_VALUE_RANGE: dict[str, tuple[float, float]] = {
+    "auc": (0.0, 1.0),
+    "average_precision": (0.0, 1.0),
+    "accuracy": (0.0, 1.0),
+    "f1": (0.0, 1.0),
+    "precision": (0.0, 1.0),
+    "recall": (0.0, 1.0),
+    "map": (0.0, 1.0),
+    "ap50": (0.0, 1.0),
+    "ap75": (0.0, 1.0),
+    "iou": (0.0, 1.0),
+    "dice": (0.0, 1.0),
+    "top1": (0.0, 1.0),
+    "top5": (0.0, 1.0),
+    "kappa": (-1.0, 1.0),
+    "mcc": (-1.0, 1.0),
+    "r2": (float("-inf"), 1.0),
+    "gini": (-1.0, 1.0),
+}
+_METRIC_RANGE_ALIASES = {
+    "mAP": "map",
+    "rank-1": "top1",
+    "roc_auc": "auc",
+}
 
 
 def extract_observations(
@@ -547,11 +604,11 @@ def extract_score_observations(
             candidates_seen += 1
             metric_raw = " ".join(match.group("label").strip().split()) or None
             value_raw = match.group("value")
-            if _is_excluded_score_label(metric_raw) or not _is_text_score_position(
-                metric_raw,
-                value_raw,
-                implicit=implicit_position,
-                metric_hints=metric_hints,
+            excluded_label = _is_excluded_score_label(metric_raw)
+            if excluded_label:
+                candidates_excluded += 1
+            if not excluded_label and not _is_text_score_position(
+                metric_raw, value_raw, implicit=implicit_position, metric_hints=metric_hints
             ):
                 candidates_excluded += 1
                 continue
@@ -560,20 +617,29 @@ def extract_score_observations(
                 candidates_excluded += 1
                 continue
             raw_text = " ".join(match.group(0).strip().split())
+            metric_canonical = canonicalize_metric_label(
+                metric_raw,
+                metric_hints=metric_hints,
+            )
+            plausible, implausible_reason, metric_canonical, value = _score_plausibility(
+                metric_raw=metric_raw,
+                metric_canonical=metric_canonical,
+                value=value,
+                raw_text=raw_text,
+            )
             observations.append(
                 ScoreObservation(
                     value=value,
                     value_raw=value_raw,
                     metric_raw=metric_raw,
-                    metric_canonical=canonicalize_metric_label(
-                        metric_raw,
-                        metric_hints=metric_hints,
-                    ),
+                    metric_canonical=metric_canonical,
                     locator=locator,
                     raw_text=raw_text,
                     source=source,
                     source_kind=source,
                     context_text=_score_context(text, match.start(), match.end()),
+                    plausible=plausible,
+                    implausible_reason=implausible_reason,
                 )
             )
 
@@ -646,7 +712,10 @@ def _code_score_observations(
         if numeric is None:
             continue
         candidates_seen += 1
-        if _is_excluded_score_label(metric_raw) or not _is_code_score_label(
+        excluded_label = _is_excluded_score_label(metric_raw)
+        if excluded_label:
+            candidates_excluded += 1
+        if not excluded_label and not _is_code_score_label(
             metric_raw,
             metric_hints=metric_hints,
         ):
@@ -655,20 +724,34 @@ def _code_score_observations(
         value, value_raw = numeric
         raw_text = ast.get_source_segment(source_text, context_node)
         compact_text = " ".join((raw_text or f"{metric_raw}={value_raw}").split())
+        metric_canonical = canonicalize_metric_label(
+            metric_raw,
+            metric_hints=metric_hints,
+        )
+        (
+            plausible,
+            implausible_reason,
+            metric_canonical,
+            value,
+        ) = _score_plausibility(
+            metric_raw=metric_raw,
+            metric_canonical=metric_canonical,
+            value=value,
+            raw_text=compact_text,
+        )
         observations.append(
             ScoreObservation(
                 value=value,
                 value_raw=value_raw,
                 metric_raw=metric_raw,
-                metric_canonical=canonicalize_metric_label(
-                    metric_raw,
-                    metric_hints=metric_hints,
-                ),
+                metric_canonical=metric_canonical,
                 locator=locator,
                 raw_text=compact_text[:160],
                 source="code",
                 source_kind="code",
                 context_text=compact_text[:320],
+                plausible=plausible,
+                implausible_reason=implausible_reason,
             )
         )
     return observations, candidates_seen, candidates_excluded
@@ -788,7 +871,11 @@ def classify_score_split(
         if part
     )
     primary_cv, primary_lb = _score_split_signals(primary_text)
-    if primary_cv or primary_lb:
+    if primary_cv and not primary_lb:
+        return "cv", list(dict.fromkeys(primary_cv))
+    if primary_lb and not primary_cv:
+        return "lb", list(dict.fromkeys(primary_lb))
+    if primary_cv and primary_lb:
         context_cv, context_lb = _score_split_signals(context_text)
         return _split_from_signals(
             list(dict.fromkeys([*context_cv, *primary_cv])),
@@ -875,6 +962,7 @@ def recanonicalize_score_observations(
     *,
     competition_metric_name: str | None,
 ) -> list[NotebookFacts]:
+    competition_metric_canonical = canonicalize_metric_label(competition_metric_name)
     metric_hints = _normalized_metric_hints(
         metric_hint
         for metric_hint in (
@@ -887,6 +975,7 @@ def recanonicalize_score_observations(
     for notebook in notebooks:
         score_observations: list[ScoreObservation] = []
         for observation in notebook.score_observations:
+            source_kind = observation.source_kind or observation.source
             metric_canonical = (
                 canonicalize_metric_label(
                     observation.metric_raw,
@@ -894,8 +983,25 @@ def recanonicalize_score_observations(
                 )
                 or observation.metric_canonical
             )
+            if (
+                metric_canonical is None
+                and competition_metric_canonical is not None
+                and _is_generic_metric_label(observation.metric_raw, source_kind)
+            ):
+                metric_canonical = competition_metric_canonical
+            (
+                plausible,
+                implausible_reason,
+                metric_canonical,
+                normalized_value,
+            ) = _score_plausibility(
+                metric_raw=observation.metric_raw,
+                metric_canonical=metric_canonical,
+                value=observation.value,
+                raw_text=observation.raw_text,
+            )
             split, split_signals = classify_score_split(
-                source_kind=observation.source_kind or observation.source,
+                source_kind=source_kind,
                 context_text=observation.context_text or observation.raw_text,
                 context_signals=[],
                 metric_raw=observation.metric_raw,
@@ -904,12 +1010,15 @@ def recanonicalize_score_observations(
             updated = observation.model_copy(
                 update={
                     "metric_canonical": metric_canonical,
+                    "value": normalized_value,
                     "split": split,
                     "split_signals": split_signals,
-                    "source_kind": observation.source_kind or observation.source,
+                    "source_kind": source_kind,
                     "optimization_direction": metric_optimization_direction(
                         metric_canonical or observation.metric_raw
                     ),
+                    "plausible": plausible,
+                    "implausible_reason": implausible_reason,
                 }
             )
             score_observations.append(
@@ -982,46 +1091,78 @@ def recanonicalize_score_observations(
     return canonicalized_notebooks
 
 
+def _is_generic_metric_label(metric_raw: str | None, source_kind: str) -> bool:
+    if metric_raw is None:
+        return source_kind in {"title", "ref", "notebook_title", "notebook_ref"}
+    normalized = "".join(
+        character for character in metric_raw.casefold() if character.isalnum()
+    )
+    return normalized in GENERIC_METRIC_LABELS
+
+
 def diagnose_scores(notebooks: list[NotebookFacts]) -> ScoreDiagnostics:
     observations = [
         observation for notebook in notebooks for observation in notebook.score_observations
     ]
+    plausible_observations = [observation for observation in observations if observation.plausible]
+    implausible_observations = Counter(
+        observation.implausible_reason or "unspecified"
+        for observation in observations
+        if not observation.plausible
+    )
     return ScoreDiagnostics(
         notebooks_total=len(notebooks),
         notebooks_with_score_observations=sum(
-            bool(notebook.score_observations) for notebook in notebooks
+            any(observation.plausible for observation in notebook.score_observations)
+            for notebook in notebooks
         ),
-        observations_total=len(observations),
+        observations_total=len(plausible_observations),
         observations_with_raw_metric=sum(
-            observation.metric_raw is not None for observation in observations
+            observation.metric_raw is not None for observation in plausible_observations
         ),
         observations_with_canonical_metric=sum(
-            observation.metric_canonical is not None for observation in observations
+            observation.metric_canonical is not None for observation in plausible_observations
         ),
         observations_without_canonical_metric=sum(
-            observation.metric_canonical is None for observation in observations
+            observation.metric_canonical is None for observation in plausible_observations
         ),
         title_or_ref_observations=sum(
-            observation.source in {"title", "ref"} for observation in observations
+            observation.source in {"title", "ref"}
+            for observation in plausible_observations
         ),
         candidates_seen=sum(notebook.score_candidates_seen for notebook in notebooks),
         candidates_excluded=sum(notebook.score_candidates_excluded for notebook in notebooks),
-        split_cv=sum(observation.split == "cv" for observation in observations),
-        split_lb=sum(observation.split == "lb" for observation in observations),
-        split_unknown=sum(observation.split == "unknown" for observation in observations),
+        split_cv=sum(observation.split == "cv" for observation in plausible_observations),
+        split_lb=sum(observation.split == "lb" for observation in plausible_observations),
+        split_unknown=sum(
+            observation.split == "unknown" for observation in plausible_observations
+        ),
         notebooks_with_cv_scores=sum(
-            any(observation.split == "cv" for observation in notebook.score_observations)
+            any(
+                observation.plausible and observation.split == "cv"
+                for observation in notebook.score_observations
+            )
             for notebook in notebooks
         ),
         notebooks_with_lb_scores=sum(
-            any(observation.split == "lb" for observation in notebook.score_observations)
+            any(
+                observation.plausible and observation.split == "lb"
+                for observation in notebook.score_observations
+            )
             for notebook in notebooks
         ),
         notebooks_with_both_sides=sum(
-            any(observation.split == "cv" for observation in notebook.score_observations)
-            and any(observation.split == "lb" for observation in notebook.score_observations)
+            any(
+                observation.plausible and observation.split == "cv"
+                for observation in notebook.score_observations
+            )
+            and any(
+                observation.plausible and observation.split == "lb"
+                for observation in notebook.score_observations
+            )
             for notebook in notebooks
         ),
+        implausible_observations=dict(sorted(implausible_observations.items())),
     )
 
 
@@ -1032,6 +1173,8 @@ def _append_declared_cv_from_scores(
     observations: list[DeclaredCvObservation],
 ) -> None:
     for score_observation in score_observations:
+        if not score_observation.plausible:
+            continue
         has_legacy_cv_signal = VALIDATION_CONTEXT_PATTERN.search(
             score_observation.context_text or score_observation.raw_text
         )
@@ -1066,6 +1209,36 @@ def _score_value(raw_value: str) -> float | None:
     if raw_value.endswith("%"):
         value /= 100
     return value if math.isfinite(value) else None
+
+
+def _score_plausibility(
+    *,
+    metric_raw: str | None,
+    metric_canonical: str | None,
+    value: float,
+    raw_text: str,
+) -> tuple[bool, str | None, str | None, float]:
+    if metric_raw and (
+        len(metric_raw) > MAX_METRIC_LABEL_CHARS
+        or len(metric_raw.split()) > MAX_METRIC_LABEL_TOKENS
+    ):
+        return False, "label_too_long", metric_canonical, value
+    if _is_excluded_score_label(metric_raw):
+        return False, "excluded_label", metric_canonical, value
+
+    range_key = _METRIC_RANGE_ALIASES.get(metric_canonical or "", metric_canonical)
+    value_range = METRIC_VALUE_RANGE.get(range_key or "")
+    if value_range is None:
+        return True, None, metric_canonical, value
+
+    lower, upper = value_range
+    if value > upper and 0 < value <= 100 and "%" in raw_text:
+        value /= 100
+    if value < lower or value > upper:
+        return False, "value_out_of_range", None, value
+    if lower == 0.0 and value < 1e-3:
+        return False, "value_implausibly_small", metric_canonical, value
+    return True, None, metric_canonical, value
 
 
 def _is_excluded_score_label(metric_raw: str | None) -> bool:

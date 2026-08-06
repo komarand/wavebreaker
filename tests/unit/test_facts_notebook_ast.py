@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from kaggle_researcher.facts.models import CodeObservation, NotebookFacts
+from kaggle_researcher.facts.models import CodeObservation, NotebookFacts, ScoreObservation
 from kaggle_researcher.facts.notebook_ast import (
     _cell_source,
     _strip_magics,
@@ -150,7 +150,9 @@ def test_score_extraction_is_open_to_unknown_metric_labels(tmp_path: Path) -> No
     )
     assert result["score_observations"][0].metric_canonical is None
     assert result["score_observations"][1].metric_raw == "score"
-    assert result["declared_cv"] == ["0.8123"]
+    assert result["score_observations"][0].plausible is False
+    assert result["score_observations"][0].implausible_reason == "label_too_long"
+    assert result["declared_cv"] == []
 
 
 def test_known_score_labels_are_canonicalized_separately(tmp_path: Path) -> None:
@@ -196,9 +198,78 @@ def test_hyperparameter_labels_are_the_only_score_candidates_excluded() -> None:
 
     assert candidates_seen == 5
     assert candidates_excluded == 4
+    assert len(observations) == 5
+    assert sum(not observation.plausible for observation in observations) == 4
+    assert {observation.implausible_reason for observation in observations[:-1]} == {
+        "excluded_label"
+    }
+    assert observations[-1].metric_raw == "custom_distance"
+    assert observations[-1].value == pytest.approx(12.4)
+
+
+def test_optimizer_tolerance_is_retained_as_implausible_observation(
+    tmp_path: Path,
+) -> None:
+    notebook_path = _write_notebook(
+        tmp_path,
+        [_code_cell("tol=1e-05")],
+    )
+    result = extract_observations(notebook_path, metric_hints=["Roc Auc Score"])
+    observations = result["score_observations"]
+
     assert len(observations) == 1
-    assert observations[0].metric_raw == "custom_distance"
-    assert observations[0].value == pytest.approx(12.4)
+    assert observations[0].plausible is False
+    assert observations[0].implausible_reason == "excluded_label"
+
+
+def test_bounded_metric_without_percent_rejects_out_of_range_value() -> None:
+    observations, _, _ = extract_score_observations(
+        "ROC AUC: 100.0",
+        locator="cell_0",
+        source="markdown",
+    )
+
+    assert len(observations) == 1
+    assert observations[0].plausible is False
+    assert observations[0].implausible_reason == "value_out_of_range"
+    assert observations[0].metric_canonical is None
+
+
+def test_bounded_metric_percent_is_converted_and_remains_plausible() -> None:
+    observations, _, _ = extract_score_observations(
+        "ROC AUC: 95.2%",
+        locator="cell_0",
+        source="markdown",
+    )
+
+    assert len(observations) == 1
+    assert observations[0].value == pytest.approx(0.952)
+    assert observations[0].metric_canonical == "roc_auc"
+    assert observations[0].plausible is True
+
+
+def test_long_metric_label_is_retained_as_implausible_observation() -> None:
+    observations, _, _ = extract_score_observations(
+        "Fold-safe target encoding of exact values: 0.001",
+        locator="cell_0",
+        source="markdown",
+    )
+
+    assert len(observations) == 1
+    assert observations[0].plausible is False
+    assert observations[0].implausible_reason == "label_too_long"
+
+
+def test_unbounded_rmse_value_remains_plausible() -> None:
+    observations, _, _ = extract_score_observations(
+        "RMSE: 12.5",
+        locator="cell_0",
+        source="markdown",
+    )
+
+    assert len(observations) == 1
+    assert observations[0].metric_canonical == "rmse"
+    assert observations[0].plausible is True
 
 
 @pytest.mark.parametrize(
@@ -276,6 +347,43 @@ def test_score_canonicalization_uses_metrics_from_the_whole_notebook_corpus() ->
     assert canonicalized[0].score_observations[0].metric_canonical == "custom_quality"
 
 
+def test_competition_metric_canonicalizes_only_generic_score_labels() -> None:
+    observations = [
+        ScoreObservation(
+            value=value,
+            value_raw=str(value),
+            metric_raw=metric_raw,
+            metric_canonical=None,
+            locator=source,
+            raw_text=f"{metric_raw or 'encoded title'} {value}",
+            source=source,
+            source_kind=source,
+            split="unknown",
+        )
+        for value, metric_raw, source in (
+            (0.91, "score", "markdown"),
+            (0.90, "Public LB", "markdown"),
+            (0.89, None, "title"),
+            (0.001, "tol", "markdown"),
+        )
+    ]
+    notebook = _notebook_facts(
+        ref="author/generic-scores",
+        metrics=[],
+        score_observations=observations,
+    )
+
+    canonicalized = recanonicalize_score_observations(
+        [notebook],
+        competition_metric_name="Roc Auc Score",
+    )
+
+    assert [
+        observation.metric_canonical
+        for observation in canonicalized[0].score_observations
+    ] == ["roc_auc", "roc_auc", "roc_auc", None]
+
+
 def test_code_assignments_collect_score_positions_without_treating_all_numbers_as_scores(
     tmp_path: Path,
 ) -> None:
@@ -299,8 +407,13 @@ def test_code_assignments_collect_score_positions_without_treating_all_numbers_a
         "val_acc",
         "custom_metric",
         "score",
+        "learning_rate",
     ]
-    assert [item.value for item in observations] == pytest.approx([0.91, 12.4, 0.88])
+    assert observations[-1].plausible is False
+    assert observations[-1].implausible_reason == "excluded_label"
+    assert [item.value for item in observations] == pytest.approx(
+        [0.91, 12.4, 0.88, 0.001]
+    )
     assert result["score_candidates_seen"] == 5
     assert result["score_candidates_excluded"] == 2
     assert result["declared_cv"] == []
@@ -376,6 +489,7 @@ def test_score_diagnostics_keep_raw_and_canonical_counts() -> None:
     assert diagnostics.observations_without_canonical_metric == 1
     assert diagnostics.candidates_seen == 3
     assert diagnostics.candidates_excluded == 1
+    assert diagnostics.implausible_observations == {"excluded_label": 1}
 
 
 def test_ast_parse_suppresses_only_syntax_warning(tmp_path: Path) -> None:
