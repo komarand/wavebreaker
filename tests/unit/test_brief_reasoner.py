@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from kaggle_researcher import brief
-from kaggle_researcher.brief_prompts import BRIEF_SYSTEM_PROMPT
+from kaggle_researcher.brief_prompts import BRIEF_PROMPT_VERSION, BRIEF_SYSTEM_PROMPT
 from kaggle_researcher.brief_schemas import CompetitionBrief
 from kaggle_researcher.clients.deepseek_client import DeepSeekClientError
 from kaggle_researcher.config import Settings
@@ -36,6 +36,8 @@ async def test_happy_path_calls_pro_model_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = _valid_payload()
+    payload["prompt_version"] = "model-supplied-version"
+    payload["claim_stats"] = {"invalid": "model-supplied-stats"}
     client = StubClient([payload])
     created_with: list[str] = []
 
@@ -47,13 +49,24 @@ async def test_happy_path_calls_pro_model_exactly_once(
 
     result = await brief.generate_brief(_facts(), _settings())
 
-    assert result == CompetitionBrief.model_validate(payload)
+    expected_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"prompt_version", "claim_stats"}
+    }
+    assert result.model_copy(update={"prompt_version": None}) == (
+        CompetitionBrief.model_validate(expected_payload)
+    )
+    assert result.prompt_version == BRIEF_PROMPT_VERSION
+    assert result.claim_stats is None
     assert created_with == ["test-api-key"]
     assert len(client.calls) == 1
     assert client.calls[0]["model"] == "test-pro-model"
     assert client.calls[0]["system_prompt"] == BRIEF_SYSTEM_PROMPT
     assert "<PACKED_BRIEF_CONTEXT>" in client.calls[0]["user_prompt"]
     assert '<AVAILABLE_SOURCE_IDS>\n["facts"]' in client.calls[0]["user_prompt"]
+    assert BRIEF_PROMPT_VERSION not in client.calls[0]["system_prompt"]
+    assert BRIEF_PROMPT_VERSION not in client.calls[0]["user_prompt"]
 
 
 async def test_one_schema_failure_retries_once_with_validation_error(
@@ -65,6 +78,7 @@ async def test_one_schema_failure_retries_once_with_validation_error(
     result = await brief.generate_brief(_facts(), _settings())
 
     assert result.competition_id == "current-comp"
+    assert result.prompt_version == BRIEF_PROMPT_VERSION
     assert len(client.calls) == 2
     retry_prompt = client.calls[1]["user_prompt"]
     assert "<SCHEMA_VALIDATION_ERROR>" in retry_prompt

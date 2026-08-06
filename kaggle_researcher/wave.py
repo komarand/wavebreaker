@@ -12,8 +12,13 @@ from pydantic import BaseModel
 
 from kaggle_researcher import journal
 from kaggle_researcher.brief import generate_brief
+from kaggle_researcher.brief_schemas import CompetitionBrief
 from kaggle_researcher.brief_validate import validate_brief
-from kaggle_researcher.config import get_writeups_per_competition, load_config
+from kaggle_researcher.config import (
+    DEFAULT_MAX_SAMPLE_SUB_BYTES,
+    get_writeups_per_competition,
+    load_config,
+)
 from kaggle_researcher.facts.collect import collect_facts
 from kaggle_researcher.facts.cv_lb import summarize_cv_lb
 from kaggle_researcher.facts.models import CompetitionFacts, UserConstraints
@@ -23,7 +28,6 @@ from kaggle_researcher.report.docx_generator import generate_report
 OBJECTIVES = ("medal", "top_percent", "learn", "fast_baseline")
 DEFAULT_MAX_NOTEBOOKS = 20
 DEFAULT_MAX_DISCUSSIONS = 200
-DEFAULT_MAX_SAMPLE_SUB_BYTES = 5_000_000
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -156,6 +160,7 @@ def _run_brief(args: argparse.Namespace) -> None:
         markdown_path=markdown_path,
         docx_path=docx_path,
     )
+    _print_claim_stats(brief)
 
 
 def _facts_for_brief(args: argparse.Namespace) -> CompetitionFacts:
@@ -224,6 +229,20 @@ def _print_brief_paths(
     print(f"brief markdown: {markdown_path}")
     if docx_path is not None:
         print(f"brief docx: {docx_path}")
+
+
+def _print_claim_stats(brief: CompetitionBrief) -> None:
+    stats = brief.claim_stats
+    if stats is None:
+        return
+    print(
+        f"claims: {stats.total} (fact {stats.fact}, claim {stats.claim}, "
+        f"inference {stats.inference})"
+    )
+    print(
+        f"grounding rate: {stats.grounding_rate} across "
+        f"{stats.distinct_sources} sources"
+    )
 
 
 def _run_journal(args: argparse.Namespace) -> None:

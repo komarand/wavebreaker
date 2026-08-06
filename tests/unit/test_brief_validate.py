@@ -161,6 +161,61 @@ def test_validation_returns_a_new_brief_without_mutating_input() -> None:
     assert original.limitations == ["Existing limitation."]
 
 
+def test_claim_stats_describe_only_final_validated_claims() -> None:
+    facts = _facts(with_sources=True)
+    invalid = _claim("claim_removed", ["invalid-source"])
+    original = _brief(
+        validation=[_claim("claim_validation", ["facts"])],
+        metric_notes=[
+            _claim("claim_metric", ["topic-101"]).model_copy(
+                update={"kind": "claim"}
+            )
+        ],
+        leakage_risks=[
+            _claim("claim_leakage", ["author/notebook"]).model_copy(
+                update={"kind": "inference"}
+            )
+        ],
+        what_works=[invalid],
+        time_wasters=[_claim("claim_waste", ["facts", "topic-101"])],
+    )
+
+    validated = brief_validate.validate_brief(original, facts)
+
+    assert validated.claim_stats is not None
+    assert validated.claim_stats.model_dump() == {
+        "fact": 2,
+        "claim": 1,
+        "inference": 1,
+        "total": 4,
+        "grounded": 4,
+        "ungrounded": 0,
+        "grounding_rate": 1.0,
+        "distinct_sources": 3,
+    }
+    assert validated.what_works == []
+    assert "unsupported: Grounded claim text." in validated.unknowns
+    assert original.claim_stats is None
+
+
+def test_empty_validated_brief_has_zero_grounding_rate() -> None:
+    original = _brief(
+        thesis="",
+        thesis_support=[],
+        validation=[],
+    )
+
+    validated = brief_validate.validate_brief(original, _facts())
+
+    assert validated.claim_stats is not None
+    assert validated.claim_stats.total == 0
+    assert validated.claim_stats.grounded == 0
+    assert validated.claim_stats.ungrounded == 0
+    assert validated.claim_stats.grounding_rate == 0.0
+    assert validated.claim_stats.distinct_sources == 0
+    assert validated.limitations == original.limitations
+
+
 def test_insufficient_cv_lb_reliability_is_recorded_deterministically() -> None:
     facts = _facts()
     facts.cv_lb_pairs = [

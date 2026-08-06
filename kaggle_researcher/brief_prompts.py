@@ -1,9 +1,13 @@
+"""Brief prompt contract; increment its version whenever prompt text changes."""
+
 from __future__ import annotations
 
 import json
 
 from kaggle_researcher.brief_context import CV_LB_SOURCE_ID, NOTEBOOK_AST_SOURCE_ID
 from kaggle_researcher.brief_schemas import CompetitionBrief
+
+BRIEF_PROMPT_VERSION = "2026-08-05.1"
 
 _COMPETITION_BRIEF_SCHEMA = json.dumps(
     CompetitionBrief.model_json_schema(),

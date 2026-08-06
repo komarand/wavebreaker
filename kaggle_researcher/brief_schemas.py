@@ -14,9 +14,22 @@ class Claim(BaseModel):
     kind: Literal["fact", "claim", "inference"]
 
 
+class ClaimStats(BaseModel):
+    fact: int
+    claim: int
+    inference: int
+    total: int
+    grounded: int
+    ungrounded: int
+    grounding_rate: float
+    distinct_sources: int
+
+
 class CompetitionBrief(BaseModel):
     schema_version: str = "1.0"
     competition_id: str
+    prompt_version: str | None = None
+    claim_stats: ClaimStats | None = None
 
     thesis: str
     thesis_support: list[str]

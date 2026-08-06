@@ -99,6 +99,17 @@ def test_wave_brief_runs_offline_pipeline_and_writes_all_artifacts(
     )
     assert facts_payload["user_constraints"]["vram_gb"] == 12
     assert brief_payload["metric_notes"] == []
+    assert brief_payload["prompt_version"] == "2026-08-05.1"
+    assert brief_payload["claim_stats"] == {
+        "fact": 1,
+        "claim": 0,
+        "inference": 0,
+        "total": 1,
+        "grounded": 1,
+        "ungrounded": 0,
+        "grounding_rate": 1.0,
+        "distinct_sources": 1,
+    }
     assert "unsupported: Fabricated metric claim." in brief_payload["unknowns"]
     assert "## 1. Соревнование в цифрах" in markdown
     assert "## 10. Неизвестное" in markdown
@@ -112,6 +123,8 @@ def test_wave_brief_runs_offline_pipeline_and_writes_all_artifacts(
     output = capsys.readouterr().out
     assert f"brief json: {tmp_path / 'brief.json'}" in output
     assert f"brief docx: {tmp_path / 'brief.docx'}" in output
+    assert "claims: 1 (fact 1, claim 0, inference 0)" in output
+    assert "grounding rate: 1.0 across 1 sources" in output
 
 
 def test_facts_from_skips_collection_and_checkpoints_before_model_call(

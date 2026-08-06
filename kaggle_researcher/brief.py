@@ -6,7 +6,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from kaggle_researcher.brief_context import PackedBriefContext, pack_brief_context
-from kaggle_researcher.brief_prompts import BRIEF_SYSTEM_PROMPT
+from kaggle_researcher.brief_prompts import BRIEF_PROMPT_VERSION, BRIEF_SYSTEM_PROMPT
 from kaggle_researcher.brief_schemas import CompetitionBrief
 from kaggle_researcher.clients.deepseek_client import DeepSeekClient
 from kaggle_researcher.config import Settings
@@ -31,7 +31,7 @@ async def generate_brief(
         user_prompt=user_prompt,
     )
     try:
-        return CompetitionBrief.model_validate(payload)
+        return _brief_from_model_payload(payload)
     except ValidationError as first_error:
         retry_payload = await client.chat_json(
             model=settings.deepseek_v4_pro,
@@ -43,13 +43,23 @@ async def generate_brief(
             ),
         )
         try:
-            return CompetitionBrief.model_validate(retry_payload)
+            return _brief_from_model_payload(retry_payload)
         except ValidationError as retry_error:
             raise BriefGenerationError(
                 "DeepSeek returned an invalid CompetitionBrief after one schema retry. "
                 f"First validation error: {first_error}. "
                 f"Retry validation error: {retry_error}."
             ) from retry_error
+
+
+def _brief_from_model_payload(payload: dict[str, Any]) -> CompetitionBrief:
+    model_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"claim_stats", "prompt_version"}
+    }
+    brief = CompetitionBrief.model_validate(model_payload)
+    return brief.model_copy(update={"prompt_version": BRIEF_PROMPT_VERSION})
 
 
 def _initial_user_prompt(packed_context: PackedBriefContext) -> str:

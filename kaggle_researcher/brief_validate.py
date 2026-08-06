@@ -5,7 +5,7 @@ import re
 from decimal import Decimal, InvalidOperation
 
 from kaggle_researcher.brief_context import CV_LB_SOURCE_ID, TRUSTED_SOURCE_IDS
-from kaggle_researcher.brief_schemas import Claim, CompetitionBrief
+from kaggle_researcher.brief_schemas import Claim, ClaimStats, CompetitionBrief
 from kaggle_researcher.facts.cv_lb import summarize_cv_lb
 from kaggle_researcher.facts.models import CompetitionFacts
 
@@ -125,7 +125,38 @@ def validate_brief(
             "limitations": limitations,
         }
     )
-    return CompetitionBrief.model_validate(payload)
+    validated = CompetitionBrief.model_validate(payload)
+    return validated.model_copy(update={"claim_stats": _claim_stats(validated)})
+
+
+def _claim_stats(brief: CompetitionBrief) -> ClaimStats:
+    claims = [
+        claim
+        for section_name in CLAIM_SECTIONS
+        for claim in getattr(brief, section_name)
+    ]
+    kind_counts = {
+        kind: sum(claim.kind == kind for claim in claims)
+        for kind in ("fact", "claim", "inference")
+    }
+    grounded = sum(bool(claim.source_ids) for claim in claims)
+    total = len(claims)
+    return ClaimStats(
+        fact=kind_counts["fact"],
+        claim=kind_counts["claim"],
+        inference=kind_counts["inference"],
+        total=total,
+        grounded=grounded,
+        ungrounded=total - grounded,
+        grounding_rate=round(grounded / total, 4) if total else 0.0,
+        distinct_sources=len(
+            {
+                source_id
+                for claim in claims
+                for source_id in claim.source_ids
+            }
+        ),
+    )
 
 
 def _valid_source_ids(facts: CompetitionFacts) -> set[str]:

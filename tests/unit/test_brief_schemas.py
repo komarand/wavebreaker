@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from kaggle_researcher.brief_schemas import (
     Claim,
+    ClaimStats,
     CompetitionBrief,
 )
 from kaggle_researcher.brief_schemas import (
@@ -58,6 +59,17 @@ def test_claim_rejects_unstable_or_blank_identifier(claim_id: str) -> None:
 def test_competition_brief_round_trips_through_json() -> None:
     brief = CompetitionBrief(
         competition_id="example-comp",
+        prompt_version="2026-08-05.1",
+        claim_stats=ClaimStats(
+            fact=1,
+            claim=1,
+            inference=1,
+            total=3,
+            grounded=3,
+            ungrounded=0,
+            grounding_rate=1.0,
+            distinct_sources=3,
+        ),
         thesis="Validation design should drive the initial strategy.",
         thesis_support=["claim_validation", "claim_entities"],
         validation=[
@@ -97,6 +109,8 @@ def test_competition_brief_round_trips_through_json() -> None:
 
     assert restored == brief
     assert restored.schema_version == "1.0"
+    assert restored.prompt_version == "2026-08-05.1"
+    assert restored.claim_stats == brief.claim_stats
     assert isinstance(restored.hypotheses[0], ResearchHypothesis)
     assert isinstance(restored.eda_tasks[0], EdaTask)
 

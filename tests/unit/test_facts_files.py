@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 import kaggle_researcher.facts.files as files_module
+from kaggle_researcher.config import DEFAULT_MAX_SAMPLE_SUB_BYTES
 from kaggle_researcher.facts.files import (
     _find_downloaded_file,
     classify_role,
@@ -233,6 +234,31 @@ def test_download_reads_sample_header_and_never_downloads_train_or_test() -> Non
         "sample_submission.csv"
     ]
     assert temp_paths and not temp_paths[0].exists()
+
+
+def test_default_limit_downloads_multi_megabyte_sample_submission() -> None:
+    FakeKaggleApi.list_response = {
+        "files": [
+            {
+                "name": "sample_submission.csv",
+                "totalBytes": 7_703_870,
+            }
+        ]
+    }
+
+    def write_sample(_: str, file_name: str, path: Path) -> None:
+        (path / file_name).write_text("id,target\n1,0.5\n", encoding="utf-8")
+
+    FakeKaggleApi.download_impl = write_sample
+
+    manifest = fetch_file_manifest(
+        "playground",
+        max_sample_sub_bytes=DEFAULT_MAX_SAMPLE_SUB_BYTES,
+    )
+
+    assert DEFAULT_MAX_SAMPLE_SUB_BYTES == 50_000_000
+    assert manifest.sample_submission_status == "full_download"
+    assert manifest.sample_submission_columns == ["id", "target"]
 
 
 def test_zip_sample_header_is_read_without_extracting_archive() -> None:
