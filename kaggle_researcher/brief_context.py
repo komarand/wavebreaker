@@ -115,6 +115,35 @@ def pack_brief_context(
         omitted_units.extend(optional_units[index:])
         break
 
+    context_note = _context_omission_note(omitted_units)
+    while context_note and _tokens_for_bytes(
+        used_bytes
+        + len(_CONTEXT_SEPARATOR.encode("utf-8"))
+        + len(context_note.encode("utf-8"))
+    ) > max_context_tokens:
+        if len(included_units) == len(trusted_units):
+            required_tokens = _tokens_for_bytes(
+                trusted_bytes
+                + len(_CONTEXT_SEPARATOR.encode("utf-8"))
+                + len(context_note.encode("utf-8"))
+            )
+            raise ContextBudgetError(
+                "Trusted context plus its required omission note requires "
+                f"{required_tokens} tokens but max_context_tokens is "
+                f"{max_context_tokens}."
+            )
+        removed = included_units.pop()
+        context_parts.pop()
+        used_bytes -= _context_unit_added_bytes(
+            removed,
+            has_previous=bool(context_parts),
+        )
+        omitted_units.insert(0, removed)
+        context_note = _context_omission_note(omitted_units)
+
+    if context_note:
+        context_parts.append(context_note)
+
     text = _join_context(context_parts)
     included_source_ids = _ordered_unique(
         source_id for unit in included_units for source_id in unit.source_ids
@@ -471,10 +500,7 @@ def _packing_limitations(
     omitted_current_discussions: int,
     omitted_writeups: int,
 ) -> list[str]:
-    limitations = [
-        "Context size uses a deterministic approximate token estimate of one token "
-        "per three UTF-8 bytes."
-    ]
+    limitations: list[str] = []
     if facts.files.sample_submission_source == "unavailable":
         limitations.append("Sample submission metadata is unavailable.")
 
@@ -531,3 +557,21 @@ def _packing_limitations(
         )
 
     return limitations
+
+
+def _context_omission_note(omitted_units: list[_ContextUnit]) -> str | None:
+    if not omitted_units:
+        return None
+
+    writeups = sum(unit.category == "writeup" for unit in omitted_units)
+    discussions = sum(unit.category == "discussion" for unit in omitted_units)
+    descriptions: list[str] = []
+    if writeups:
+        descriptions.append(
+            f"{writeups} writeup document{'s' if writeups != 1 else ''}"
+        )
+    if discussions:
+        descriptions.append(
+            f"{discussions} discussion document{'s' if discussions != 1 else ''}"
+        )
+    return f"CONTEXT_NOTE: omitted {' and '.join(descriptions)} due to budget"

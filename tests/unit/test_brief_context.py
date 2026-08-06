@@ -244,7 +244,8 @@ def test_small_budget_omits_low_priority_discussion_and_accounts_for_it() -> Non
         ]
     )
     units = brief_context._ordered_context_units(facts)
-    budget = estimated_tokens("\n\n".join(unit.text for unit in units[:-1]))
+    expected_note = "CONTEXT_NOTE: omitted 1 discussion document due to budget"
+    budget = estimated_tokens("\n\n".join([*(unit.text for unit in units[:-1]), expected_note]))
 
     packed = pack_brief_context(facts, budget)
 
@@ -256,6 +257,47 @@ def test_small_budget_omits_low_priority_discussion_and_accounts_for_it() -> Non
     assert packed.stats.omitted_current_discussions == 1
     assert any("omitted whole" in item for item in packed.stats.limitations)
     assert "x" * 600 not in packed.text
+    assert expected_note in packed.text
+
+
+def test_sufficient_budget_does_not_add_context_note() -> None:
+    packed = pack_brief_context(
+        _facts(discussions=[_discussion("topic-1", text="short")]),
+        20_000,
+    )
+
+    assert "CONTEXT_NOTE:" not in packed.text
+    assert packed.stats.truncation_applied is False
+
+
+def test_context_note_reports_all_omitted_optional_document_categories() -> None:
+    facts = _facts(
+        discussions=[
+            _discussion(
+                "writeup-1",
+                competition_id="past-comp",
+                source_type="winner_writeup",
+                text="w" * 500,
+            ),
+            _discussion("topic-1", text="d" * 500),
+        ]
+    )
+    trusted = [
+        unit
+        for unit in brief_context._ordered_context_units(facts)
+        if unit.category in brief_context.TRUSTED_CATEGORIES
+    ]
+    note = (
+        "CONTEXT_NOTE: omitted 1 writeup document and 1 discussion document "
+        "due to budget"
+    )
+    budget = estimated_tokens("\n\n".join([*(unit.text for unit in trusted), note]))
+
+    packed = pack_brief_context(facts, budget)
+
+    assert note in packed.text
+    assert packed.stats.omitted_writeups == 1
+    assert len(packed.stats.omitted_source_ids) == 2
 
 
 def test_discussion_text_is_included_verbatim_without_rephrasing() -> None:
@@ -382,7 +424,8 @@ def test_trusted_blocks_are_never_dropped_to_fit_optional_context() -> None:
     )
     units = brief_context._ordered_context_units(facts)
     trusted_units = [unit for unit in units if unit.category in brief_context.TRUSTED_CATEGORIES]
-    budget = estimated_tokens("\n\n".join(unit.text for unit in trusted_units))
+    note = "CONTEXT_NOTE: omitted 1 discussion document due to budget"
+    budget = estimated_tokens("\n\n".join([*(unit.text for unit in trusted_units), note]))
 
     packed = pack_brief_context(facts, budget)
 
@@ -393,7 +436,9 @@ def test_trusted_blocks_are_never_dropped_to_fit_optional_context() -> None:
         for unit in units
         if set(unit.source_ids) & set(packed.stats.omitted_source_ids)
     )
-    assert packed.stats.trusted_estimated_tokens == budget
+    assert packed.stats.trusted_estimated_tokens == estimated_tokens(
+        "\n\n".join(unit.text for unit in trusted_units)
+    )
     assert packed.stats.trusted_total_tokens == sum(packed.stats.trusted_block_tokens.values())
     assert set(packed.stats.trusted_block_tokens) == {
         "official",
@@ -501,7 +546,7 @@ def test_unavailable_and_partial_inputs_create_factual_limitations() -> None:
     assert any("Sample submission" in item for item in limitations)
     assert any("partial or failed" in item for item in limitations)
     assert any("not computable" in item for item in limitations)
-    assert any("approximate token estimate" in item for item in limitations)
+    assert all("approximate token estimate" not in item for item in limitations)
 
 
 def test_context_packer_has_no_llm_or_summary_dependency() -> None:
