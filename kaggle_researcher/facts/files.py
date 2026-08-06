@@ -21,13 +21,17 @@ from kaggle_researcher.facts.models import FileInfo, FileManifest
 _FILE_REQUEST_POLICY = GLOBAL_KAGGLE_POLICY
 
 
+class _SampleHeaderUnreadable(RuntimeError):
+    """Raised after a successful download when the sample header cannot be read."""
+
+
 def classify_role(name: str) -> str:
     basename = name.replace("\\", "/").rsplit("/", 1)[-1].lower()
     if basename.startswith("train"):
         return "train"
     if basename.startswith("test"):
         return "test"
-    if "sample_submission" in basename:
+    if _submission_name_priority(basename) is not None:
         return "submission"
     return "auxiliary"
 
@@ -53,7 +57,8 @@ def fetch_file_manifest(
             files=[],
             train_test_size_ratio=None,
             sample_submission_columns=[],
-            sample_submission_source="unavailable",
+            sample_submission_source=_sample_submission_source("download_forbidden"),
+            sample_submission_status="download_forbidden",
             limitations=limitations,
         )
 
@@ -82,17 +87,15 @@ def fetch_file_manifest(
 
     files = [file_info for file_info, _ in file_records]
     ratio = _train_test_size_ratio(files)
-    sample_record = next(
-        (
-            (file_info, raw_file)
-            for file_info, raw_file in file_records
-            if file_info.role_hint == "submission"
-        ),
-        None,
-    )
+    sample_candidates = [
+        (file_info, raw_file)
+        for file_info, raw_file in file_records
+        if file_info.role_hint == "submission"
+    ]
+    sample_record = min(sample_candidates, key=_sample_record_sort_key, default=None)
 
     sample_columns: list[str] = []
-    sample_source = "unavailable"
+    sample_status = "file_not_found"
     if sample_record is None:
         limitations.append("No sample_submission file was listed by the Kaggle API.")
     else:
@@ -106,40 +109,86 @@ def fetch_file_manifest(
             )
         )
         if sample_columns:
-            sample_source = "api"
+            sample_status = "api"
         elif sample_file.size_bytes is None:
+            sample_status = "size_unknown"
             limitations.append(f"Cannot download {sample_file.name}: its size is unavailable.")
         elif sample_file.size_bytes >= max_sample_sub_bytes:
+            sample_status = "size_over_limit"
             limitations.append(
                 f"Cannot download {sample_file.name}: size {sample_file.size_bytes} bytes "
                 f"is not below the {max_sample_sub_bytes}-byte limit."
             )
         else:
-            download_forbidden = False
             try:
                 sample_columns = _download_sample_header(api, slug, sample_file.name)
-            except Exception as exc:
-                if not is_forbidden(exc):
-                    raise
-                download_forbidden = True
-                limitations.append(
-                    "Kaggle API returned 403 while downloading sample_submission; "
-                    "competition rules may not be accepted."
-                )
-            if sample_columns:
-                sample_source = "full_download"
-            elif not download_forbidden:
+            except _SampleHeaderUnreadable:
+                sample_status = "header_unreadable"
                 limitations.append(
                     f"The downloaded {sample_file.name} did not contain a readable header."
                 )
+            except Exception as exc:
+                if is_forbidden(exc):
+                    sample_status = "download_forbidden"
+                    limitations.append(
+                        "Kaggle API returned 403 while downloading sample_submission; "
+                        "competition rules may not be accepted."
+                    )
+                else:
+                    sample_status = "download_failed"
+                    limitations.append(
+                        f"Kaggle API failed to download {sample_file.name} "
+                        f"({type(exc).__name__})."
+                    )
+            else:
+                if sample_columns:
+                    sample_status = "full_download"
+                else:
+                    sample_status = "header_unreadable"
+                    limitations.append(
+                        f"The downloaded {sample_file.name} did not contain a readable header."
+                    )
 
     return FileManifest(
         files=files,
         train_test_size_ratio=ratio,
         sample_submission_columns=sample_columns,
-        sample_submission_source=sample_source,
+        sample_submission_source=_sample_submission_source(sample_status),
+        sample_submission_status=sample_status,
         limitations=limitations,
     )
+
+
+def _submission_name_priority(name: str) -> int | None:
+    basename = name.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if basename == "sample_submission.csv":
+        return 0
+    if "sample_submission" in basename or "sample-submission" in basename:
+        return 1
+    if "submission" in basename and Path(basename).suffix == ".csv":
+        return 2
+    return None
+
+
+def _sample_record_sort_key(record: tuple[FileInfo, Any]) -> tuple[int, bool, int, str]:
+    file_info, _ = record
+    priority = _submission_name_priority(file_info.name)
+    if priority is None:
+        raise ValueError("sample record does not have a submission filename")
+    return (
+        priority,
+        file_info.size_bytes is None,
+        file_info.size_bytes or 0,
+        file_info.name.casefold(),
+    )
+
+
+def _sample_submission_source(status: str) -> str:
+    if status == "api":
+        return "api"
+    if status == "full_download":
+        return "full_download"
+    return "unavailable"
 
 
 def _list_competition_files(api: Any, slug: str) -> list[Any]:
@@ -194,8 +243,11 @@ def _download_sample_header(api: Any, slug: str, file_name: str) -> list[str]:
                 quiet=True,
             )
         )
-        downloaded_path = _find_downloaded_file(Path(temp_dir), file_name)
-        return _read_header(downloaded_path)
+        try:
+            downloaded_path = _find_downloaded_file(Path(temp_dir), file_name)
+            return _read_header(downloaded_path)
+        except Exception as exc:
+            raise _SampleHeaderUnreadable(str(exc)) from exc
 
 
 def _find_downloaded_file(temp_dir: Path, requested_name: str) -> Path:

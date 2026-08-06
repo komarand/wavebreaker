@@ -271,6 +271,9 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
     print(f"metric: {metadata.metric_name or 'unavailable'}")
     print(f"code competition: {code_competition}")
     print(f"train/test ratio: {ratio if ratio is not None else 'unavailable'}")
+    sample_columns = ", ".join(facts.files.sample_submission_columns) or "unavailable"
+    print(f"sample submission columns: {sample_columns}")
+    print(f"sample submission status: {facts.files.sample_submission_status}")
     print(f"notebooks: {len(facts.notebooks)}")
     print(f"lineage clusters: {len(clusters)}")
     print(f"splitters by lineage cluster: {dict(_splitter_distribution(facts))}")

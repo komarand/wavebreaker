@@ -67,6 +67,16 @@ class FileManifest(BaseModel):
     train_test_size_ratio: float | None = None
     sample_submission_columns: list[str]
     sample_submission_source: Literal["api", "full_download", "unavailable"]
+    sample_submission_status: Literal[
+        "api",
+        "full_download",
+        "file_not_found",
+        "size_unknown",
+        "size_over_limit",
+        "download_forbidden",
+        "download_failed",
+        "header_unreadable",
+    ] = "file_not_found"
     limitations: list[str]
 
 

@@ -120,6 +120,8 @@ def test_file_listing_retries_transient_rate_limit() -> None:
         ("nested/Train_features.parquet", "train"),
         (r"nested\test_data.csv", "test"),
         ("prefix_sample_submission_v2.csv", "submission"),
+        ("sample-submission-v2.csv", "submission"),
+        ("submission.csv", "submission"),
         ("metadata.json", "auxiliary"),
         ("train_sample_submission.csv", "train"),
     ],
@@ -149,6 +151,7 @@ def test_full_fixture_maps_files_ratio_and_api_columns_without_download() -> Non
     assert manifest.train_test_size_ratio == 3.0
     assert manifest.sample_submission_columns == ["id", "target"]
     assert manifest.sample_submission_source == "api"
+    assert manifest.sample_submission_status == "api"
     assert manifest.limitations == []
 
     api = FakeKaggleApi.instances[0]
@@ -224,6 +227,7 @@ def test_download_reads_sample_header_and_never_downloads_train_or_test() -> Non
 
     assert manifest.sample_submission_columns == ["id", "target"]
     assert manifest.sample_submission_source == "full_download"
+    assert manifest.sample_submission_status == "full_download"
     assert manifest.limitations == []
     assert [call["file_name"] for call in FakeKaggleApi.instances[0].download_calls] == [
         "sample_submission.csv"
@@ -251,6 +255,42 @@ def test_zip_sample_header_is_read_without_extracting_archive() -> None:
 
     assert manifest.sample_submission_columns == ["row_id", "prediction"]
     assert manifest.sample_submission_source == "full_download"
+    assert manifest.sample_submission_status == "full_download"
+
+
+def test_submission_csv_without_sample_prefix_is_downloaded() -> None:
+    FakeKaggleApi.list_response = {"files": [{"name": "submission.csv", "totalBytes": 20}]}
+
+    def write_sample(_: str, file_name: str, path: Path) -> None:
+        (path / file_name).write_text("id,target\n1,0.5\n", encoding="utf-8")
+
+    FakeKaggleApi.download_impl = write_sample
+
+    manifest = fetch_file_manifest("playground", max_sample_sub_bytes=100)
+
+    assert manifest.sample_submission_columns == ["id", "target"]
+    assert manifest.sample_submission_status == "full_download"
+    assert manifest.sample_submission_source == "full_download"
+
+
+def test_submission_candidate_priority_precedes_file_size() -> None:
+    FakeKaggleApi.list_response = {
+        "files": [
+            {"name": "submission.csv", "totalBytes": 1},
+            {"name": "sample-submission.csv", "totalBytes": 2},
+            {"name": "sample_submission.csv", "totalBytes": 30},
+        ]
+    }
+
+    def write_sample(_: str, file_name: str, path: Path) -> None:
+        (path / file_name).write_text("row_id,prediction\n", encoding="utf-8")
+
+    FakeKaggleApi.download_impl = write_sample
+
+    manifest = fetch_file_manifest("example", max_sample_sub_bytes=100)
+
+    assert manifest.sample_submission_status == "full_download"
+    assert FakeKaggleApi.instances[0].download_calls[0]["file_name"] == ("sample_submission.csv")
 
 
 def test_ratio_is_none_when_train_or_test_is_missing() -> None:
@@ -277,6 +317,7 @@ def test_sample_at_download_limit_is_not_downloaded() -> None:
 
     assert manifest.sample_submission_columns == []
     assert manifest.sample_submission_source == "unavailable"
+    assert manifest.sample_submission_status == "size_over_limit"
     assert "is not below the 100-byte limit" in manifest.limitations[0]
     assert FakeKaggleApi.instances[0].download_calls == []
 
@@ -290,6 +331,7 @@ def test_listing_403_is_non_fatal_and_recorded_as_limitation() -> None:
     assert manifest.train_test_size_ratio is None
     assert manifest.sample_submission_columns == []
     assert manifest.sample_submission_source == "unavailable"
+    assert manifest.sample_submission_status == "download_forbidden"
     assert len(manifest.limitations) == 1
     assert "403" in manifest.limitations[0]
 
@@ -311,12 +353,60 @@ def test_sample_download_403_is_non_fatal_and_never_falls_back_to_other_files() 
     manifest = fetch_file_manifest("restricted-competition", max_sample_sub_bytes=100)
 
     assert manifest.sample_submission_source == "unavailable"
+    assert manifest.sample_submission_status == "download_forbidden"
     assert manifest.sample_submission_columns == []
     assert len(manifest.limitations) == 1
     assert "403" in manifest.limitations[0]
     assert [call["file_name"] for call in FakeKaggleApi.instances[0].download_calls] == [
         "sample_submission.csv"
     ]
+
+
+def test_missing_submission_file_has_structured_status() -> None:
+    FakeKaggleApi.list_response = {"files": [{"name": "train.csv", "totalBytes": 10}]}
+
+    manifest = fetch_file_manifest("example", max_sample_sub_bytes=100)
+
+    assert manifest.sample_submission_status == "file_not_found"
+    assert manifest.sample_submission_source == "unavailable"
+
+
+def test_unknown_submission_size_has_structured_status() -> None:
+    FakeKaggleApi.list_response = {"files": [{"name": "submission.csv"}]}
+
+    manifest = fetch_file_manifest("example", max_sample_sub_bytes=100)
+
+    assert manifest.sample_submission_status == "size_unknown"
+    assert manifest.sample_submission_source == "unavailable"
+
+
+def test_non_forbidden_download_failure_is_non_fatal_and_structured() -> None:
+    FakeKaggleApi.list_response = {"files": [{"name": "submission.csv", "totalBytes": 10}]}
+
+    def fail_download(_: str, __: str, ___: Path) -> None:
+        raise RuntimeError("temporary failure")
+
+    FakeKaggleApi.download_impl = fail_download
+
+    manifest = fetch_file_manifest("example", max_sample_sub_bytes=100)
+
+    assert manifest.sample_submission_status == "download_failed"
+    assert manifest.sample_submission_source == "unavailable"
+    assert "RuntimeError" in manifest.limitations[0]
+
+
+def test_downloaded_file_with_empty_header_is_structured() -> None:
+    FakeKaggleApi.list_response = {"files": [{"name": "submission.csv", "totalBytes": 10}]}
+
+    def write_empty(_: str, file_name: str, path: Path) -> None:
+        (path / file_name).write_text("", encoding="utf-8")
+
+    FakeKaggleApi.download_impl = write_empty
+
+    manifest = fetch_file_manifest("example", max_sample_sub_bytes=100)
+
+    assert manifest.sample_submission_status == "header_unreadable"
+    assert manifest.sample_submission_source == "unavailable"
 
 
 def test_find_downloaded_file_returns_exact_expected_file(tmp_path: Path) -> None:
