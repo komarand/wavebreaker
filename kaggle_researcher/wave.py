@@ -275,6 +275,17 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
     print(f"sample submission columns: {sample_columns}")
     print(f"sample submission status: {facts.files.sample_submission_status}")
     print(f"notebooks: {len(facts.notebooks)}")
+    print(
+        f"public leaderboard: {facts.public_leaderboard.status} "
+        f"({facts.public_leaderboard.entry_count} entries)"
+    )
+    match_confidences = Counter(
+        match.match_confidence for match in facts.leaderboard_matches
+    )
+    print(
+        "leaderboard matches: "
+        f"{match_confidences['exact']} exact, {match_confidences['partial']} partial"
+    )
     print(f"lineage clusters: {len(clusters)}")
     print(f"splitters by lineage cluster: {dict(_splitter_distribution(facts))}")
     print(f"cv/lb: {summarize_cv_lb(facts.cv_lb_pairs)}")
@@ -289,6 +300,10 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
     print(f"cv/lb pairs: {diagnostics.pairs_created}")
     print(f"  API LB: {diagnostics.pairs_created_from_api_lb}")
     print(f"  observation LB: {diagnostics.pairs_created_from_observation_lb}")
+    print(
+        "  leaderboard match LB: "
+        f"{diagnostics.pairs_created_from_leaderboard_match}"
+    )
     if diagnostics.zero_pairs_reason:
         print(f"cv/lb diagnostic: {diagnostics.zero_pairs_reason}")
     score_diagnostics = facts.score_diagnostics

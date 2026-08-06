@@ -198,6 +198,26 @@ class LeaderboardStability(BaseModel):
         return self
 
 
+class LeaderboardEntry(BaseModel):
+    team_name: str | None
+    score: float | None
+    rank: int | None
+
+
+class PublicLeaderboard(BaseModel):
+    status: Literal["collected", "unavailable"]
+    entries: list[LeaderboardEntry]
+    entry_count: int
+    unavailable_reason: str | None
+
+
+class LeaderboardMatch(BaseModel):
+    notebook_ref: str
+    team_name: str
+    score: float
+    match_confidence: Literal["exact", "partial"]
+
+
 class CvLbPair(BaseModel):
     notebook_ref: str
     declared_cv: float
@@ -215,7 +235,7 @@ class CvLbPair(BaseModel):
     cv_representative_observation_id: str | None = None
     lb_representative_observation_id: str | None = None
     cv_source: str = "declared_cv_legacy"
-    lb_source: str = "public_score_api"
+    lb_source: Literal["observation", "leaderboard_match"] = "observation"
     cv_aggregation: str = "legacy"
     lb_aggregation: str = "single"
     cv_selection_reason: str | None = None
@@ -240,6 +260,7 @@ class CvLbDiagnostics(BaseModel):
     pairs_created: int = 0
     pairs_created_from_api_lb: int = 0
     pairs_created_from_observation_lb: int = 0
+    pairs_created_from_leaderboard_match: int = 0
     pairs_rejected_missing_cv: int = 0
     pairs_rejected_missing_lb: int = 0
     pairs_rejected_metric_mismatch: int = 0
@@ -285,6 +306,15 @@ class CompetitionFacts(BaseModel):
     metadata: CompetitionMetadata
     files: FileManifest
     notebooks: list[NotebookFacts]
+    public_leaderboard: PublicLeaderboard = Field(
+        default_factory=lambda: PublicLeaderboard(
+            status="unavailable",
+            entries=[],
+            entry_count=0,
+            unavailable_reason="Public leaderboard was not collected.",
+        )
+    )
+    leaderboard_matches: list[LeaderboardMatch] = Field(default_factory=list)
     discussions: list[DiscussionFacts]
     similar_competitions: list[LeaderboardStability]
     cv_lb_pairs: list[CvLbPair]

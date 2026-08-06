@@ -142,6 +142,19 @@ def unpack_list_response(response: Any, collection_name: str) -> UnpackedListRes
     return UnpackedListResponse(items, token, True)
 
 
+def unwrap_response(response: Any, *collection_names: str) -> list[Any]:
+    """Return list items from either a raw SDK list or a response envelope."""
+    if response is None:
+        return []
+    if isinstance(response, list | tuple):
+        return list(response)
+    for collection_name in collection_names:
+        unpacked = unpack_list_response(response, collection_name)
+        if unpacked.wrapped:
+            return unpacked.items
+    return []
+
+
 def extract_http_status(exc: BaseException) -> int | None:
     candidates = (
         _safe_attribute(exc, "status"),

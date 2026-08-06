@@ -11,6 +11,7 @@ from kaggle_researcher.facts.models import (
     CompetitionMetadata,
     DiscussionFacts,
     FileManifest,
+    PublicLeaderboard,
 )
 
 NOTEBOOK_FIXTURE = (
@@ -86,6 +87,8 @@ def test_wave_facts_writes_offline_checkpoint_and_cluster_summary(
     assert "deepseek" not in facts_path.read_text(encoding="utf-8").lower()
     assert "metric: roc_auc" in output
     assert "notebooks: 2" in output
+    assert "public leaderboard: collected (0 entries)" in output
+    assert "leaderboard matches: 0 exact, 0 partial" in output
     assert "lineage clusters: 1" in output
     assert "'StratifiedGroupKFold': 1" in output
     assert "discussions: 2" in output
@@ -159,6 +162,16 @@ def _patch_offline_stages(monkeypatch: pytest.MonkeyPatch) -> None:
             }
             for index in range(limit)
         ],
+    )
+    monkeypatch.setattr(
+        collect,
+        "fetch_public_leaderboard",
+        lambda slug: PublicLeaderboard(
+            status="collected",
+            entries=[],
+            entry_count=0,
+            unavailable_reason=None,
+        ),
     )
     monkeypatch.setattr(
         collect,

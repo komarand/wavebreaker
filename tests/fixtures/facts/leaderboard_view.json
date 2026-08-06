@@ -1,0 +1,32 @@
+{
+  "list": [
+    {
+      "teamName": "Alice Smith",
+      "publicScore": "0.8123",
+      "rank": 1,
+      "submissionDate": "2026-08-01T12:00:00Z"
+    },
+    {
+      "teamName": "Team Bob Squad",
+      "publicScore": "0.798",
+      "rank": 2,
+      "submissionDate": "2026-08-01T13:00:00Z"
+    }
+  ],
+  "wrapper": {
+    "entries": [
+      {
+        "team_name": "Alice Smith",
+        "score": "0.8123",
+        "rank": 1,
+        "submission_date": "2026-08-01T12:00:00Z"
+      },
+      {
+        "team_name": "Team Bob Squad",
+        "score": "not-a-number",
+        "rank": null,
+        "submission_date": "2026-08-01T13:00:00Z"
+      }
+    ]
+  }
+}

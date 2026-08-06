@@ -12,7 +12,13 @@ from tqdm.auto import tqdm
 
 from kaggle_researcher.config import get_notebook_concurrency
 from kaggle_researcher.facts.competition import fetch_competition_metadata
-from kaggle_researcher.facts.cv_lb import build_cv_lb_pairs, diagnose_cv_lb
+from kaggle_researcher.facts.competition_leaderboard import fetch_public_leaderboard
+from kaggle_researcher.facts.cv_lb import (
+    build_cv_lb_pairs,
+    build_leaderboard_cv_lb_pairs,
+    diagnose_cv_lb,
+    match_leaderboard_scores,
+)
 from kaggle_researcher.facts.discussions import (
     discussion_auth_mode,
     fetch_competition_discussions,
@@ -24,6 +30,7 @@ from kaggle_researcher.facts.models import (
     FileManifest,
     LeaderboardStability,
     NotebookFacts,
+    PublicLeaderboard,
     ScoreObservation,
     UserConstraints,
 )
@@ -110,7 +117,38 @@ def collect_facts(
         collection_errors.append(_stage_error("notebook lineage clustering", exc))
 
     try:
-        cv_lb_pairs = build_cv_lb_pairs(notebooks, metadata.metric_name)
+        public_leaderboard = fetch_public_leaderboard(slug)
+    except Exception as exc:
+        public_leaderboard = PublicLeaderboard(
+            status="unavailable",
+            entries=[],
+            entry_count=0,
+            unavailable_reason=f"{type(exc).__name__}: {exc}",
+        )
+    if public_leaderboard.status == "unavailable":
+        collection_errors.append(
+            "public leaderboard unavailable"
+            + (
+                f" ({public_leaderboard.unavailable_reason})"
+                if public_leaderboard.unavailable_reason
+                else ""
+            )
+        )
+
+    try:
+        leaderboard_matches = match_leaderboard_scores(notebooks, public_leaderboard)
+    except Exception as exc:
+        collection_errors.append(_stage_error("leaderboard matching", exc))
+        leaderboard_matches = {}
+
+    try:
+        observation_pairs = build_cv_lb_pairs(notebooks, metadata.metric_name)
+        leaderboard_pairs = build_leaderboard_cv_lb_pairs(
+            notebooks,
+            leaderboard_matches,
+            metadata.metric_name,
+        )
+        cv_lb_pairs = [*observation_pairs, *leaderboard_pairs]
     except Exception as exc:
         collection_errors.append(_stage_error("CV/LB pairing", exc))
         cv_lb_pairs = []
@@ -177,6 +215,8 @@ def collect_facts(
         metadata=metadata,
         files=files,
         notebooks=notebooks,
+        public_leaderboard=public_leaderboard,
+        leaderboard_matches=list(leaderboard_matches.values()),
         discussions=discussions,
         similar_competitions=similar_competitions,
         cv_lb_pairs=cv_lb_pairs,

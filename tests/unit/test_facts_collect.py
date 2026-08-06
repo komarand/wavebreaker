@@ -15,8 +15,23 @@ from kaggle_researcher.facts.models import (
     CompetitionMetadata,
     DiscussionFacts,
     FileManifest,
+    PublicLeaderboard,
     UserConstraints,
 )
+
+
+@pytest.fixture(autouse=True)
+def public_leaderboard_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        collect,
+        "fetch_public_leaderboard",
+        lambda slug: PublicLeaderboard(
+            status="collected",
+            entries=[],
+            entry_count=0,
+            unavailable_reason=None,
+        ),
+    )
 
 
 def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
@@ -55,6 +70,17 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
         return []
 
     monkeypatch.setattr(collect, "assign_lineage_clusters", assign)
+    monkeypatch.setattr(
+        collect,
+        "fetch_public_leaderboard",
+        lambda slug: calls.append("leaderboard")
+        or PublicLeaderboard(
+            status="collected",
+            entries=[],
+            entry_count=0,
+            unavailable_reason=None,
+        ),
+    )
     monkeypatch.setattr(collect, "build_cv_lb_pairs", build_pairs)
     monkeypatch.setattr(
         collect,
@@ -82,6 +108,7 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
         "files",
         "list_notebooks",
         "assign:2",
+        "leaderboard",
         "pairs:1",
         "discussions",
         "writeups:10",
@@ -148,6 +175,37 @@ def test_nonfatal_stage_failures_are_recorded_and_collection_continues(
         "notebook listing failed (RuntimeError)",
         "competition discussions failed (RuntimeError)",
         "winner writeups failed (RuntimeError)",
+    ]
+
+
+def test_unavailable_public_leaderboard_is_recorded_and_collection_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_successful_non_notebook_stages(monkeypatch)
+    monkeypatch.setattr(
+        collect,
+        "fetch_public_leaderboard",
+        lambda slug: PublicLeaderboard(
+            status="unavailable",
+            entries=[],
+            entry_count=0,
+            unavailable_reason="HTTPError: forbidden",
+        ),
+    )
+
+    facts = collect.collect_facts(
+        "example",
+        0,
+        0,
+        [],
+        UserConstraints(),
+        max_sample_sub_bytes=1000,
+    )
+
+    assert facts.public_leaderboard.status == "unavailable"
+    assert facts.cv_lb_pairs == []
+    assert facts.collection_errors == [
+        "public leaderboard unavailable (HTTPError: forbidden)"
     ]
 
 

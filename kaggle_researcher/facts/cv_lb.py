@@ -9,8 +9,10 @@ from typing import Any, Literal
 from kaggle_researcher.facts.models import (
     CvLbDiagnostics,
     CvLbPair,
+    LeaderboardMatch,
     NotebookFacts,
     OptimizationDirection,
+    PublicLeaderboard,
     ScoreObservation,
 )
 from kaggle_researcher.facts.notebook_ast import (
@@ -82,11 +84,108 @@ def build_cv_lb_pairs(
     )
 
 
+def match_leaderboard_scores(
+    notebooks: list[NotebookFacts],
+    leaderboard: PublicLeaderboard,
+) -> dict[str, LeaderboardMatch]:
+    if leaderboard.status != "collected":
+        return {}
+
+    author_notebooks: dict[str, list[NotebookFacts]] = {}
+    for notebook in notebooks:
+        author = _normalized_identity(notebook.author or notebook.ref.partition("/")[0])
+        if author:
+            author_notebooks.setdefault(author, []).append(notebook)
+
+    teams: dict[str, tuple[str, float, int | None, int]] = {}
+    for index, entry in enumerate(leaderboard.entries):
+        team = _normalized_identity(entry.team_name)
+        score = _finite_float(entry.score)
+        if not team or entry.team_name is None or score is None:
+            continue
+        candidate = (entry.team_name, score, entry.rank, index)
+        previous = teams.get(team)
+        if previous is None or _team_entry_order(candidate) < _team_entry_order(previous):
+            teams[team] = candidate
+
+    author_candidates: dict[str, list[tuple[str, Literal["exact", "partial"]]]] = {}
+    for author in author_notebooks:
+        exact = [(team, "exact") for team in teams if team == author]
+        candidates = exact or [
+            (team, "partial")
+            for team in teams
+            if author in team or team in author
+        ]
+        if candidates:
+            author_candidates[author] = candidates
+
+    team_authors: dict[str, set[str]] = {}
+    for author, candidates in author_candidates.items():
+        for team, _confidence in candidates:
+            team_authors.setdefault(team, set()).add(author)
+
+    matches: dict[str, LeaderboardMatch] = {}
+    for author, candidates in sorted(author_candidates.items()):
+        unique_teams = {team for team, _confidence in candidates}
+        if len(unique_teams) != 1:
+            continue
+        team, confidence = candidates[0]
+        if len(team_authors.get(team, set())) != 1:
+            continue
+        team_name, score, _rank, _index = teams[team]
+        for notebook in sorted(author_notebooks[author], key=lambda item: item.ref):
+            matches[notebook.ref] = LeaderboardMatch(
+                notebook_ref=notebook.ref,
+                team_name=team_name,
+                score=score,
+                match_confidence=confidence,
+            )
+    return matches
+
+
+def build_leaderboard_cv_lb_pairs(
+    notebooks: list[NotebookFacts],
+    matches: dict[str, LeaderboardMatch],
+    competition_metric_name: str | None = None,
+) -> list[CvLbPair]:
+    pairs: list[CvLbPair] = []
+    for notebook in notebooks:
+        match = matches.get(notebook.ref)
+        if match is None:
+            continue
+        matched_notebook = notebook.model_copy(update={"public_score": match.score})
+        for pair in _pair_notebook(matched_notebook, competition_metric_name).pairs:
+            pairs.append(
+                pair.model_copy(
+                    update={
+                        "lb_source": "leaderboard_match",
+                        "lb_observation_ids": [],
+                        "lb_representative_observation_id": None,
+                        "lb_aggregation": "team_best_submission",
+                        "lb_selection_reason": (
+                            f"leaderboard_author_{match.match_confidence}_match"
+                        ),
+                    }
+                )
+            )
+    return sorted(
+        pairs,
+        key=lambda pair: (
+            pair.notebook_ref,
+            pair.metric_canonical or pair.metric_raw or "",
+            pair.declared_cv,
+            pair.public_score,
+        ),
+    )
+
+
 def diagnose_cv_lb(
     notebooks: list[NotebookFacts],
     pairs: list[CvLbPair],
     competition_metric_name: str | None = None,
 ) -> CvLbDiagnostics:
+    observation_pairs = [pair for pair in pairs if pair.lb_source == "observation"]
+    leaderboard_pairs = [pair for pair in pairs if pair.lb_source == "leaderboard_match"]
     results = [_pair_notebook(notebook, competition_metric_name) for notebook in notebooks]
     with_public_score = sum(notebook.public_score is not None for notebook in notebooks)
     with_declared_cv = sum(bool(notebook.declared_cv) for notebook in notebooks)
@@ -104,7 +203,9 @@ def diagnose_cv_lb(
             "ambiguous_split",
         )
     }
-    zero_pairs_reason = _zero_pairs_reason(notebooks, rejection_counts) if not pairs else None
+    zero_pairs_reason = (
+        _zero_pairs_reason(notebooks, rejection_counts) if not observation_pairs else None
+    )
     return CvLbDiagnostics(
         notebooks_total=len(notebooks),
         notebooks_with_public_score=with_public_score,
@@ -113,7 +214,7 @@ def diagnose_cv_lb(
             notebook.public_score is not None and bool(notebook.declared_cv)
             for notebook in notebooks
         ),
-        comparable_pairs=len(pairs),
+        comparable_pairs=len(observation_pairs),
         rejected_non_comparable_pairs=(
             rejection_counts["metric_mismatch"]
             + rejection_counts["scale_mismatch"]
@@ -123,21 +224,30 @@ def diagnose_cv_lb(
         notebooks_with_cv_scores=with_cv,
         notebooks_with_lb_scores=with_lb,
         notebooks_with_both_sides=with_both,
-        pairs_created=len(pairs),
-        pairs_created_from_api_lb=sum(pair.lb_source == "public_score_api" for pair in pairs),
-        pairs_created_from_observation_lb=sum(
-            pair.lb_source.startswith("score_observation") for pair in pairs
+        pairs_created=len(observation_pairs),
+        pairs_created_from_api_lb=sum(
+            pair.lb_source == "observation"
+            and pair.lb_selection_reason == "api_public_score_priority"
+            for pair in observation_pairs
         ),
+        pairs_created_from_observation_lb=sum(
+            pair.lb_source == "observation"
+            and pair.lb_selection_reason != "api_public_score_priority"
+            for pair in observation_pairs
+        ),
+        pairs_created_from_leaderboard_match=len(leaderboard_pairs),
         pairs_rejected_missing_cv=rejection_counts["missing_cv"],
         pairs_rejected_missing_lb=rejection_counts["missing_lb"],
         pairs_rejected_metric_mismatch=rejection_counts["metric_mismatch"],
         pairs_rejected_scale_mismatch=rejection_counts["scale_mismatch"],
         pairs_rejected_ambiguous_metric=rejection_counts["ambiguous_metric"],
         pairs_rejected_ambiguous_split=rejection_counts["ambiguous_split"],
-        fold_series_aggregated=sum(pair.cv_aggregation == "median_fold_series" for pair in pairs),
+        fold_series_aggregated=sum(
+            pair.cv_aggregation == "median_fold_series" for pair in observation_pairs
+        ),
         unknown_direction_fallbacks=sum(
             reason == "unknown_direction_max_fallback"
-            for pair in pairs
+            for pair in observation_pairs
             for reason in (pair.cv_selection_reason, pair.lb_selection_reason)
         ),
     )
@@ -146,8 +256,13 @@ def diagnose_cv_lb(
 def summarize_cv_lb(
     pairs: list[CvLbPair],
 ) -> dict[str, int | float | str | None]:
-    count = len(pairs)
-    gaps = [pair.declared_cv - pair.public_score for pair in pairs]
+    observation_pairs = [pair for pair in pairs if pair.lb_source == "observation"]
+    leaderboard_pairs = [pair for pair in pairs if pair.lb_source == "leaderboard_match"]
+    count = len(observation_pairs)
+    gaps = [pair.declared_cv - pair.public_score for pair in observation_pairs]
+    leaderboard_gaps = [
+        pair.declared_cv - pair.public_score for pair in leaderboard_pairs
+    ]
     reliability, note = _cv_lb_reliability(count)
     return {
         "count": count,
@@ -155,15 +270,27 @@ def summarize_cv_lb(
         "median_gap": statistics.median(gaps) if gaps else None,
         "spearman": (
             _spearman_correlation(
-                [pair.declared_cv for pair in pairs],
-                [pair.public_score for pair in pairs],
+                [pair.declared_cv for pair in observation_pairs],
+                [pair.public_score for pair in observation_pairs],
             )
             if count >= 3
             else None
         ),
-        "distinct_lineage_clusters": len({pair.lineage_cluster_id for pair in pairs}),
+        "distinct_lineage_clusters": len(
+            {pair.lineage_cluster_id for pair in observation_pairs}
+        ),
         "reliability": reliability,
         "note": note,
+        "leaderboard_pair_count": len(leaderboard_pairs),
+        "leaderboard_median_gap": (
+            statistics.median(leaderboard_gaps) if leaderboard_gaps else None
+        ),
+        "leaderboard_gap_note": (
+            "Leaderboard score is the team's best submission, not the score of the "
+            "matched notebook."
+            if leaderboard_pairs
+            else None
+        ),
     }
 
 
@@ -277,7 +404,7 @@ def _pair_notebook(
                 cv_representative_observation_id=(cv_side.representative_observation_id),
                 lb_representative_observation_id=(lb_side.representative_observation_id),
                 cv_source=cv_side.source,
-                lb_source=lb_side.source,
+                lb_source="observation",
                 cv_aggregation=cv_side.aggregation,
                 lb_aggregation=lb_side.aggregation,
                 cv_selection_reason=cv_side.selection_reason,
@@ -589,6 +716,19 @@ def _finite_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _normalized_identity(value: str | None) -> str:
+    if not value:
+        return ""
+    return " ".join(part for part in re.split(r"[\s-]+", value.casefold()) if part)
+
+
+def _team_entry_order(
+    entry: tuple[str, float, int | None, int],
+) -> tuple[int, int]:
+    rank = entry[2]
+    return (rank if rank is not None else 2**31 - 1, entry[3])
 
 
 def _select_declared_cv(values: list[Any]) -> float | None:

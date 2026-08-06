@@ -10,13 +10,18 @@ from kaggle_researcher.facts.cv_lb import (
     _select_declared_cv,
     _spearman_correlation,
     build_cv_lb_pairs,
+    build_leaderboard_cv_lb_pairs,
     diagnose_cv_lb,
+    match_leaderboard_scores,
     summarize_cv_lb,
 )
 from kaggle_researcher.facts.models import (
     CvLbPair,
     DeclaredCvObservation,
+    LeaderboardEntry,
+    LeaderboardMatch,
     NotebookFacts,
+    PublicLeaderboard,
     ScoreObservation,
 )
 
@@ -135,6 +140,9 @@ def test_summary_returns_none_statistics_for_empty_pairs() -> None:
         "distinct_lineage_clusters": 0,
         "reliability": "insufficient",
         "note": "no pairs; gap cannot be estimated",
+        "leaderboard_pair_count": 0,
+        "leaderboard_median_gap": None,
+        "leaderboard_gap_note": None,
     }
 
 
@@ -285,7 +293,7 @@ def test_observation_pair_requires_same_notebook_and_compatible_metric() -> None
     pair = pairs[0]
     assert pair.notebook_ref == "author/first"
     assert pair.cv_source == "score_observation"
-    assert pair.lb_source == "score_observation_title"
+    assert pair.lb_source == "observation"
     assert pair.cv_observation_ids == ["cv-1"]
     assert pair.lb_observation_ids == ["lb-1"]
     assert pair.metric_canonical == "mAP"
@@ -353,7 +361,7 @@ def test_api_public_score_has_priority_over_author_reported_lb() -> None:
     assert pair.declared_cv == pytest.approx(0.80)
     assert pair.public_score == pytest.approx(0.81)
     assert pair.cv_source == "score_observation"
-    assert pair.lb_source == "public_score_api"
+    assert pair.lb_source == "observation"
     assert pair.lb_observation_ids == []
 
 
@@ -363,7 +371,7 @@ def test_legacy_declared_cv_and_public_score_remain_fallbacks() -> None:
     pair = build_cv_lb_pairs([notebook])[0]
 
     assert pair.cv_source == "declared_cv_legacy"
-    assert pair.lb_source == "public_score_api"
+    assert pair.lb_source == "observation"
     assert pair.declared_cv == pytest.approx(0.72)
     assert pair.public_score == pytest.approx(0.70)
 
@@ -472,6 +480,93 @@ def test_pairing_is_deterministic_under_notebook_and_observation_permutation() -
     assert [pair.notebook_ref for pair in forward] == ["author/a", "author/z"]
 
 
+def test_leaderboard_matching_prefers_exact_then_partial_identity_matches() -> None:
+    exact = _notebook("alice-smith/notebook", [], None, "lc_exact")
+    exact.author = "Alice-Smith"
+    partial = _notebook("bob/notebook", [], None, "lc_partial")
+    partial.author = "Bob"
+    leaderboard = _public_leaderboard(
+        ("Alice Smith", 0.81, 1),
+        ("Team Bob Squad", 0.79, 2),
+    )
+
+    matches = match_leaderboard_scores([partial, exact], leaderboard)
+
+    assert matches[exact.ref].match_confidence == "exact"
+    assert matches[exact.ref].team_name == "Alice Smith"
+    assert matches[partial.ref].match_confidence == "partial"
+    assert matches[partial.ref].team_name == "Team Bob Squad"
+
+
+def test_ambiguous_leaderboard_matches_are_rejected() -> None:
+    one_team_many_authors = [
+        _notebook("ann/one", [], None, "lc_ann"),
+        _notebook("anna/two", [], None, "lc_anna"),
+    ]
+    for notebook in one_team_many_authors:
+        notebook.author = notebook.ref.partition("/")[0]
+    one_author_many_teams = _notebook("alice/three", [], None, "lc_alice")
+    one_author_many_teams.author = "alice"
+    leaderboard = _public_leaderboard(
+        ("anna", 0.8, 1),
+        ("alice alpha", 0.7, 2),
+        ("alice beta", 0.6, 3),
+    )
+
+    matches = match_leaderboard_scores(
+        [*one_team_many_authors, one_author_many_teams],
+        leaderboard,
+    )
+
+    assert matches == {}
+
+
+def test_leaderboard_pairs_are_built_and_summarized_separately() -> None:
+    observed = _pair("observed", 0.9, 0.8, "lc_observed")
+    notebook = _notebook("alice/notebook", [], None, "lc_leaderboard")
+    notebook.score_observations = [_score("cv", 0.7, "cv", "mAP")]
+    match = LeaderboardMatch(
+        notebook_ref=notebook.ref,
+        team_name="Alice",
+        score=0.6,
+        match_confidence="exact",
+    )
+
+    leaderboard_pairs = build_leaderboard_cv_lb_pairs(
+        [notebook],
+        {notebook.ref: match},
+        "mAP",
+    )
+    summary = summarize_cv_lb([observed, *leaderboard_pairs])
+    diagnostics = diagnose_cv_lb(
+        [notebook],
+        [observed, *leaderboard_pairs],
+        "mAP",
+    )
+
+    assert len(leaderboard_pairs) == 1
+    assert leaderboard_pairs[0].lb_source == "leaderboard_match"
+    assert summary["count"] == 1
+    assert summary["mean_gap"] == pytest.approx(0.1)
+    assert summary["median_gap"] == pytest.approx(0.1)
+    assert summary["leaderboard_pair_count"] == 1
+    assert summary["leaderboard_median_gap"] == pytest.approx(0.1)
+    assert "best submission" in str(summary["leaderboard_gap_note"])
+    assert diagnostics.pairs_created == 1
+    assert diagnostics.pairs_created_from_leaderboard_match == 1
+
+
+def test_unavailable_leaderboard_has_no_matches() -> None:
+    leaderboard = PublicLeaderboard(
+        status="unavailable",
+        entries=[],
+        entry_count=0,
+        unavailable_reason="forbidden",
+    )
+
+    assert match_leaderboard_scores([_notebook("alice/n", [], None, "lc")], leaderboard) == {}
+
+
 def _score(
     observation_id: str,
     value: float,
@@ -530,4 +625,18 @@ def _pair(
         declared_cv=declared_cv,
         public_score=public_score,
         lineage_cluster_id=lineage,
+    )
+
+
+def _public_leaderboard(
+    *entries: tuple[str, float, int],
+) -> PublicLeaderboard:
+    return PublicLeaderboard(
+        status="collected",
+        entries=[
+            LeaderboardEntry(team_name=name, score=score, rank=rank)
+            for name, score, rank in entries
+        ],
+        entry_count=len(entries),
+        unavailable_reason=None,
     )
