@@ -4,7 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-
 ProvenanceLabel = Literal[
     "kaggle",
     "arxiv",
@@ -108,7 +107,7 @@ class EdaTask(BaseModel):
     question: str = Field(min_length=10)
     rationale: str = Field(min_length=10)
     required_inputs: list[str] = Field(default_factory=list)
-    expected_outputs: list[str] = Field(default_factory=list, min_length=1)
+    expected_outputs: list[str] = Field(min_length=1)
     related_hypothesis_ids: list[str] = Field(default_factory=list)
     blocking: bool = False
 

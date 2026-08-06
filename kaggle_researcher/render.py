@@ -38,6 +38,8 @@ def render_facts_section(facts: CompetitionFacts) -> str:
         ("CV/LB mean gap", cv_lb["mean_gap"]),
         ("CV/LB median gap", cv_lb["median_gap"]),
         ("CV/LB Spearman", cv_lb["spearman"]),
+        ("CV/LB reliability", cv_lb["reliability"]),
+        ("CV/LB note", cv_lb["note"]),
         ("Similar-competition shake-up", _shake_up_summary(facts)),
     ]
     lines = [
@@ -217,9 +219,7 @@ def _splitter_distribution(facts: CompetitionFacts) -> str:
         names = splitters_by_cluster.setdefault(notebook.lineage_cluster_id, set())
         names.update(observation.name for observation in notebook.splitters)
     counts = Counter(
-        name
-        for cluster_names in splitters_by_cluster.values()
-        for name in cluster_names
+        name for cluster_names in splitters_by_cluster.values() for name in cluster_names
     )
     if not counts:
         return "unavailable"

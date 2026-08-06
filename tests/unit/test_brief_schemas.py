@@ -6,7 +6,11 @@ from pydantic import ValidationError
 from kaggle_researcher.brief_schemas import (
     Claim,
     CompetitionBrief,
+)
+from kaggle_researcher.brief_schemas import (
     EdaTask as BriefEdaTask,
+)
+from kaggle_researcher.brief_schemas import (
     ResearchHypothesis as BriefResearchHypothesis,
 )
 from kaggle_researcher.research_scout_schemas import EdaTask, ResearchHypothesis
@@ -97,6 +101,14 @@ def test_competition_brief_round_trips_through_json() -> None:
     assert isinstance(restored.eda_tasks[0], EdaTask)
 
 
+def test_eda_task_requires_non_empty_expected_outputs() -> None:
+    payload = _eda_task().model_dump(mode="python")
+    payload.pop("expected_outputs")
+
+    with pytest.raises(ValidationError, match="expected_outputs"):
+        EdaTask.model_validate(payload)
+
+
 def test_duplicate_claim_ids_across_sections_are_rejected() -> None:
     with pytest.raises(ValidationError, match="globally unique"):
         _brief(
@@ -175,9 +187,7 @@ def test_thesis_claim_source_chain_is_reconstructable() -> None:
         for claim in section
     }
 
-    assert {
-        claim_id: claims[claim_id].source_ids for claim_id in brief.thesis_support
-    } == {
+    assert {claim_id: claims[claim_id].source_ids for claim_id in brief.thesis_support} == {
         "claim_validation": ["facts", "author/notebook"],
         "claim_entities": ["topic-101"],
     }

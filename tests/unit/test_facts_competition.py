@@ -10,6 +10,7 @@ import pytest
 
 import kaggle_researcher.facts.competition as competition_module
 from kaggle_researcher.facts.competition import fetch_competition_metadata
+from kaggle_researcher.facts.kaggle_api import KaggleRequestPolicy
 
 FIXTURE_PATH = (
     Path(__file__).resolve().parents[1] / "fixtures" / "facts" / "competition_object.json"
@@ -55,6 +56,16 @@ def fake_kaggle_api(monkeypatch: pytest.MonkeyPatch) -> None:
         return api
 
     monkeypatch.setattr(competition_module, "create_kaggle_api", create_api)
+    monkeypatch.setattr(
+        competition_module,
+        "GLOBAL_KAGGLE_POLICY",
+        KaggleRequestPolicy(min_interval_seconds=0),
+    )
+    monkeypatch.setattr(
+        competition_module,
+        "_fetch_evaluation_metric",
+        lambda slug: None,
+    )
 
 
 def _load_full_competition() -> dict[str, Any]:
@@ -134,7 +145,15 @@ def test_kaggle_2_metadata_fields_have_priority_and_preserve_false() -> None:
 
 @pytest.mark.parametrize(
     "placeholder",
-    ["metric_template", " metric template ", "", "metric", "unknown", "UNKNOWN"],
+    [
+        "metric_template",
+        " metric template ",
+        "",
+        "metric",
+        "custom metric",
+        "unknown",
+        "UNKNOWN",
+    ],
 )
 def test_metric_placeholders_are_unavailable(placeholder: str) -> None:
     FakeKaggleApi.competitions = [
@@ -149,10 +168,43 @@ def test_metric_placeholders_are_unavailable(placeholder: str) -> None:
 
     assert metadata.metric_name is None
     assert metadata.evaluation_metric_raw == (placeholder.strip() or None)
-    assert metadata.metric_status == (
-        "unavailable" if not placeholder.strip() else "placeholder"
-    )
+    assert metadata.metric_status == ("unavailable" if not placeholder.strip() else "placeholder")
     assert "metric_name" in metadata.unavailable_fields
+
+
+def test_placeholder_metric_falls_back_to_evaluation_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeKaggleApi.competitions = [
+        {
+            "ref": "community-competition",
+            "title": "Community Competition",
+            "evaluation_metric": "metric_template",
+        }
+    ]
+    monkeypatch.setattr(
+        competition_module,
+        "_fetch_evaluation_metric",
+        lambda slug: "identity-balanced mAP",
+    )
+
+    metadata = fetch_competition_metadata("community-competition")
+
+    assert metadata.metric_name == "identity-balanced mAP"
+    assert metadata.evaluation_metric_raw == "identity-balanced mAP"
+    assert metadata.metric_status == "available"
+    assert "metric_name" not in metadata.unavailable_fields
+
+
+def test_metric_is_extracted_from_evaluation_markdown() -> None:
+    content = """
+## Understanding the Metric
+
+This competition uses **identity-balanced mAP**, a variant of mean Average
+Precision designed for re-identification tasks.
+"""
+
+    assert competition_module._metric_from_evaluation_content(content) == "identity-balanced mAP"
 
 
 def test_kaggle_2_plural_code_competition_field_maps_true() -> None:

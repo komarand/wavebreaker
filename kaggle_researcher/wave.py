@@ -304,6 +304,16 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
     )
     print("title/ref score observations: " f"{score_diagnostics.title_or_ref_observations}")
     print(f"excluded score candidates: {score_diagnostics.candidates_excluded}")
+    if score_diagnostics.notebooks_failed_by_status:
+        print(
+            "notebook pull failures by HTTP status: "
+            f"{score_diagnostics.notebooks_failed_by_status}"
+        )
+    if score_diagnostics.notebooks_failed_by_exception:
+        print(
+            "notebook pull failures by exception: "
+            f"{score_diagnostics.notebooks_failed_by_exception}"
+        )
     if not facts.cv_lb_pairs:
         print(
             "cv/lb rejections: "

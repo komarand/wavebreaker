@@ -11,14 +11,17 @@ from typing import Any
 import pytest
 
 import kaggle_researcher.facts.competition as competition_module
+import kaggle_researcher.facts.discussions as discussions_module
 import kaggle_researcher.facts.files as files_module
 import kaggle_researcher.facts.notebooks as notebooks_module
 from kaggle_researcher.facts.competition import fetch_competition_metadata
 from kaggle_researcher.facts.files import fetch_file_manifest
 from kaggle_researcher.facts.kaggle_api import (
+    GLOBAL_KAGGLE_POLICY,
     KaggleRequestPolicy,
     create_kaggle_api,
     extract_http_status,
+    extract_request_attempt,
     extract_retry_after,
     is_forbidden,
     is_retryable_kaggle_error,
@@ -30,6 +33,16 @@ from kaggle_researcher.facts.notebooks import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_facts_kaggle_consumers_share_one_process_wide_policy() -> None:
+    assert GLOBAL_KAGGLE_POLICY.max_attempts == 6
+    assert GLOBAL_KAGGLE_POLICY.min_interval_seconds == pytest.approx(1.5)
+    assert GLOBAL_KAGGLE_POLICY.jitter_fraction == pytest.approx(0.2)
+    assert notebooks_module._NOTEBOOK_REQUEST_POLICY is GLOBAL_KAGGLE_POLICY
+    assert files_module._FILE_REQUEST_POLICY is GLOBAL_KAGGLE_POLICY
+    assert discussions_module._COMPETITION_REQUEST_POLICY is GLOBAL_KAGGLE_POLICY
+    assert discussions_module._FORUMS_REQUEST_POLICY is GLOBAL_KAGGLE_POLICY
 
 
 def test_unpack_list_response_accepts_kaggle_1_direct_list() -> None:
@@ -143,6 +156,12 @@ def test_create_kaggle_api_imports_lazily_and_authenticates_once(
         (RuntimeError("HTTP 403 Forbidden"), 403),
         (RuntimeError("request failed with 429"), 429),
         (RuntimeError("upstream returned 503"), 503),
+        (
+            RuntimeError(
+                "HTTPSConnectionPool(host='www.kaggle.com', port=443): " "Max retries exceeded"
+            ),
+            None,
+        ),
     ],
 )
 def test_extract_http_status_regex_fallback(
@@ -250,11 +269,12 @@ def test_request_policy_caps_retry_after_and_attempt_count() -> None:
         monotonic=clock.monotonic,
     )
 
-    with pytest.raises(RateLimited):
+    with pytest.raises(RateLimited) as exc_info:
         policy.call(operation)
 
     assert attempts == 3
     assert clock.sleeps == [7, 7]
+    assert extract_request_attempt(exc_info.value) == (3, 3)
 
 
 def test_request_policy_rate_limits_successive_calls() -> None:
@@ -350,6 +370,11 @@ def test_one_injected_api_is_reused_by_all_collectors_without_authentication(
         raise AssertionError("create_kaggle_api must not run for an injected client")
 
     monkeypatch.setattr(competition_module, "create_kaggle_api", unexpected_factory)
+    monkeypatch.setattr(
+        competition_module,
+        "_fetch_evaluation_metric",
+        lambda slug: None,
+    )
     monkeypatch.setattr(files_module, "create_kaggle_api", unexpected_factory)
     monkeypatch.setattr(notebooks_module, "create_kaggle_api", unexpected_factory)
     api = SharedApi()

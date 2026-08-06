@@ -8,12 +8,18 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-_HTTP_STATUS_PATTERN = re.compile(r"(?<!\d)(4\d{2}|5\d{2})(?!\d)")
+_HTTP_STATUS_PATTERN = re.compile(
+    r"\b(?:http(?:error)?(?:\s+status)?|status(?:\s+code)?|failed\s+with|returned)"
+    r"\D{0,12}(4\d{2}|5\d{2})\b",
+    re.IGNORECASE,
+)
 _MISSING = object()
 _RETRYABLE_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _RETRYABLE_EXCEPTION_NAMES = frozenset(
     {"ConnectTimeout", "ConnectionError", "ReadTimeout", "Timeout"}
 )
+_ATTEMPT_ATTRIBUTE = "_kaggle_request_attempt"
+_MAX_ATTEMPTS_ATTRIBUTE = "_kaggle_request_max_attempts"
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +74,7 @@ class KaggleRequestPolicy:
                 return operation()
             except Exception as exc:
                 if attempt >= self.max_attempts or not is_retryable_kaggle_error(exc):
+                    _annotate_attempt(exc, attempt, self.max_attempts)
                     raise
                 self._sleep(self._retry_delay(exc, attempt))
         raise AssertionError("unreachable retry loop")
@@ -89,6 +96,13 @@ class KaggleRequestPolicy:
         exponential = self.base_delay_seconds * (2 ** (attempt - 1))
         jitter = exponential * self.jitter_fraction * self._random_value()
         return min(exponential + jitter, self.max_delay_seconds)
+
+
+GLOBAL_KAGGLE_POLICY = KaggleRequestPolicy(
+    max_attempts=6,
+    min_interval_seconds=1.5,
+    jitter_fraction=0.2,
+)
 
 
 def create_kaggle_api() -> Any:
@@ -168,6 +182,12 @@ def extract_retry_after(exc: BaseException) -> float | None:
     return None
 
 
+def extract_request_attempt(exc: BaseException) -> tuple[int | None, int | None]:
+    attempt = _positive_integer(_safe_attribute(exc, _ATTEMPT_ATTRIBUTE))
+    max_attempts = _positive_integer(_safe_attribute(exc, _MAX_ATTEMPTS_ATTRIBUTE))
+    return attempt, max_attempts
+
+
 def is_retryable_kaggle_error(exc: BaseException) -> bool:
     status = extract_http_status(exc)
     if status is not None:
@@ -179,6 +199,14 @@ def is_retryable_kaggle_error(exc: BaseException) -> bool:
 
 def is_forbidden(exc: BaseException) -> bool:
     return extract_http_status(exc) == 403
+
+
+def _annotate_attempt(exc: BaseException, attempt: int, max_attempts: int) -> None:
+    try:
+        setattr(exc, _ATTEMPT_ATTRIBUTE, attempt)
+        setattr(exc, _MAX_ATTEMPTS_ATTRIBUTE, max_attempts)
+    except Exception:
+        return
 
 
 def _safe_attribute(value: Any, name: str) -> Any:
@@ -221,3 +249,13 @@ def _coerce_http_status(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return status if 100 <= status <= 599 else None
+
+
+def _positive_integer(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None

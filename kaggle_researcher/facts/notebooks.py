@@ -2,19 +2,42 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from kaggle_researcher.facts.kaggle_api import (
-    KaggleRequestPolicy,
+    GLOBAL_KAGGLE_POLICY,
     UnpackedListResponse,
     create_kaggle_api,
+    extract_http_status,
+    extract_request_attempt,
     unpack_list_response,
+)
+from kaggle_researcher.facts.kaggle_api import (
+    KaggleRequestPolicy as KaggleRequestPolicy,
 )
 
 _REF_NAMES = ("ref", "kernelRef", "kernel_ref", "id")
-_NOTEBOOK_REQUEST_POLICY = KaggleRequestPolicy(min_interval_seconds=1.0)
+_NOTEBOOK_REQUEST_POLICY = GLOBAL_KAGGLE_POLICY
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class NotebookPullResult:
+    path: Path | None
+    http_status: int | None = None
+    attempt: int | None = None
+    max_attempts: int | None = None
+    error_type: str | None = None
+
+    def failure_detail(self) -> str | None:
+        if self.error_type is None:
+            return None
+        status = str(self.http_status) if self.http_status is not None else "unknown"
+        attempt = str(self.attempt) if self.attempt is not None else "?"
+        maximum = str(self.max_attempts) if self.max_attempts is not None else "?"
+        return f"HTTP {status}, attempt {attempt}/{maximum}"
 
 
 def list_competition_notebooks(
@@ -113,8 +136,16 @@ def pull_notebook(
     dest: Path,
     api: Any | None = None,
 ) -> Path | None:
+    return pull_notebook_with_diagnostics(kernel_ref, dest, api).path
+
+
+def pull_notebook_with_diagnostics(
+    kernel_ref: str,
+    dest: Path,
+    api: Any | None = None,
+) -> NotebookPullResult:
     if not kernel_ref:
-        return None
+        return NotebookPullResult(path=None)
 
     try:
         dest.mkdir(parents=True, exist_ok=True)
@@ -124,19 +155,26 @@ def pull_notebook(
         _NOTEBOOK_REQUEST_POLICY.call(lambda: _pull_kernel(api, kernel_ref, dest))
         after = _notebook_file_state(dest)
     except Exception as exc:
+        attempt, max_attempts = extract_request_attempt(exc)
+        result = NotebookPullResult(
+            path=None,
+            http_status=extract_http_status(exc),
+            attempt=attempt,
+            max_attempts=max_attempts,
+            error_type=type(exc).__name__,
+        )
         logger.warning(
-            "Failed to pull Kaggle notebook %s (%s)",
+            "Failed to pull Kaggle notebook %s (%s, %s)",
             kernel_ref,
             type(exc).__name__,
+            result.failure_detail(),
         )
-        return None
+        return result
 
     changed_paths = sorted(
-        path
-        for path, state in after.items()
-        if path not in before or before[path] != state
+        path for path, state in after.items() if path not in before or before[path] != state
     )
-    return changed_paths[0] if changed_paths else None
+    return NotebookPullResult(path=changed_paths[0] if changed_paths else None)
 
 
 def _normalize_kernel(kernel: Any) -> dict[str, Any] | None:
@@ -265,9 +303,7 @@ def _get_kernel_value(kernel: Any, *names: str) -> Any:
     if kernel is None:
         return None
     if isinstance(kernel, dict):
-        normalized_values = {
-            _normalize_key(str(key)): value for key, value in kernel.items()
-        }
+        normalized_values = {_normalize_key(str(key)): value for key, value in kernel.items()}
         for name in names:
             value = normalized_values.get(_normalize_key(name))
             if value is not None and value != "":

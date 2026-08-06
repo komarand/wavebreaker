@@ -8,14 +8,17 @@ from pathlib import Path
 from typing import Any
 
 from kaggle_researcher.facts.kaggle_api import (
-    KaggleRequestPolicy,
+    GLOBAL_KAGGLE_POLICY,
     create_kaggle_api,
     is_forbidden,
     unpack_list_response,
 )
+from kaggle_researcher.facts.kaggle_api import (
+    KaggleRequestPolicy as KaggleRequestPolicy,
+)
 from kaggle_researcher.facts.models import FileInfo, FileManifest
 
-_FILE_REQUEST_POLICY = KaggleRequestPolicy(min_interval_seconds=0)
+_FILE_REQUEST_POLICY = GLOBAL_KAGGLE_POLICY
 
 
 def classify_role(name: str) -> str:
@@ -105,9 +108,7 @@ def fetch_file_manifest(
         if sample_columns:
             sample_source = "api"
         elif sample_file.size_bytes is None:
-            limitations.append(
-                f"Cannot download {sample_file.name}: its size is unavailable."
-            )
+            limitations.append(f"Cannot download {sample_file.name}: its size is unavailable.")
         elif sample_file.size_bytes >= max_sample_sub_bytes:
             limitations.append(
                 f"Cannot download {sample_file.name}: size {sample_file.size_bytes} bytes "
@@ -148,9 +149,7 @@ def _list_competition_files(api: Any, slug: str) -> list[Any]:
 
     while True:
         if page_token is None:
-            response = _FILE_REQUEST_POLICY.call(
-                lambda: api.competition_list_files(slug)
-            )
+            response = _FILE_REQUEST_POLICY.call(lambda: api.competition_list_files(slug))
         else:
             response = _FILE_REQUEST_POLICY.call(
                 lambda token=page_token: api.competition_list_files(
@@ -162,11 +161,7 @@ def _list_competition_files(api: Any, slug: str) -> list[Any]:
         files.extend(unpacked.items)
 
         next_page_token = unpacked.next_page_token
-        if (
-            not next_page_token
-            or next_page_token in seen_tokens
-            or not unpacked.items
-        ):
+        if not next_page_token or next_page_token in seen_tokens or not unpacked.items:
             break
         seen_tokens.add(next_page_token)
         page_token = next_page_token
@@ -206,9 +201,7 @@ def _download_sample_header(api: Any, slug: str, file_name: str) -> list[str]:
 def _find_downloaded_file(temp_dir: Path, requested_name: str) -> Path:
     downloaded_files = sorted(path for path in temp_dir.rglob("*") if path.is_file())
     if not downloaded_files:
-        raise RuntimeError(
-            f"Kaggle download for {requested_name} did not produce a file."
-        )
+        raise RuntimeError(f"Kaggle download for {requested_name} did not produce a file.")
 
     requested_basename = requested_name.replace("\\", "/").rsplit("/", 1)[-1].lower()
     for path in downloaded_files:
@@ -281,9 +274,7 @@ def _get_file_value(file_object: Any, *names: str) -> Any:
     if file_object is None:
         return None
     if isinstance(file_object, dict):
-        normalized_values = {
-            _normalize_key(str(key)): value for key, value in file_object.items()
-        }
+        normalized_values = {_normalize_key(str(key)): value for key, value in file_object.items()}
         for name in names:
             value = normalized_values.get(_normalize_key(name))
             if value is not None and value != "":

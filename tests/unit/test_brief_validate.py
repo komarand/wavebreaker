@@ -10,6 +10,7 @@ from kaggle_researcher.brief_schemas import Claim, CompetitionBrief
 from kaggle_researcher.facts.models import (
     CompetitionFacts,
     CompetitionMetadata,
+    CvLbPair,
     DiscussionFacts,
     FileManifest,
     NotebookFacts,
@@ -31,8 +32,7 @@ def test_fabricated_source_is_removed_and_recorded() -> None:
     assert validated.validation[0].source_ids == ["facts"]
     assert validated.validation[0].text == claim.text
     assert any(
-        "claim_validation" in item and "fabricated-source" in item
-        for item in validated.limitations
+        "claim_validation" in item and "fabricated-source" in item for item in validated.limitations
     )
 
 
@@ -52,8 +52,7 @@ def test_claim_with_only_invalid_sources_moves_to_unknowns() -> None:
     assert validated.what_works == []
     assert "unsupported: An unsupported performance claim." in validated.unknowns
     assert all(
-        claim.text != unsupported.text
-        for claim in validated.validation + validated.what_works
+        claim.text != unsupported.text for claim in validated.validation + validated.what_works
     )
 
 
@@ -113,9 +112,7 @@ def test_discussion_only_fact_is_downgraded_without_rewriting(
     source_type: str,
 ) -> None:
     source_id = f"topic-{source_type}"
-    facts = _facts(
-        discussions=[_discussion(topic_id=source_id, source_type=source_type)]
-    )
+    facts = _facts(discussions=[_discussion(topic_id=source_id, source_type=source_type)])
     claim = _claim(
         "claim_discussion_only",
         [source_id],
@@ -155,15 +152,160 @@ def test_mixed_trusted_and_discussion_fact_is_not_downgraded() -> None:
 
 
 def test_validation_returns_a_new_brief_without_mutating_input() -> None:
-    original = _brief(
-        validation=[_claim("claim_validation", ["facts", "invalid-source"])]
-    )
+    original = _brief(validation=[_claim("claim_validation", ["facts", "invalid-source"])])
 
     validated = brief_validate.validate_brief(original, _facts())
 
     assert validated is not original
     assert original.validation[0].source_ids == ["facts", "invalid-source"]
     assert original.limitations == ["Existing limitation."]
+
+
+def test_insufficient_cv_lb_reliability_is_recorded_deterministically() -> None:
+    facts = _facts()
+    facts.cv_lb_pairs = [
+        CvLbPair(
+            notebook_ref="author/notebook",
+            declared_cv=0.8382,
+            public_score=0.797,
+            lineage_cluster_id="lineage_one",
+        )
+    ]
+
+    validated = brief_validate.validate_brief(_brief(), facts)
+
+    assert (
+        "CV/LB reliability is insufficient (n=1): single pair; gap is not evidence "
+        "of a systematic pattern."
+    ) in validated.limitations
+
+
+def test_thesis_is_rejected_when_a_number_is_absent_from_support_and_facts() -> None:
+    claim = _claim(
+        "claim_cv_lb_gap",
+        ["facts"],
+        text="The observed pair was CV 0.8382 and LB 0.797.",
+    )
+    original = _brief(
+        thesis="Scores reach up to ~0.94.",
+        thesis_support=[claim.claim_id],
+        validation=[claim],
+    )
+
+    validated = brief_validate.validate_brief(original, _facts())
+
+    assert validated.thesis == ""
+    assert validated.thesis_support == []
+    assert "unsupported: Scores reach up to ~0.94." in validated.unknowns
+    assert any(
+        "numeric literals were absent" in item and "0.94" in item for item in validated.limitations
+    )
+    assert validated.validation == [claim]
+
+
+def test_equivalent_number_spelling_in_support_keeps_thesis() -> None:
+    claim = _claim(
+        "claim_score",
+        ["facts"],
+        text="A supported source reports a score of 0.940.",
+    )
+    original = _brief(
+        thesis="The supported score is ~0.94.",
+        thesis_support=[claim.claim_id],
+        validation=[claim],
+    )
+
+    validated = brief_validate.validate_brief(original, _facts())
+
+    assert validated.thesis == original.thesis
+    assert validated.thesis_support == [claim.claim_id]
+
+
+def test_number_present_in_competition_facts_keeps_thesis() -> None:
+    facts = _facts()
+    facts.metadata.submissions_per_day = 5
+    claim = _claim(
+        "claim_submission_limit",
+        ["facts"],
+        text="The official submission limit applies.",
+    )
+    original = _brief(
+        thesis="The competition allows 5 submissions per day.",
+        thesis_support=[claim.claim_id],
+        validation=[claim],
+    )
+
+    validated = brief_validate.validate_brief(original, facts)
+
+    assert validated.thesis == original.thesis
+    assert validated.thesis_support == [claim.claim_id]
+
+
+def test_insufficient_numeric_cv_lb_claim_cannot_support_thesis() -> None:
+    facts = _facts()
+    facts.cv_lb_pairs = [
+        CvLbPair(
+            notebook_ref="author/notebook",
+            declared_cv=0.8382,
+            public_score=0.797,
+            lineage_cluster_id="lineage_one",
+        )
+    ]
+    gap_claim = _claim(
+        "claim_cv_lb_gap",
+        ["cv_lb"],
+        text="CV 0.8382 exceeds LB 0.797 by 0.0412.",
+    )
+    original = _brief(
+        thesis="CV reaches 0.8382.",
+        thesis_support=[gap_claim.claim_id],
+        metric_notes=[gap_claim],
+    )
+
+    validated = brief_validate.validate_brief(original, facts)
+
+    assert validated.thesis == ""
+    assert validated.thesis_support == []
+    assert validated.metric_notes == [gap_claim]
+    assert original.thesis == "CV reaches 0.8382."
+    assert any(
+        "claim_cv_lb_gap" in item and "reliability=insufficient" in item
+        for item in validated.limitations
+    )
+
+
+def test_reliable_numeric_claim_can_remain_after_insufficient_support_is_dropped() -> None:
+    facts = _facts()
+    facts.cv_lb_pairs = [
+        CvLbPair(
+            notebook_ref="author/notebook",
+            declared_cv=0.8382,
+            public_score=0.797,
+            lineage_cluster_id="lineage_one",
+        )
+    ]
+    gap_claim = _claim(
+        "claim_cv_lb_gap",
+        ["cv_lb"],
+        text="One CV/LB pair has a gap of 0.0412.",
+    )
+    reliable_claim = _claim(
+        "claim_notebook_score",
+        ["facts"],
+        text="A separate supported observation reports 0.940.",
+    )
+    original = _brief(
+        thesis="A supported score reaches 0.94.",
+        thesis_support=[gap_claim.claim_id, reliable_claim.claim_id],
+        validation=[reliable_claim],
+        metric_notes=[gap_claim],
+    )
+
+    validated = brief_validate.validate_brief(original, facts)
+
+    assert validated.thesis == original.thesis
+    assert validated.thesis_support == [reliable_claim.claim_id]
+    assert validated.metric_notes == [gap_claim]
 
 
 def test_removed_thesis_support_is_dropped_and_thesis_moves_to_unknowns() -> None:

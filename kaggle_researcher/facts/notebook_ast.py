@@ -151,6 +151,9 @@ EXCLUDED_SCORE_LABELS = frozenset(
         "epochs",
         "fold",
         "factor",
+        "frac",
+        "frac_per_id",
+        "fraction",
         "image_size",
         "img_size",
         "input_size",
@@ -773,6 +776,9 @@ def classify_score_split(
     metric_raw: str | None,
     locator: str,
 ) -> tuple[ScoreSplit, list[str]]:
+    if _is_excluded_score_label(metric_raw):
+        return "unknown", []
+
     primary_text = " ".join(
         part
         for part in (
@@ -790,11 +796,13 @@ def classify_score_split(
         )
 
     context_has_multiple_values = len(list(SCORE_EXPLICIT_PATTERN.finditer(context_text))) > 1
-    context_cv, context_lb = (
-        ([], [])
-        if context_has_multiple_values
-        else _score_split_signals(" ".join((context_text, locator)))
-    )
+    if context_has_multiple_values:
+        context_cv, context_lb = _score_split_signals(context_text)
+        if context_lb and not context_cv and canonicalize_metric_label(metric_raw) is not None:
+            return "cv", ["paired-with-lb"]
+        context_cv, context_lb = [], []
+    else:
+        context_cv, context_lb = _score_split_signals(" ".join((context_text, locator)))
     if context_cv or context_lb:
         return _split_from_signals(context_cv, context_lb)
     if source_kind in {"title", "ref", "notebook_title", "notebook_ref"}:
@@ -932,22 +940,36 @@ def recanonicalize_score_observations(
                 declared_cv_observations,
             )
         else:
-            declared_cv = notebook.declared_cv
-            declared_cv_observations = [
-                observation.model_copy(
-                    update={
-                        "metric_name": canonical_by_evidence.get(
-                            (
-                                observation.locator,
-                                observation.raw_text,
-                                observation.value,
-                            ),
-                            observation.metric_name,
-                        )
-                    }
+            structured_evidence = set(canonical_by_evidence)
+            legacy_is_fully_structured = bool(notebook.declared_cv_observations) and all(
+                (
+                    observation.locator,
+                    observation.raw_text,
+                    observation.value,
                 )
+                in structured_evidence
                 for observation in notebook.declared_cv_observations
-            ]
+            )
+            if legacy_is_fully_structured:
+                declared_cv = []
+                declared_cv_observations = []
+            else:
+                declared_cv = notebook.declared_cv
+                declared_cv_observations = [
+                    observation.model_copy(
+                        update={
+                            "metric_name": canonical_by_evidence.get(
+                                (
+                                    observation.locator,
+                                    observation.raw_text,
+                                    observation.value,
+                                ),
+                                observation.metric_name,
+                            )
+                        }
+                    )
+                    for observation in notebook.declared_cv_observations
+                ]
         canonicalized_notebooks.append(
             notebook.model_copy(
                 update={

@@ -143,9 +143,12 @@ def diagnose_cv_lb(
     )
 
 
-def summarize_cv_lb(pairs: list[CvLbPair]) -> dict[str, int | float | None]:
+def summarize_cv_lb(
+    pairs: list[CvLbPair],
+) -> dict[str, int | float | str | None]:
     count = len(pairs)
     gaps = [pair.declared_cv - pair.public_score for pair in pairs]
+    reliability, note = _cv_lb_reliability(count)
     return {
         "count": count,
         "mean_gap": statistics.fmean(gaps) if gaps else None,
@@ -159,7 +162,27 @@ def summarize_cv_lb(pairs: list[CvLbPair]) -> dict[str, int | float | None]:
             else None
         ),
         "distinct_lineage_clusters": len({pair.lineage_cluster_id for pair in pairs}),
+        "reliability": reliability,
+        "note": note,
     }
+
+
+def _cv_lb_reliability(count: int) -> tuple[str, str | None]:
+    if count == 0:
+        return "insufficient", "no pairs; gap cannot be estimated"
+    if count == 1:
+        return (
+            "insufficient",
+            "single pair; gap is not evidence of a systematic pattern",
+        )
+    if count < 5:
+        return (
+            "insufficient",
+            "fewer than 5 pairs; gap is not evidence of a systematic pattern",
+        )
+    if count < 15:
+        return "weak", "fewer than 15 pairs; aggregate gap evidence is weak"
+    return "sufficient", None
 
 
 def _pair_notebook(
@@ -216,13 +239,12 @@ def _pair_notebook(
     matches, match_rejection = _match_groups(
         cv_groups,
         lb_groups,
-        competition_metric_name,
     )
     if match_rejection is not None:
         rejections.add(match_rejection)
 
     pairs: list[CvLbPair] = []
-    for cv_side, lb_side in matches:
+    for cv_side, lb_side, metric_match in matches:
         metric_canonical = (
             cv_side.metric_canonical
             or lb_side.metric_canonical
@@ -246,6 +268,7 @@ def _pair_notebook(
                 metric_name=metric_canonical or cv_side.metric_raw or lb_side.metric_raw,
                 metric_raw=cv_side.metric_raw or lb_side.metric_raw,
                 metric_canonical=metric_canonical,
+                metric_match=metric_match,
                 optimization_direction=direction,
                 cv_score=cv_side.value,
                 lb_score=lb_side.value,
@@ -422,29 +445,25 @@ def _api_lb_representative(
 def _match_groups(
     cv_groups: dict[tuple[str, str] | None, _Representative],
     lb_groups: dict[tuple[str, str] | None, _Representative],
-    competition_metric_name: str | None,
-) -> tuple[list[tuple[_Representative, _Representative]], str | None]:
+) -> tuple[
+    list[tuple[_Representative, _Representative, Literal["exact", "assumed"]]],
+    str | None,
+]:
     exact_keys = sorted(
         (set(cv_groups) & set(lb_groups)) - {None},
         key=str,
     )
     if exact_keys:
-        return [(cv_groups[key], lb_groups[key]) for key in exact_keys], None
+        return [(cv_groups[key], lb_groups[key], "exact") for key in exact_keys], None
 
-    competition_canonical = canonicalize_metric_label(competition_metric_name)
-    if len(cv_groups) == 1 and len(lb_groups) == 1 and competition_canonical:
-        cv_side = next(iter(cv_groups.values()))
-        lb_side = next(iter(lb_groups.values()))
-        if all(
-            side.metric_canonical in {None, competition_canonical} for side in (cv_side, lb_side)
-        ):
-            return [(cv_side, lb_side)], None
-        return [], "metric_mismatch"
     if len(cv_groups) == 1 and len(lb_groups) == 1:
         cv_side = next(iter(cv_groups.values()))
         lb_side = next(iter(lb_groups.values()))
-        if lb_side.source == "public_score_api":
-            return [(cv_side, lb_side)], None
+        if cv_side.metric_canonical is None or lb_side.metric_canonical is None:
+            return [(cv_side, lb_side, "assumed")], None
+        if cv_side.metric_canonical == lb_side.metric_canonical:
+            return [(cv_side, lb_side, "exact")], None
+        return [], "metric_mismatch"
     if len(cv_groups) > 1 or len(lb_groups) > 1:
         return [], "ambiguous_metric"
     return [], "metric_mismatch"

@@ -41,9 +41,7 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
         lambda slug, limit: calls.append("list_notebooks") or records,
     )
     monkeypatch.setattr(collect, "pull_notebook", _fake_pull)
-    monkeypatch.setattr(
-        collect, "extract_observations", lambda path, **kwargs: _observations()
-    )
+    monkeypatch.setattr(collect, "extract_observations", lambda path, **kwargs: _observations())
     monkeypatch.setattr(collect, "ast_fingerprint", lambda path: "a" * 64)
     real_assign = collect.assign_lineage_clusters
 
@@ -66,8 +64,7 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
     monkeypatch.setattr(
         collect,
         "fetch_winner_writeups",
-        lambda slugs, limit: calls.append(f"writeups:{limit}")
-        or [_discussion(slugs[0], True)],
+        lambda slugs, limit: calls.append(f"writeups:{limit}") or [_discussion(slugs[0], True)],
     )
 
     facts = collect.collect_facts(
@@ -98,8 +95,7 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
     assert facts.similar_competitions[0].status == "not_computable"
     assert facts.similar_competitions[0].source == "unavailable"
     assert (
-        facts.similar_competitions[0].not_computable_reason
-        == "Meta Kaggle dumps not configured."
+        facts.similar_competitions[0].not_computable_reason == "Meta Kaggle dumps not configured."
     )
     assert "task" not in facts.similar_competitions[0].not_computable_reason.lower()
     assert facts.user_constraints.vram_gb == 12
@@ -169,17 +165,74 @@ def test_single_notebook_pull_failure_does_not_drop_successful_notebooks(
         return None if ref.endswith("broken") else _fake_pull(ref, destination)
 
     monkeypatch.setattr(collect, "pull_notebook", pull)
-    monkeypatch.setattr(
-        collect, "extract_observations", lambda path, **kwargs: _observations()
-    )
+    monkeypatch.setattr(collect, "extract_observations", lambda path, **kwargs: _observations())
     monkeypatch.setattr(collect, "ast_fingerprint", lambda path: "b" * 64)
 
-    facts = collect.collect_facts(
-        "example", 2, 0, [], UserConstraints(), max_sample_sub_bytes=1000
-    )
+    facts = collect.collect_facts("example", 2, 0, [], UserConstraints(), max_sample_sub_bytes=1000)
 
     assert [notebook.ref for notebook in facts.notebooks] == ["author/good"]
     assert facts.collection_errors == ["notebook author/broken pull failed"]
+
+
+def test_notebook_pull_failures_are_counted_by_http_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_successful_non_notebook_stages(monkeypatch)
+    records = [
+        _record("author/rate-limited"),
+        _record("author/private"),
+        _record("author/ssl"),
+        _record("author/good"),
+    ]
+    monkeypatch.setattr(
+        collect,
+        "list_competition_notebooks",
+        lambda slug, limit: records,
+    )
+
+    def pull(ref: str, destination: Path) -> collect.NotebookPullResult:
+        if ref.endswith("rate-limited"):
+            return collect.NotebookPullResult(
+                path=None,
+                http_status=429,
+                attempt=6,
+                max_attempts=6,
+                error_type="HTTPError",
+            )
+        if ref.endswith("private"):
+            return collect.NotebookPullResult(
+                path=None,
+                http_status=404,
+                attempt=1,
+                max_attempts=6,
+                error_type="HTTPError",
+            )
+        if ref.endswith("ssl"):
+            return collect.NotebookPullResult(
+                path=None,
+                attempt=6,
+                max_attempts=6,
+                error_type="SSLError",
+            )
+        return collect.NotebookPullResult(path=_fake_pull(ref, destination))
+
+    monkeypatch.setattr(collect, "pull_notebook", pull)
+    monkeypatch.setattr(collect, "extract_observations", lambda path, **kwargs: _observations())
+    monkeypatch.setattr(collect, "ast_fingerprint", lambda path: "b" * 64)
+
+    facts = collect.collect_facts("example", 4, 0, [], UserConstraints(), max_sample_sub_bytes=1000)
+
+    assert [notebook.ref for notebook in facts.notebooks] == ["author/good"]
+    assert facts.score_diagnostics.notebooks_failed_by_status == {404: 1, 429: 1}
+    assert facts.score_diagnostics.notebooks_failed_by_exception == {
+        "HTTPError": 2,
+        "SSLError": 1,
+    }
+    assert facts.collection_errors == [
+        "notebook author/rate-limited pull failed (HTTP 429, attempt 6/6)",
+        "notebook author/private pull failed (HTTP 404, attempt 1/6)",
+        "notebook author/ssl pull failed (HTTP unknown, attempt 6/6)",
+    ]
 
 
 def test_title_and_ref_scores_are_collected_once_with_context(
@@ -194,14 +247,10 @@ def test_title_and_ref_scores_are_collected_once_with_context(
         lambda slug, limit: [record],
     )
     monkeypatch.setattr(collect, "pull_notebook", _fake_pull)
-    monkeypatch.setattr(
-        collect, "extract_observations", lambda path, **kwargs: _observations()
-    )
+    monkeypatch.setattr(collect, "extract_observations", lambda path, **kwargs: _observations())
     monkeypatch.setattr(collect, "ast_fingerprint", lambda path: "f" * 64)
 
-    facts = collect.collect_facts(
-        "example", 1, 0, [], UserConstraints(), max_sample_sub_bytes=1000
-    )
+    facts = collect.collect_facts("example", 1, 0, [], UserConstraints(), max_sample_sub_bytes=1000)
 
     observations = facts.notebooks[0].score_observations
     assert len(observations) == 1
@@ -251,15 +300,11 @@ def test_discussion_forbidden_is_recorded_without_failing_collection(
         ),
     )
 
-    facts = collect.collect_facts(
-        "example", 0, 5, [], UserConstraints(), max_sample_sub_bytes=1000
-    )
+    facts = collect.collect_facts("example", 0, 5, [], UserConstraints(), max_sample_sub_bytes=1000)
 
     assert facts.discussions == []
     assert facts.discussion_collection_status == "forbidden"
-    assert facts.discussion_collection_error == (
-        "Kaggle Discussion API returned HTTP 403."
-    )
+    assert facts.discussion_collection_error == ("Kaggle Discussion API returned HTTP 403.")
     assert facts.limitations == ["Kaggle Discussion API returned HTTP 403."]
     assert facts.collection_errors == []
 
@@ -277,7 +322,7 @@ def test_metadata_failure_is_the_only_fatal_stage(
         collect.collect_facts("example", 1, 1, [], UserConstraints(), 1000)
 
 
-def test_notebook_work_is_concurrent_and_bounded_to_four(
+def test_notebook_work_is_concurrent_and_bounded_to_two(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_successful_non_notebook_stages(monkeypatch)
@@ -303,15 +348,21 @@ def test_notebook_work_is_concurrent_and_bounded_to_four(
         return path
 
     monkeypatch.setattr(collect, "pull_notebook", pull)
-    monkeypatch.setattr(
-        collect, "extract_observations", lambda path, **kwargs: _observations()
-    )
+    monkeypatch.setattr(collect, "extract_observations", lambda path, **kwargs: _observations())
     monkeypatch.setattr(collect, "ast_fingerprint", lambda path: "c" * 64)
 
-    facts = collect.collect_facts("example", 8, 0, [], UserConstraints(), 1000)
+    facts = collect.collect_facts(
+        "example",
+        8,
+        0,
+        [],
+        UserConstraints(),
+        1000,
+        notebook_concurrency=2,
+    )
 
     assert len(facts.notebooks) == 8
-    assert 1 < peak <= collect.NOTEBOOK_CONCURRENCY == 4
+    assert peak == 2
 
 
 def test_concurrency_one_collects_multiple_notebooks_without_hanging(
@@ -319,25 +370,51 @@ def test_concurrency_one_collects_multiple_notebooks_without_hanging(
 ) -> None:
     _patch_successful_non_notebook_stages(monkeypatch)
     records = [_record(f"author/notebook-{index}") for index in range(3)]
-    monkeypatch.setattr(collect, "NOTEBOOK_CONCURRENCY", 1)
     monkeypatch.setattr(
         collect,
         "list_competition_notebooks",
         lambda slug, limit: records,
     )
     monkeypatch.setattr(collect, "pull_notebook", _fake_pull)
-    monkeypatch.setattr(
-        collect, "extract_observations", lambda path, **kwargs: _observations()
-    )
+    monkeypatch.setattr(collect, "extract_observations", lambda path, **kwargs: _observations())
     monkeypatch.setattr(collect, "ast_fingerprint", lambda path: "d" * 64)
+    progress_updates: list[int] = []
+    progress_postfixes: list[dict[str, int]] = []
 
-    facts = collect.collect_facts("example", 3, 0, [], UserConstraints(), 1000)
+    class RecordingProgress:
+        def __init__(self, **kwargs: Any) -> None:
+            assert kwargs["total"] == 3
+            assert kwargs["desc"] == "Pulling notebooks"
+            assert kwargs["unit"] == "notebook"
+
+        def update(self, amount: int) -> None:
+            progress_updates.append(amount)
+
+        def set_postfix(self, **kwargs: int) -> None:
+            progress_postfixes.append(kwargs)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(collect, "tqdm", RecordingProgress)
+
+    facts = collect.collect_facts(
+        "example",
+        3,
+        0,
+        [],
+        UserConstraints(),
+        1000,
+        notebook_concurrency=1,
+    )
 
     assert [notebook.ref for notebook in facts.notebooks] == [
         "author/notebook-0",
         "author/notebook-1",
         "author/notebook-2",
     ]
+    assert progress_updates == [1, 1, 1]
+    assert progress_postfixes[-1] == {"ok": 3, "failed": 0}
 
 
 def test_download_semaphore_is_not_reacquired_for_ast_analysis(
@@ -421,9 +498,7 @@ def test_discussion_and_writeup_limits_are_independent(
         ("discussions", "example", 200),
         ("writeups", ("past-a", "past-b", "past-c"), 10),
     ]
-    writeups = [
-        item for item in facts.discussions if item.source_type == "winner_writeup"
-    ]
+    writeups = [item for item in facts.discussions if item.source_type == "winner_writeup"]
     assert len(writeups) == 3
     assert all(item.status == "not_computable" for item in facts.similar_competitions)
 

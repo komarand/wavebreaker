@@ -16,8 +16,11 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from kaggle_researcher.facts.kaggle_api import (
-    KaggleRequestPolicy,
+    GLOBAL_KAGGLE_POLICY,
     extract_http_status,
+)
+from kaggle_researcher.facts.kaggle_api import (
+    KaggleRequestPolicy as KaggleRequestPolicy,
 )
 from kaggle_researcher.facts.models import (
     DiscussionFacts,
@@ -32,12 +35,8 @@ MAX_DISCUSSION_HTML_CHARS = 200_000
 MESSAGE_PAGE_SIZE_ALL = -1
 BETWEEN_TOPICS_DELAY_SECONDS = 0.4
 _between_topics_sleep = time.sleep
-_FORUMS_REQUEST_POLICY = KaggleRequestPolicy(min_interval_seconds=0.5)
-_COMPETITION_REQUEST_POLICY = KaggleRequestPolicy(
-    max_attempts=5,
-    min_interval_seconds=0.4,
-    jitter_fraction=0.1,
-)
+_FORUMS_REQUEST_POLICY = GLOBAL_KAGGLE_POLICY
+_COMPETITION_REQUEST_POLICY = GLOBAL_KAGGLE_POLICY
 DiscussionStatus = Literal[
     "collected",
     "partial",

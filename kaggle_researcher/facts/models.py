@@ -196,6 +196,7 @@ class CvLbPair(BaseModel):
     metric_name: str | None = None
     metric_raw: str | None = None
     metric_canonical: str | None = None
+    metric_match: Literal["exact", "assumed"] = "exact"
     optimization_direction: OptimizationDirection | None = None
     cv_score: float | None = None
     lb_score: float | None = None
@@ -255,6 +256,8 @@ class ScoreDiagnostics(BaseModel):
     notebooks_with_cv_scores: int = 0
     notebooks_with_lb_scores: int = 0
     notebooks_with_both_sides: int = 0
+    notebooks_failed_by_status: dict[int, int] = Field(default_factory=dict)
+    notebooks_failed_by_exception: dict[str, int] = Field(default_factory=dict)
 
 
 class UserConstraints(BaseModel):

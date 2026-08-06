@@ -3,14 +3,16 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from dotenv import load_dotenv
+
 DEFAULT_EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_EMBED_DIM = 1024
 DEFAULT_MAX_EMBED_BATCH_SIZE = 8
 DEFAULT_WRITEUPS_PER_COMPETITION = 10
-
-from dotenv import load_dotenv
+DEFAULT_NOTEBOOK_CONCURRENCY = 2
 
 load_dotenv(".env")
+
 
 class ConfigError(RuntimeError):
     pass
@@ -27,6 +29,7 @@ class Settings:
     pg_dsn: str = "postgresql://researcher:researcher@localhost:5432/kaggle_research"
     top_k: int = 10
     max_notebooks: int = 20
+    notebook_concurrency: int = DEFAULT_NOTEBOOK_CONCURRENCY
     max_papers: int = 15
     max_repos: int = 10
     pdf_cache_dir: str = "./data/pdfs"
@@ -57,9 +60,12 @@ def load_config() -> Settings:
             "MAX_EMBED_BATCH_SIZE",
             DEFAULT_MAX_EMBED_BATCH_SIZE,
         ),
-        pg_dsn=os.getenv("PG_DSN", "postgresql://researcher:researcher@localhost:5432/kaggle_research"),
+        pg_dsn=os.getenv(
+            "PG_DSN", "postgresql://researcher:researcher@localhost:5432/kaggle_research"
+        ),
         top_k=_get_positive_int_env("TOP_K", 10),
         max_notebooks=_get_positive_int_env("MAX_NOTEBOOKS", 20),
+        notebook_concurrency=get_notebook_concurrency(),
         max_papers=_get_positive_int_env("MAX_PAPERS", 15),
         max_repos=_get_positive_int_env("MAX_REPOS", 10),
         pdf_cache_dir=os.getenv("PDF_CACHE_DIR", "./data/pdfs"),
@@ -84,6 +90,14 @@ def get_writeups_per_competition() -> int:
     return _get_positive_int_env(
         "WRITEUPS_PER_COMPETITION",
         DEFAULT_WRITEUPS_PER_COMPETITION,
+    )
+
+
+def get_notebook_concurrency() -> int:
+    """Return the facts notebook download concurrency without model credentials."""
+    return _get_positive_int_env(
+        "NOTEBOOK_CONCURRENCY",
+        DEFAULT_NOTEBOOK_CONCURRENCY,
     )
 
 

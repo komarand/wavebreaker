@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import logging
+import os
+import re
 from typing import Any
 
-from kaggle_researcher.facts.kaggle_api import create_kaggle_api, unpack_list_response
+from kaggle_researcher.facts.kaggle_api import (
+    GLOBAL_KAGGLE_POLICY,
+    create_kaggle_api,
+    unpack_list_response,
+)
 from kaggle_researcher.facts.models import CompetitionMetadata
 
 _FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
@@ -41,6 +48,21 @@ _FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
     ),
 }
 _REF_CANDIDATES = ("ref", "competitionRef", "competition_ref", "slug", "id")
+_EVALUATION_METRIC_PATTERNS = (
+    re.compile(
+        r"\bcompetition\s+uses\s+\*{0,2}"
+        r"(?P<metric>[A-Za-z][A-Za-z0-9 +_./-]{1,80}?)"
+        r"\*{0,2}(?:,|\r?$)",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(
+        r"\b(?:evaluation\s+)?metric\s*(?:is|:)\s*\*{0,2}"
+        r"(?P<metric>[A-Za-z][A-Za-z0-9 +_./-]{1,80}?)"
+        r"\*{0,2}(?:[.,]|\r?$)",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+)
+LOGGER = logging.getLogger(__name__)
 
 
 def fetch_competition_metadata(
@@ -49,7 +71,7 @@ def fetch_competition_metadata(
 ) -> CompetitionMetadata:
     if api is None:
         api = create_kaggle_api()
-    response = api.competitions_list(search=slug)
+    response = GLOBAL_KAGGLE_POLICY.call(lambda: api.competitions_list(search=slug))
     competitions = unpack_list_response(response, "competitions").items
     competition = next(
         (
@@ -73,6 +95,10 @@ def fetch_competition_metadata(
         )
         if field_name == "metric_name":
             raw_metric = _normalize_raw_metric(value)
+            if _normalize_metric_name(raw_metric) is None:
+                evaluation_metric = _fetch_evaluation_metric(slug)
+                if evaluation_metric is not None:
+                    raw_metric = evaluation_metric
             values["evaluation_metric_raw"] = raw_metric
             values["metric_status"] = _metric_status(raw_metric)
             value = _normalize_metric_name(raw_metric)
@@ -87,6 +113,53 @@ def fetch_competition_metadata(
     )
 
 
+def _fetch_evaluation_metric(slug: str) -> str | None:
+    try:
+        from kagglesdk import KaggleClient, KaggleEnv
+        from kagglesdk.competitions.types.competition_api_service import (
+            ApiListCompetitionPagesRequest,
+        )
+
+        kaggle = KaggleClient(
+            env=KaggleEnv.PROD,
+            username=os.getenv("KAGGLE_USERNAME"),
+            password=os.getenv("KAGGLE_KEY"),
+            api_token=os.getenv("KAGGLE_API_TOKEN"),
+        )
+        request = ApiListCompetitionPagesRequest()
+        request.competition_name = slug
+        request.page_name = "evaluation"
+        response = GLOBAL_KAGGLE_POLICY.call(
+            lambda: kaggle.competitions.competition_api_client.list_competition_pages(request)
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "Failed to fetch Kaggle evaluation page for %s (%s)",
+            slug,
+            type(exc).__name__,
+        )
+        return None
+
+    for page in unpack_list_response(response, "pages").items:
+        content = _get_competition_value(page, "content")
+        if isinstance(content, str):
+            metric = _metric_from_evaluation_content(content)
+            if metric is not None:
+                return metric
+    return None
+
+
+def _metric_from_evaluation_content(content: str) -> str | None:
+    for pattern in _EVALUATION_METRIC_PATTERNS:
+        match = pattern.search(content)
+        if match is None:
+            continue
+        metric = " ".join(match.group("metric").split()).strip(" -*_`\t")
+        if _normalize_metric_name(metric) is not None:
+            return metric
+    return None
+
+
 def _get_competition_value(competition: Any, *names: str) -> Any:
     if competition is None:
         return None
@@ -95,9 +168,7 @@ def _get_competition_value(competition: Any, *names: str) -> Any:
         for name in names:
             if name in competition and _has_value(competition[name]):
                 return competition[name]
-        normalized_values = {
-            _normalize_key(str(key)): value for key, value in competition.items()
-        }
+        normalized_values = {_normalize_key(str(key)): value for key, value in competition.items()}
         for name in names:
             value = normalized_values.get(_normalize_key(name))
             if _has_value(value):
@@ -138,7 +209,15 @@ def _normalize_metric_name(value: Any) -> str | None:
     if metric_name is None:
         return None
     normalized = " ".join(metric_name.lower().replace("_", " ").split())
-    if normalized in {"", "metric", "metric template", "unknown"}:
+    if normalized in {
+        "",
+        "custom evaluation metric",
+        "custom metric",
+        "evaluation metric",
+        "metric",
+        "metric template",
+        "unknown",
+    }:
         return None
     return metric_name
 

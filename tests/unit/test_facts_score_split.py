@@ -4,7 +4,11 @@ from typing import Literal
 
 import pytest
 
-from kaggle_researcher.facts.models import NotebookFacts, ScoreObservation
+from kaggle_researcher.facts.models import (
+    DeclaredCvObservation,
+    NotebookFacts,
+    ScoreObservation,
+)
 from kaggle_researcher.facts.notebook_ast import (
     classify_score_split,
     diagnose_scores,
@@ -96,7 +100,7 @@ def test_conflicting_and_duplicate_signals_are_unknown_and_deterministic() -> No
     assert first[1] == ["cv", "lb", "public"]
 
 
-def test_split_signal_does_not_bleed_between_two_scores_on_one_line() -> None:
+def test_recognized_metric_next_to_explicit_lb_is_classified_as_cv() -> None:
     split, signals = classify_score_split(
         source_kind="code_string",
         context_text="Best backbone (full_mAP=0.8382, LB=0.797)",
@@ -105,11 +109,11 @@ def test_split_signal_does_not_bleed_between_two_scores_on_one_line() -> None:
         locator="cell_0",
     )
 
-    assert split == "unknown"
-    assert signals == []
+    assert split == "cv"
+    assert signals == ["paired-with-lb"]
 
 
-def test_recanonicalization_does_not_reuse_a_stale_derived_split_signal() -> None:
+def test_recanonicalization_replaces_a_stale_derived_split_signal() -> None:
     observation = ScoreObservation(
         value=0.8382,
         value_raw="0.8382",
@@ -129,8 +133,74 @@ def test_recanonicalization_does_not_reuse_a_stale_derived_split_signal() -> Non
         competition_metric_name=None,
     )[0].score_observations[0]
 
-    assert classified.split == "unknown"
-    assert classified.split_signals == []
+    assert classified.split == "cv"
+    assert classified.split_signals == ["paired-with-lb"]
+
+
+def test_validation_fraction_is_not_a_cv_score() -> None:
+    split, signals = classify_score_split(
+        source_kind="code",
+        context_text="val_frac_per_id = 0.2",
+        context_signals=[],
+        metric_raw="val_frac_per_id",
+        locator="cell_4",
+    )
+
+    assert split == "unknown"
+    assert signals == []
+
+
+def test_recanonicalization_clears_stale_structured_legacy_cv() -> None:
+    score = ScoreObservation(
+        value=0.2,
+        value_raw="0.2",
+        metric_raw="val_frac_per_id",
+        locator="cell_4",
+        raw_text="val_frac_per_id = 0.2",
+        source="code",
+        source_kind="code",
+        context_text="val_frac_per_id = 0.2",
+        split="cv",
+        split_signals=["val"],
+    )
+    notebook = _notebook([score])
+    notebook.declared_cv = ["0.2"]
+    notebook.declared_cv_observations = [
+        DeclaredCvObservation(
+            value=0.2,
+            locator="cell_4",
+            raw_text="val_frac_per_id = 0.2",
+        )
+    ]
+
+    classified = recanonicalize_score_observations(
+        [notebook],
+        competition_metric_name=None,
+    )[0]
+
+    assert classified.score_observations[0].split == "unknown"
+    assert classified.declared_cv == []
+    assert classified.declared_cv_observations == []
+
+
+def test_recanonicalization_preserves_legacy_cv_without_structured_evidence() -> None:
+    notebook = _notebook([])
+    notebook.declared_cv = ["0.72"]
+    notebook.declared_cv_observations = [
+        DeclaredCvObservation(
+            value=0.72,
+            locator="legacy",
+            raw_text="CV 0.72",
+        )
+    ]
+
+    classified = recanonicalize_score_observations(
+        [notebook],
+        competition_metric_name=None,
+    )[0]
+
+    assert classified.declared_cv == ["0.72"]
+    assert classified.declared_cv_observations[0].value == pytest.approx(0.72)
 
 
 def test_old_score_observation_defaults_to_unknown() -> None:

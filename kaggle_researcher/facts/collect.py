@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tqdm.auto import tqdm
+
+from kaggle_researcher.config import get_notebook_concurrency
 from kaggle_researcher.facts.competition import fetch_competition_metadata
 from kaggle_researcher.facts.cv_lb import build_cv_lb_pairs, diagnose_cv_lb
 from kaggle_researcher.facts.discussions import (
@@ -30,9 +35,20 @@ from kaggle_researcher.facts.notebook_ast import (
     extract_score_observations,
     recanonicalize_score_observations,
 )
-from kaggle_researcher.facts.notebooks import list_competition_notebooks, pull_notebook
+from kaggle_researcher.facts.notebooks import (
+    NotebookPullResult,
+    list_competition_notebooks,
+)
+from kaggle_researcher.facts.notebooks import (
+    pull_notebook_with_diagnostics as pull_notebook,
+)
 
-NOTEBOOK_CONCURRENCY = 4
+
+@dataclass(frozen=True, slots=True)
+class _NotebookCollectionFailure:
+    message: str
+    http_status: int | None = None
+    error_type: str | None = None
 
 
 def collect_facts(
@@ -43,6 +59,7 @@ def collect_facts(
     user_constraints: UserConstraints,
     max_sample_sub_bytes: int,
     writeups_per_competition: int = 10,
+    notebook_concurrency: int | None = None,
 ) -> CompetitionFacts:
     if writeups_per_competition <= 0:
         raise ValueError("writeups_per_competition must be a positive integer")
@@ -67,11 +84,21 @@ def collect_facts(
             limitations=["File manifest collection failed."],
         )
 
-    notebooks = _collect_notebooks(
+    concurrency = (
+        get_notebook_concurrency() if notebook_concurrency is None else notebook_concurrency
+    )
+    if concurrency <= 0:
+        raise ValueError("notebook_concurrency must be a positive integer")
+    (
+        notebooks,
+        notebooks_failed_by_status,
+        notebooks_failed_by_exception,
+    ) = _collect_notebooks(
         slug=slug,
         max_notebooks=max_notebooks,
         collection_errors=collection_errors,
         competition_metric_name=metadata.metric_name,
+        notebook_concurrency=concurrency,
     )
     notebooks = recanonicalize_score_observations(
         notebooks,
@@ -92,7 +119,12 @@ def collect_facts(
         cv_lb_pairs,
         metadata.metric_name,
     )
-    score_diagnostics = diagnose_scores(notebooks)
+    score_diagnostics = diagnose_scores(notebooks).model_copy(
+        update={
+            "notebooks_failed_by_status": dict(sorted(notebooks_failed_by_status.items())),
+            "notebooks_failed_by_exception": dict(sorted(notebooks_failed_by_exception.items())),
+        }
+    )
 
     discussions = []
     discussion_status = "empty"
@@ -164,15 +196,16 @@ def _collect_notebooks(
     slug: str,
     max_notebooks: int,
     collection_errors: list[str],
+    notebook_concurrency: int,
     competition_metric_name: str | None = None,
-) -> list[NotebookFacts]:
+) -> tuple[list[NotebookFacts], dict[int, int], dict[str, int]]:
     try:
         notebook_records = list_competition_notebooks(slug, max_notebooks)
     except Exception as exc:
         collection_errors.append(_stage_error("notebook listing", exc))
-        return []
+        return [], {}, {}
     if not notebook_records:
-        return []
+        return [], {}, {}
 
     with tempfile.TemporaryDirectory(prefix="wavebreaker_notebooks_") as temp_dir:
         return asyncio.run(
@@ -180,6 +213,7 @@ def _collect_notebooks(
                 notebook_records,
                 Path(temp_dir),
                 collection_errors,
+                notebook_concurrency,
                 competition_metric_name,
             )
         )
@@ -189,26 +223,75 @@ async def _collect_notebooks_async(
     notebook_records: list[dict[str, Any]],
     temp_dir: Path,
     collection_errors: list[str],
+    notebook_concurrency: int,
     competition_metric_name: str | None = None,
-) -> list[NotebookFacts]:
-    semaphore = asyncio.Semaphore(NOTEBOOK_CONCURRENCY)
+) -> tuple[list[NotebookFacts], dict[int, int], dict[str, int]]:
+    semaphore = asyncio.Semaphore(notebook_concurrency)
     tasks = [
-        _collect_one_notebook(
-            record=record,
-            destination=temp_dir / f"notebook_{index:04d}",
-            semaphore=semaphore,
-            competition_metric_name=competition_metric_name,
+        asyncio.create_task(
+            _collect_one_notebook_indexed(
+                index=index,
+                record=record,
+                destination=temp_dir / f"notebook_{index:04d}",
+                semaphore=semaphore,
+                competition_metric_name=competition_metric_name,
+            )
         )
         for index, record in enumerate(notebook_records)
     ]
-    results = await asyncio.gather(*tasks)
+    results: list[NotebookFacts | _NotebookCollectionFailure | None] = [None] * len(tasks)
+    completed_ok = 0
+    completed_failed = 0
+    progress = tqdm(
+        total=len(tasks),
+        desc="Pulling notebooks",
+        unit="notebook",
+        dynamic_ncols=True,
+        disable=None,
+    )
+    try:
+        for completed in asyncio.as_completed(tasks):
+            index, result = await completed
+            results[index] = result
+            if isinstance(result, _NotebookCollectionFailure):
+                completed_failed += 1
+            else:
+                completed_ok += 1
+            progress.set_postfix(ok=completed_ok, failed=completed_failed)
+            progress.update(1)
+    finally:
+        progress.close()
+
     notebooks: list[NotebookFacts] = []
+    failures_by_status: Counter[int] = Counter()
+    failures_by_exception: Counter[str] = Counter()
     for _record, result in zip(notebook_records, results, strict=True):
-        if isinstance(result, str):
-            collection_errors.append(result)
+        if isinstance(result, _NotebookCollectionFailure):
+            collection_errors.append(result.message)
+            if result.http_status is not None:
+                failures_by_status[result.http_status] += 1
+            if result.error_type is not None:
+                failures_by_exception[result.error_type] += 1
         else:
             notebooks.append(result)
-    return notebooks
+    return notebooks, dict(failures_by_status), dict(failures_by_exception)
+
+
+async def _collect_one_notebook_indexed(
+    *,
+    index: int,
+    record: dict[str, Any],
+    destination: Path,
+    semaphore: asyncio.Semaphore,
+    competition_metric_name: str | None = None,
+) -> tuple[int, NotebookFacts | _NotebookCollectionFailure]:
+    result = await _collect_one_notebook(
+        record=record,
+        destination=destination,
+        semaphore=semaphore,
+        competition_metric_name=competition_metric_name,
+    )
+    return index, result
 
 
 async def _collect_one_notebook(
@@ -217,17 +300,29 @@ async def _collect_one_notebook(
     destination: Path,
     semaphore: asyncio.Semaphore,
     competition_metric_name: str | None = None,
-) -> NotebookFacts | str:
+) -> NotebookFacts | _NotebookCollectionFailure:
     ref = str(record.get("ref") or "<unknown>")
     try:
         async with semaphore:
-            notebook_path = await asyncio.to_thread(
+            raw_pull_result = await asyncio.to_thread(
                 pull_notebook,
                 ref,
                 destination,
             )
+        pull_result = (
+            raw_pull_result
+            if isinstance(raw_pull_result, NotebookPullResult)
+            else NotebookPullResult(path=raw_pull_result)
+        )
+        notebook_path = pull_result.path
         if notebook_path is None:
-            return f"notebook {ref} pull failed"
+            detail = pull_result.failure_detail()
+            suffix = f" ({detail})" if detail is not None else ""
+            return _NotebookCollectionFailure(
+                message=f"notebook {ref} pull failed{suffix}",
+                http_status=pull_result.http_status,
+                error_type=pull_result.error_type,
+            )
         observations, fingerprint = await asyncio.to_thread(
             _analyze_downloaded_notebook,
             notebook_path,
@@ -269,7 +364,10 @@ async def _collect_one_notebook(
             parse_status=observations["parse_status"],
         )
     except Exception as exc:
-        return _stage_error(f"notebook {ref}", exc)
+        return _NotebookCollectionFailure(
+            _stage_error(f"notebook {ref}", exc),
+            error_type=type(exc).__name__,
+        )
 
 
 def _analyze_downloaded_notebook(

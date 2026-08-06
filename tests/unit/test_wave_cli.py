@@ -5,12 +5,12 @@ import argparse
 import pytest
 
 from kaggle_researcher.config import ConfigError, load_config
-from kaggle_researcher.wave import build_parser, main
-
+from kaggle_researcher.wave import build_parser
 
 B5_CONFIG_ENV_VARS = (
     "TOP_K",
     "MAX_NOTEBOOKS",
+    "NOTEBOOK_CONCURRENCY",
     "MAX_PAPERS",
     "MAX_REPOS",
     "PDF_CACHE_DIR",
@@ -144,6 +144,7 @@ def test_b5_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert settings.top_k == 10
     assert settings.max_notebooks == 20
+    assert settings.notebook_concurrency == 2
     assert settings.max_papers == 15
     assert settings.max_repos == 10
     assert settings.pdf_cache_dir == "./data/pdfs"
@@ -164,6 +165,7 @@ def test_b5_config_env_overrides_and_legacy_kaggle_fallback(
     monkeypatch.setenv("DEEPSEEK_API_KEY", "secret-key")
     monkeypatch.setenv("TOP_K", "25")
     monkeypatch.setenv("MAX_NOTEBOOKS", "60")
+    monkeypatch.setenv("NOTEBOOK_CONCURRENCY", "2")
     monkeypatch.setenv("MAX_PAPERS", "30")
     monkeypatch.setenv("MAX_REPOS", "18")
     monkeypatch.setenv("PDF_CACHE_DIR", "./custom-pdfs")
@@ -181,6 +183,7 @@ def test_b5_config_env_overrides_and_legacy_kaggle_fallback(
 
     assert settings.top_k == 25
     assert settings.max_notebooks == 60
+    assert settings.notebook_concurrency == 2
     assert settings.max_papers == 30
     assert settings.max_repos == 18
     assert settings.pdf_cache_dir == "./custom-pdfs"
@@ -199,6 +202,7 @@ def test_b5_config_env_overrides_and_legacy_kaggle_fallback(
     "name",
     [
         "TOP_K",
+        "NOTEBOOK_CONCURRENCY",
         "MAX_DISCUSSIONS",
         "WRITEUPS_PER_COMPETITION",
         "RUN_BUDGET_TOKENS",
@@ -218,6 +222,4 @@ def test_new_integer_config_values_must_be_positive(
 @pytest.mark.parametrize("value", ["0", "-1"])
 def test_writeup_cli_limit_must_be_positive(value: str) -> None:
     with pytest.raises(SystemExit):
-        build_parser().parse_args(
-            ["facts", "example", "--writeups-per-competition", value]
-        )
+        build_parser().parse_args(["facts", "example", "--writeups-per-competition", value])

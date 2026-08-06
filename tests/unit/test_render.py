@@ -45,6 +45,8 @@ def test_facts_section_reports_cluster_counts_and_cv_lb_summary() -> None:
     assert "| CV/LB mean gap | 0.02 |" in markdown
     assert "| CV/LB median gap | 0.02 |" in markdown
     assert "| CV/LB Spearman | 1 |" in markdown
+    assert "| CV/LB reliability | insufficient |" in markdown
+    assert "fewer than 5 pairs; gap is not evidence of a systematic pattern" in markdown
 
 
 def test_splitter_distribution_counts_lineages_not_forks() -> None:
@@ -128,9 +130,9 @@ def test_empty_sections_have_an_explicit_no_supported_findings_line() -> None:
 
 def test_hypotheses_and_eda_tasks_render_in_data_checks_section() -> None:
     markdown = render.render_brief(_brief(), _facts())
-    section = markdown.split("## 9. Что проверить на данных", 1)[1].split(
-        "## 10. Неизвестное", 1
-    )[0]
+    section = markdown.split("## 9. Что проверить на данных", 1)[1].split("## 10. Неизвестное", 1)[
+        0
+    ]
 
     assert "### Гипотезы" in section
     assert "**val_001** (P0, validation, confidence=medium)" in section
@@ -193,12 +195,8 @@ def _brief(**overrides) -> CompetitionBrief:
                 "fact",
             )
         ],
-        "metric_notes": [
-            _claim("claim_metric", "Verify metric behavior.", ["facts"], "inference")
-        ],
-        "leakage_risks": [
-            _claim("claim_leakage", "Audit entity overlap.", ["topic-101"], "claim")
-        ],
+        "metric_notes": [_claim("claim_metric", "Verify metric behavior.", ["facts"], "inference")],
+        "leakage_risks": [_claim("claim_leakage", "Audit entity overlap.", ["topic-101"], "claim")],
         "what_works": [
             _claim(
                 "claim_works",

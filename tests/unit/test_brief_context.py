@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -50,9 +51,7 @@ def test_ast_cluster_block_precedes_discussion_text() -> None:
 
     packed = pack_brief_context(facts, 20_000)
 
-    assert packed.text.index("<TRUSTED_NOTEBOOK_AST") < packed.text.index(
-        "discussion body"
-    )
+    assert packed.text.index("<TRUSTED_NOTEBOOK_AST") < packed.text.index("discussion body")
 
 
 def test_score_observations_are_passed_to_existing_reasoning_context() -> None:
@@ -75,6 +74,79 @@ def test_score_observations_are_passed_to_existing_reasoning_context() -> None:
     assert '"raw_text":"custom wildlife score: 0.8123"' in packed.text
 
 
+def test_ast_score_observations_are_summarized_with_three_small_examples() -> None:
+    notebook = _notebook("author/notebook")
+    notebook.score_observations = [
+        _score_observation(
+            index,
+            split=("cv" if index < 14 else "lb" if index < 27 else "unknown"),
+            raw_text="x" * 300,
+        )
+        for index in range(40)
+    ]
+
+    packed = pack_brief_context(_facts(notebooks=[notebook]), 20_000)
+    ast_payload = _ast_payloads(packed.text)[0]
+    summary = ast_payload["score_observations"]
+
+    assert summary["cv"] == {
+        "count": 14,
+        "median": 0.0065,
+        "min": 0.0,
+        "max": 0.013,
+    }
+    assert summary["lb"]["count"] == 13
+    assert summary["unknown"] == {"count": 13}
+    assert len(summary["examples"]) == brief_context.SCORE_EXAMPLES_PER_CLUSTER
+    assert all(example["split"] == "cv" for example in summary["examples"])
+    assert all(
+        set(example)
+        == {
+            "notebook_ref",
+            "split",
+            "value",
+            "metric_raw",
+            "metric_canonical",
+            "locator",
+            "raw_text",
+        }
+        for example in summary["examples"]
+    )
+    assert all(
+        example["raw_text"] == "x" * brief_context.RAW_TEXT_EXAMPLE_LIMIT + "…"
+        for example in summary["examples"]
+    )
+    ast_json = json.dumps(ast_payload, ensure_ascii=False)
+    assert "observation_id" not in ast_json
+    assert "provenance" not in ast_json
+
+
+def test_absent_score_splits_are_not_emitted_as_zero_filled_summaries() -> None:
+    notebook = _notebook("author/notebook")
+    notebook.score_observations = [_score_observation(0, split="unknown")]
+
+    packed = pack_brief_context(_facts(notebooks=[notebook]), 20_000)
+    summary = _ast_payloads(packed.text)[0]["score_observations"]
+
+    assert "cv" not in summary
+    assert "lb" not in summary
+    assert summary["unknown"] == {"count": 1}
+
+
+def test_score_summary_example_selection_is_byte_deterministic() -> None:
+    notebook = _notebook("author/notebook")
+    notebook.score_observations = [
+        _score_observation(index, split=("lb" if index % 2 else "cv"))
+        for index in reversed(range(12))
+    ]
+    facts = _facts(notebooks=[notebook])
+
+    first = pack_brief_context(facts, 20_000)
+    second = pack_brief_context(facts, 20_000)
+
+    assert first.text.encode("utf-8") == second.text.encode("utf-8")
+
+
 def test_trusted_blocks_publish_their_canonical_source_ids() -> None:
     packed = pack_brief_context(
         _facts(
@@ -87,24 +159,24 @@ def test_trusted_blocks_publish_their_canonical_source_ids() -> None:
     assert 'source_id="facts"' in packed.text
     assert 'source_id="notebook_ast"' in packed.text
     assert 'source_id="cv_lb"' in packed.text
-    assert {"facts", "notebook_ast", "cv_lb"} <= set(
-        packed.stats.included_source_ids
-    )
+    assert '"reliability":"insufficient"' in packed.text
+    assert '"note":"single pair; gap is not evidence of a systematic pattern"' in packed.text
+    assert {"facts", "notebook_ast", "cv_lb"} <= set(packed.stats.included_source_ids)
 
 
 def test_twenty_forks_in_one_lineage_create_one_ast_unit() -> None:
     notebooks = [
-        _notebook(f"author/fork-{index}", cluster_id="lineage_shared")
-        for index in range(20)
+        _notebook(f"author/fork-{index}", cluster_id="lineage_shared") for index in range(20)
     ]
 
     packed = pack_brief_context(_facts(notebooks=notebooks), 50_000)
 
     assert packed.text.count("<TRUSTED_NOTEBOOK_AST") == 1
     assert '"notebook_count":20' in packed.text
-    assert len(
-        [source for source in packed.stats.included_source_ids if source.startswith("author/")]
-    ) == 20
+    assert (
+        len([source for source in packed.stats.included_source_ids if source.startswith("author/")])
+        == 20
+    )
 
 
 def test_writeup_precedes_ordinary_current_discussion() -> None:
@@ -224,17 +296,140 @@ def test_same_input_produces_byte_for_byte_identical_output() -> None:
     assert first.model_dump_json() == second.model_dump_json()
 
 
-@pytest.mark.parametrize("budget", [1, 50, 500, 20_000])
-def test_estimated_tokens_never_exceed_budget(budget: int) -> None:
+def test_estimated_tokens_never_exceed_budget() -> None:
     facts = _facts(
         notebooks=[_notebook("author/notebook")],
         discussions=[_discussion("topic-1", text="y" * 1_000)],
     )
 
-    packed = pack_brief_context(facts, budget)
+    packed = pack_brief_context(facts, 20_000)
 
     assert packed.stats.estimated_tokens_used == estimated_tokens(packed.text)
-    assert packed.stats.estimated_tokens_used <= budget
+    assert packed.stats.estimated_tokens_used <= 20_000
+
+
+@pytest.mark.parametrize("shortfall", [1, 50, 500])
+def test_trusted_context_overflow_is_a_configuration_error(shortfall: int) -> None:
+    facts = _facts(notebooks=[_notebook("author/notebook")])
+    trusted_units = [
+        unit
+        for unit in brief_context._ordered_context_units(facts)
+        if unit.category in brief_context.TRUSTED_CATEGORIES
+    ]
+    required = estimated_tokens("\n\n".join(unit.text for unit in trusted_units))
+    block_tokens = brief_context._trusted_block_token_counts(trusted_units)
+    budget = max(1, required - shortfall)
+
+    with pytest.raises(brief_context.ContextBudgetError) as captured:
+        pack_brief_context(facts, budget)
+
+    message = str(captured.value)
+    assert f"Trusted context requires {required} tokens" in message
+    assert f"max_context_tokens is {budget}" in message
+    assert f"official={block_tokens['official']}" in message
+    assert f"cv_lb={block_tokens['cv_lb']}" in message
+    assert f"notebook_ast={block_tokens['notebook_ast']}" in message
+
+
+def test_sixty_notebooks_with_326_observations_fit_default_budget() -> None:
+    notebooks: list[NotebookFacts] = []
+    observation_index = 0
+    for notebook_index in range(60):
+        notebook = _notebook(
+            f"author/notebook-{notebook_index:02d}",
+            cluster_id=f"lineage_{notebook_index:02d}",
+        )
+        observation_count = 6 if notebook_index < 26 else 5
+        notebook.score_observations = []
+        for _ in range(observation_count):
+            split = ("cv", "lb", "unknown")[observation_index % 3]
+            notebook.score_observations.append(
+                _score_observation(
+                    observation_index,
+                    split=split,
+                    raw_text=f"score context {observation_index}: " + "z" * 400,
+                )
+            )
+            observation_index += 1
+        notebooks.append(notebook)
+    facts = _facts(notebooks=notebooks)
+    trusted_units = [
+        unit
+        for unit in brief_context._ordered_context_units(facts)
+        if unit.category in brief_context.TRUSTED_CATEGORIES
+    ]
+    measured_trusted_total = sum(estimated_tokens(unit.text) for unit in trusted_units)
+    measured_joined_total = estimated_tokens("\n\n".join(unit.text for unit in trusted_units))
+
+    assert observation_index == 326
+    assert measured_trusted_total <= 120_000, (
+        "60-notebook/326-observation trusted context regressed to "
+        f"{measured_trusted_total} tokens"
+    )
+
+    packed = pack_brief_context(facts, 120_000)
+
+    assert packed.stats.trusted_total_tokens == measured_trusted_total
+    assert packed.stats.trusted_estimated_tokens == measured_joined_total
+    assert packed.stats.trusted_block_tokens["notebook_ast"] > 0
+    assert {"facts", "cv_lb", "notebook_ast"} <= set(packed.stats.included_source_ids)
+
+
+def test_trusted_blocks_are_never_dropped_to_fit_optional_context() -> None:
+    facts = _facts(
+        notebooks=[_notebook("author/notebook")],
+        discussions=[_discussion("topic-1", text="z" * 2_000)],
+    )
+    units = brief_context._ordered_context_units(facts)
+    trusted_units = [unit for unit in units if unit.category in brief_context.TRUSTED_CATEGORIES]
+    budget = estimated_tokens("\n\n".join(unit.text for unit in trusted_units))
+
+    packed = pack_brief_context(facts, budget)
+
+    assert {"facts", "cv_lb", "notebook_ast"} <= set(packed.stats.included_source_ids)
+    assert "topic-1" in packed.stats.omitted_source_ids
+    assert all(
+        unit.category not in brief_context.TRUSTED_CATEGORIES
+        for unit in units
+        if set(unit.source_ids) & set(packed.stats.omitted_source_ids)
+    )
+    assert packed.stats.trusted_estimated_tokens == budget
+    assert packed.stats.trusted_total_tokens == sum(packed.stats.trusted_block_tokens.values())
+    assert set(packed.stats.trusted_block_tokens) == {
+        "official",
+        "cv_lb",
+        "notebook_ast",
+    }
+    assert packed.stats.optional_estimated_tokens == 0
+
+
+def test_context_is_joined_once_after_linear_budget_accounting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    facts = _facts(
+        discussions=[_discussion(f"topic-{index}", text="body" * 20) for index in range(100)]
+    )
+    real_join = brief_context._join_context
+    join_calls = 0
+
+    def recording_join(parts: list[str]) -> str:
+        nonlocal join_calls
+        join_calls += 1
+        return real_join(parts)
+
+    monkeypatch.setattr(brief_context, "_join_context", recording_join)
+
+    pack_brief_context(facts, 50_000)
+
+    assert join_calls == 1
+
+
+def test_trusted_omission_limitations_are_unreachable() -> None:
+    source = inspect.getsource(brief_context._packing_limitations)
+
+    assert "Official facts were omitted" not in source
+    assert "CV/LB observations were omitted" not in source
+    assert "Notebook AST evidence was omitted" not in source
 
 
 @pytest.mark.parametrize("budget", [0, -1])
@@ -263,8 +458,7 @@ def test_writeups_and_leaderboard_availability_are_reported_separately() -> None
     assert "topic-writeup" in packed.stats.included_source_ids
     assert "No data for similar competition" not in packed.text
     assert all(
-        "no data for similar competition" not in item.lower()
-        for item in packed.stats.limitations
+        "no data for similar competition" not in item.lower() for item in packed.stats.limitations
     )
 
 
@@ -316,11 +510,41 @@ def test_context_packer_has_no_llm_or_summary_dependency() -> None:
     for forbidden in (
         "DeepSeekClient",
         "chat_json",
-        "summarize",
         "retriever",
         "pg_store",
     ):
         assert forbidden not in source
+
+
+def _ast_payloads(context: str) -> list[dict[str, object]]:
+    payloads: list[dict[str, object]] = []
+    marker = "<TRUSTED_NOTEBOOK_AST"
+    search_from = 0
+    while (block_start := context.find(marker, search_from)) >= 0:
+        payload_start = context.index("\n", block_start) + 1
+        payload_end = context.index("\n</TRUSTED_NOTEBOOK_AST>", payload_start)
+        payloads.append(json.loads(context[payload_start:payload_end]))
+        search_from = payload_end
+    return payloads
+
+
+def _score_observation(
+    index: int,
+    *,
+    split: str,
+    raw_text: str | None = None,
+) -> ScoreObservation:
+    return ScoreObservation(
+        value=index / 1_000,
+        value_raw=str(index / 1_000),
+        metric_raw="identity-balanced mAP",
+        metric_canonical="mAP",
+        locator=f"cell_{1_000 - index:04d}",
+        raw_text=raw_text or f"score {index / 1_000}",
+        source="markdown",
+        split=split,
+        observation_id=f"observation-{index}",
+    )
 
 
 def _facts(

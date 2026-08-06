@@ -133,6 +133,8 @@ def test_summary_returns_none_statistics_for_empty_pairs() -> None:
         "median_gap": None,
         "spearman": None,
         "distinct_lineage_clusters": 0,
+        "reliability": "insufficient",
+        "note": "no pairs; gap cannot be estimated",
     }
 
 
@@ -149,6 +151,41 @@ def test_summary_computes_gap_statistics_and_distinct_lineages() -> None:
     assert summary["median_gap"] == pytest.approx(0.0)
     assert summary["spearman"] is None
     assert summary["distinct_lineage_clusters"] == 1
+    assert summary["reliability"] == "insufficient"
+
+
+@pytest.mark.parametrize(
+    ("count", "expected_reliability", "expected_note"),
+    [
+        (1, "insufficient", "single pair"),
+        (4, "insufficient", "fewer than 5 pairs"),
+        (5, "weak", "fewer than 15 pairs"),
+        (14, "weak", "fewer than 15 pairs"),
+        (15, "sufficient", None),
+    ],
+)
+def test_summary_reliability_thresholds(
+    count: int,
+    expected_reliability: str,
+    expected_note: str | None,
+) -> None:
+    pairs = [
+        _pair(
+            f"notebook-{index}",
+            declared_cv=0.9 + index / 100,
+            public_score=0.8 + index / 100,
+            lineage=f"lc_{index}",
+        )
+        for index in range(count)
+    ]
+
+    summary = summarize_cv_lb(pairs)
+
+    assert summary["reliability"] == expected_reliability
+    if expected_note is None:
+        assert summary["note"] is None
+    else:
+        assert expected_note in str(summary["note"])
 
 
 def test_summary_returns_spearman_for_three_or_more_pairs() -> None:
@@ -252,6 +289,7 @@ def test_observation_pair_requires_same_notebook_and_compatible_metric() -> None
     assert pair.cv_observation_ids == ["cv-1"]
     assert pair.lb_observation_ids == ["lb-1"]
     assert pair.metric_canonical == "mAP"
+    assert pair.metric_match == "exact"
 
 
 def test_different_metrics_and_unknown_splits_do_not_pair() -> None:
@@ -271,6 +309,21 @@ def test_different_metrics_and_unknown_splits_do_not_pair() -> None:
     assert diagnostics.pairs_rejected_metric_mismatch == 1
     assert diagnostics.pairs_rejected_missing_cv == 1
     assert diagnostics.pairs_rejected_ambiguous_split == 1
+
+
+def test_uncanonicalized_metric_within_notebook_is_assumed_match() -> None:
+    notebook = _notebook("author/assumed", [], None, "lc")
+    notebook.score_observations = [
+        _score("cv-map", 0.8382, "cv", "mAP", metric_raw="full_mAP"),
+        _score("lb", 0.797, "lb", None, metric_raw="LB"),
+    ]
+
+    pair = build_cv_lb_pairs([notebook])[0]
+
+    assert pair.cv_score == pytest.approx(0.8382)
+    assert pair.lb_score == pytest.approx(0.797)
+    assert pair.metric_canonical == "mAP"
+    assert pair.metric_match == "assumed"
 
 
 def test_matching_normalized_raw_metric_creates_pair() -> None:

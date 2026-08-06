@@ -12,6 +12,7 @@ import kaggle_researcher.facts.notebooks as notebooks_module
 from kaggle_researcher.facts.notebooks import (
     list_competition_notebooks,
     pull_notebook,
+    pull_notebook_with_diagnostics,
 )
 
 FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "facts" / "kernel_list.json"
@@ -336,6 +337,34 @@ def test_pull_failure_returns_none_without_raising(tmp_path: Path) -> None:
     FakeKaggleApi.pull_impl = fail_pull
 
     assert pull_notebook("alice/missing", tmp_path) is None
+
+
+def test_pull_failure_reports_http_status_and_terminal_attempt(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    attempts = 0
+
+    class RateLimited(RuntimeError):
+        status = 429
+
+    def fail_pull(_: str, __: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise RateLimited("rate limited")
+
+    FakeKaggleApi.pull_impl = fail_pull
+
+    result = pull_notebook_with_diagnostics("alice/rate-limited", tmp_path)
+
+    assert result.path is None
+    assert result.http_status == 429
+    assert (result.attempt, result.max_attempts) == (3, 3)
+    assert result.error_type == "RateLimited"
+    assert attempts == 3
+    assert (
+        "Failed to pull Kaggle notebook alice/rate-limited " "(RateLimited, HTTP 429, attempt 3/3)"
+    ) in caplog.text
 
 
 def test_pull_without_ipynb_returns_none(tmp_path: Path) -> None:

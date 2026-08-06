@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import statistics
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,19 +10,36 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from kaggle_researcher.facts.models import CompetitionFacts, DiscussionFacts, NotebookFacts
+from kaggle_researcher.facts.cv_lb import summarize_cv_lb
+from kaggle_researcher.facts.models import (
+    CompetitionFacts,
+    DiscussionFacts,
+    NotebookFacts,
+    ScoreObservation,
+)
 
 FACTS_SOURCE_ID = "facts"
 CV_LB_SOURCE_ID = "cv_lb"
 NOTEBOOK_AST_SOURCE_ID = "notebook_ast"
-TRUSTED_SOURCE_IDS = frozenset(
-    {FACTS_SOURCE_ID, CV_LB_SOURCE_ID, NOTEBOOK_AST_SOURCE_ID}
-)
+TRUSTED_SOURCE_IDS = frozenset({FACTS_SOURCE_ID, CV_LB_SOURCE_ID, NOTEBOOK_AST_SOURCE_ID})
+TRUSTED_CATEGORIES = frozenset({"official", "cv_lb", "notebook_ast"})
+SCORE_EXAMPLES_PER_CLUSTER = 3
+RAW_TEXT_EXAMPLE_LIMIT = 160
+_CONTEXT_SEPARATOR = "\n\n"
+_TRUSTED_CATEGORY_ORDER = ("official", "cv_lb", "notebook_ast")
+
+
+class ContextBudgetError(ValueError):
+    """Raised when trusted evidence alone exceeds the configured context budget."""
 
 
 class ContextPackingStats(BaseModel):
     token_budget: int
     estimated_tokens_used: int
+    trusted_estimated_tokens: int
+    trusted_block_tokens: dict[str, int]
+    trusted_total_tokens: int
+    optional_estimated_tokens: int
     included_source_ids: list[str]
     omitted_source_ids: list[str]
     omitted_by_reason: dict[str, int]
@@ -64,19 +82,38 @@ def pack_brief_context(
         raise ValueError("max_context_tokens must be a positive integer")
 
     units = _ordered_context_units(facts)
-    included_units: list[_ContextUnit] = []
+    trusted_units = [unit for unit in units if unit.category in TRUSTED_CATEGORIES]
+    optional_units = [unit for unit in units if unit.category not in TRUSTED_CATEGORIES]
+    trusted_bytes = _joined_context_bytes(trusted_units)
+    trusted_tokens = _tokens_for_bytes(trusted_bytes)
+    trusted_block_tokens = _trusted_block_token_counts(trusted_units)
+    trusted_total_tokens = sum(trusted_block_tokens.values())
+    if trusted_tokens > max_context_tokens:
+        block_sizes = ", ".join(
+            f"{category}={trusted_block_tokens[category]}"
+            for category in _TRUSTED_CATEGORY_ORDER
+            if category in trusted_block_tokens
+        )
+        raise ContextBudgetError(
+            f"Trusted context requires {trusted_tokens} tokens but "
+            f"max_context_tokens is {max_context_tokens} ({block_sizes})."
+        )
+
+    included_units: list[_ContextUnit] = list(trusted_units)
     omitted_units: list[_ContextUnit] = []
     context_parts: list[str] = []
-    budget_exhausted = False
+    context_parts.extend(unit.text for unit in trusted_units)
+    used_bytes = trusted_bytes
 
-    for unit in units:
-        candidate = _join_context([*context_parts, unit.text])
-        if not budget_exhausted and estimated_tokens(candidate) <= max_context_tokens:
+    for index, unit in enumerate(optional_units):
+        added_bytes = _context_unit_added_bytes(unit, has_previous=bool(context_parts))
+        if _tokens_for_bytes(used_bytes + added_bytes) <= max_context_tokens:
             context_parts.append(unit.text)
             included_units.append(unit)
-        else:
-            budget_exhausted = True
-            omitted_units.append(unit)
+            used_bytes += added_bytes
+            continue
+        omitted_units.extend(optional_units[index:])
+        break
 
     text = _join_context(context_parts)
     included_source_ids = _ordered_unique(
@@ -85,18 +122,12 @@ def pack_brief_context(
     omitted_source_ids = _ordered_unique(
         source_id for unit in omitted_units for source_id in unit.source_ids
     )
-    omitted_source_reasons = {
-        source_id: "context_budget" for source_id in omitted_source_ids
-    }
+    omitted_source_reasons = {source_id: "context_budget" for source_id in omitted_source_ids}
     omitted_count = sum(max(1, len(unit.source_ids)) for unit in omitted_units)
     omitted_by_reason = {"context_budget": omitted_count} if omitted_count else {}
 
-    included_current_discussions = sum(
-        unit.current_discussion for unit in included_units
-    )
-    omitted_current_discussions = sum(
-        unit.current_discussion for unit in omitted_units
-    )
+    included_current_discussions = sum(unit.current_discussion for unit in included_units)
+    omitted_current_discussions = sum(unit.current_discussion for unit in omitted_units)
     included_writeups = sum(unit.category == "writeup" for unit in included_units)
     omitted_writeups = sum(unit.category == "writeup" for unit in omitted_units)
 
@@ -109,6 +140,10 @@ def pack_brief_context(
     stats = ContextPackingStats(
         token_budget=max_context_tokens,
         estimated_tokens_used=estimated_tokens(text),
+        trusted_estimated_tokens=trusted_tokens,
+        trusted_block_tokens=trusted_block_tokens,
+        trusted_total_tokens=trusted_total_tokens,
+        optional_estimated_tokens=_tokens_for_bytes(max(0, used_bytes - trusted_bytes)),
         included_source_ids=included_source_ids,
         omitted_source_ids=omitted_source_ids,
         omitted_by_reason=omitted_by_reason,
@@ -137,9 +172,9 @@ def pack_brief_context(
 
 def _ordered_context_units(facts: CompetitionFacts) -> list[_ContextUnit]:
     units = [_official_facts_unit(facts)]
-    units.extend(_notebook_ast_units(facts.notebooks))
     if facts.cv_lb_pairs or facts.similar_competitions:
         units.append(_cv_lb_unit(facts))
+    units.extend(_notebook_ast_units(facts.notebooks))
 
     discussions = sorted(facts.discussions, key=_discussion_sort_key)
     writeups = [item for item in discussions if item.source_type == "winner_writeup"]
@@ -160,8 +195,7 @@ def _ordered_context_units(facts: CompetitionFacts) -> list[_ContextUnit]:
     other = [
         item
         for item in discussions
-        if item.source_type == "discussion"
-        and item.competition_id != facts.competition_id
+        if item.source_type == "discussion" and item.competition_id != facts.competition_id
     ]
     units.extend(_untrusted_unit(item, facts.competition_id) for item in writeups)
     units.extend(_untrusted_unit(item, facts.competition_id) for item in current_host)
@@ -203,9 +237,7 @@ def _notebook_ast_units(notebooks: list[NotebookFacts]) -> list[_ContextUnit]:
         notebook_source_ids = tuple(item.ref for item in members)
         payload = {
             "cluster_id": cluster_id,
-            "declared_cv": sorted(
-                {value for item in members for value in item.declared_cv}
-            ),
+            "declared_cv": sorted({value for item in members for value in item.declared_cv}),
             "feature_ops": _aggregate_observations(members, "feature_ops"),
             "metrics": _aggregate_observations(members, "metrics"),
             "models": _aggregate_observations(members, "models"),
@@ -213,14 +245,7 @@ def _notebook_ast_units(notebooks: list[NotebookFacts]) -> list[_ContextUnit]:
             "parse_status_counts": dict(
                 sorted(Counter(item.parse_status for item in members).items())
             ),
-            "score_observations": [
-                {
-                    "notebook_ref": item.ref,
-                    **observation.model_dump(mode="json"),
-                }
-                for item in members
-                for observation in item.score_observations
-            ],
+            "score_observations": _score_observation_summary(members),
             "source_ids": list(notebook_source_ids),
             "splitters": _aggregate_observations(members, "splitters"),
         }
@@ -239,6 +264,65 @@ def _notebook_ast_units(notebooks: list[NotebookFacts]) -> list[_ContextUnit]:
     return units
 
 
+def _score_observation_summary(notebooks: list[NotebookFacts]) -> dict[str, Any]:
+    observations = [
+        (notebook.ref, observation)
+        for notebook in notebooks
+        for observation in notebook.score_observations
+    ]
+    by_split: dict[str, list[tuple[str, ScoreObservation]]] = {
+        split: [item for item in observations if item[1].split == split]
+        for split in ("cv", "lb", "unknown")
+    }
+    summary: dict[str, Any] = {}
+    for split in ("cv", "lb"):
+        values = [observation.value for _, observation in by_split[split]]
+        if values:
+            summary[split] = {
+                "count": len(values),
+                "median": round(statistics.median(values), 6),
+                "min": round(min(values), 6),
+                "max": round(max(values), 6),
+            }
+    summary["unknown"] = {"count": len(by_split["unknown"])}
+
+    ordered_examples = sorted(
+        observations,
+        key=lambda item: (
+            {"cv": 0, "lb": 1, "unknown": 2}[item[1].split],
+            item[0],
+            item[1].locator,
+            item[1].value,
+        ),
+    )[:SCORE_EXAMPLES_PER_CLUSTER]
+    summary["examples"] = [
+        _score_observation_example(notebook_ref, observation)
+        for notebook_ref, observation in ordered_examples
+    ]
+    return summary
+
+
+def _score_observation_example(
+    notebook_ref: str,
+    observation: ScoreObservation,
+) -> dict[str, Any]:
+    return {
+        "notebook_ref": notebook_ref,
+        "split": observation.split,
+        "value": observation.value,
+        "metric_raw": observation.metric_raw,
+        "metric_canonical": observation.metric_canonical,
+        "locator": observation.locator,
+        "raw_text": _truncate_example_text(observation.raw_text),
+    }
+
+
+def _truncate_example_text(value: str) -> str:
+    if len(value) <= RAW_TEXT_EXAMPLE_LIMIT:
+        return value
+    return f"{value[:RAW_TEXT_EXAMPLE_LIMIT]}…"
+
+
 def _aggregate_observations(
     notebooks: list[NotebookFacts],
     field_name: Literal["splitters", "models", "metrics", "feature_ops"],
@@ -253,6 +337,7 @@ def _aggregate_observations(
 
 def _cv_lb_unit(facts: CompetitionFacts) -> _ContextUnit:
     payload = {
+        "summary": summarize_cv_lb(facts.cv_lb_pairs),
         "cv_lb_pairs": [
             item.model_dump(mode="json")
             for item in sorted(
@@ -299,9 +384,7 @@ def _untrusted_unit(
     return _ContextUnit(
         text=f"{header}\n{discussion.text}\n</UNTRUSTED_SOURCE>",
         source_ids=(discussion.topic_id,),
-        category=(
-            "writeup" if discussion.source_type == "winner_writeup" else "discussion"
-        ),
+        category=("writeup" if discussion.source_type == "winner_writeup" else "discussion"),
         current_discussion=(
             discussion.source_type == "discussion"
             and discussion.competition_id == current_competition_id
@@ -328,8 +411,7 @@ def _datetime_timestamp(value: datetime | None) -> float:
 
 def _trusted_block(name: str, payload: object, **attributes: str) -> str:
     attribute_text = "".join(
-        f' {key}="{escape(value, quote=True)}"'
-        for key, value in sorted(attributes.items())
+        f' {key}="{escape(value, quote=True)}"' for key, value in sorted(attributes.items())
     )
     return f"<{name}{attribute_text}>\n{_canonical_json(payload)}\n</{name}>"
 
@@ -344,7 +426,31 @@ def _canonical_json(payload: object) -> str:
 
 
 def _join_context(parts: list[str]) -> str:
-    return "\n\n".join(parts)
+    return _CONTEXT_SEPARATOR.join(parts)
+
+
+def _joined_context_bytes(units: list[_ContextUnit]) -> int:
+    if not units:
+        return 0
+    return sum(len(unit.text.encode("utf-8")) for unit in units) + len(
+        _CONTEXT_SEPARATOR.encode("utf-8")
+    ) * (len(units) - 1)
+
+
+def _trusted_block_token_counts(units: list[_ContextUnit]) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for unit in units:
+        counts[unit.category] += estimated_tokens(unit.text)
+    return {category: counts[category] for category in _TRUSTED_CATEGORY_ORDER if counts[category]}
+
+
+def _context_unit_added_bytes(unit: _ContextUnit, *, has_previous: bool) -> int:
+    separator_bytes = len(_CONTEXT_SEPARATOR.encode("utf-8")) if has_previous else 0
+    return separator_bytes + len(unit.text.encode("utf-8"))
+
+
+def _tokens_for_bytes(byte_count: int) -> int:
+    return (byte_count + 2) // 3
 
 
 def _ordered_unique(values: Any) -> list[str]:
@@ -353,9 +459,7 @@ def _ordered_unique(values: Any) -> list[str]:
 
 def _similar_writeup_counts(facts: CompetitionFacts) -> dict[str, int]:
     counts = Counter(
-        item.competition_id
-        for item in facts.discussions
-        if item.source_type == "winner_writeup"
+        item.competition_id for item in facts.discussions if item.source_type == "winner_writeup"
     )
     return dict(sorted(counts.items()))
 
@@ -388,8 +492,7 @@ def _packing_limitations(
         if item.status == "not_computable":
             reason = item.not_computable_reason or "The required records are unavailable."
             limitations.append(
-                f"Leaderboard stability for {item.competition_id} is not computable: "
-                f"{reason}"
+                f"Leaderboard stability for {item.competition_id} is not computable: " f"{reason}"
             )
 
     if not facts.notebooks:
@@ -397,16 +500,11 @@ def _packing_limitations(
     if not facts.cv_lb_pairs:
         limitations.append("No CV/LB observations were available.")
     if not facts.similar_competitions:
-        limitations.append(
-            "No similar-competition leaderboard stability records were available."
-        )
+        limitations.append("No similar-competition leaderboard stability records were available.")
 
-    writeup_count = sum(
-        item.source_type == "winner_writeup" for item in facts.discussions
-    )
+    writeup_count = sum(item.source_type == "winner_writeup" for item in facts.discussions)
     current_discussion_count = sum(
-        item.source_type == "discussion"
-        and item.competition_id == facts.competition_id
+        item.source_type == "discussion" and item.competition_id == facts.competition_id
         for item in facts.discussions
     )
     if not writeup_count:
@@ -424,28 +522,12 @@ def _packing_limitations(
             "omitted whole because of the context budget."
         )
     omitted_other_discussions = sum(
-        unit.category == "discussion" and not unit.current_discussion
-        for unit in omitted_units
+        unit.category == "discussion" and not unit.current_discussion for unit in omitted_units
     )
     if omitted_other_discussions:
         limitations.append(
             f"{omitted_other_discussions} other discussions were omitted whole because "
             "of the context budget."
         )
-
-    omitted_ast_sources = sum(
-        len(unit.source_ids)
-        for unit in omitted_units
-        if unit.category == "notebook_ast"
-    )
-    if omitted_ast_sources:
-        limitations.append(
-            f"Notebook AST context for {omitted_ast_sources} sources was omitted because "
-            "of the context budget."
-        )
-    if any(unit.category == "cv_lb" for unit in omitted_units):
-        limitations.append("CV/LB context was omitted because of the context budget.")
-    if any(unit.category == "official" for unit in omitted_units):
-        limitations.append("Official facts were omitted because of the context budget.")
 
     return limitations
