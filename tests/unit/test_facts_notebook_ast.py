@@ -13,6 +13,7 @@ from kaggle_researcher.facts.models import CodeObservation, NotebookFacts, Score
 from kaggle_researcher.facts.notebook_ast import (
     _cell_source,
     _strip_magics,
+    ast_fingerprint,
     diagnose_scores,
     extract_observations,
     extract_score_observations,
@@ -23,6 +24,7 @@ FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "facts"
 GROUP_FIXTURE = FIXTURE_DIR / "notebook_groupkfold.ipynb"
 TIMESERIES_FIXTURE = FIXTURE_DIR / "notebook_timeseries.ipynb"
 BROKEN_FIXTURE = FIXTURE_DIR / "notebook_broken_cell.ipynb"
+STAR_PARAMS_FIXTURE = FIXTURE_DIR / "notebook_star_params.ipynb"
 
 
 def test_groupkfold_fixture_extracts_splitter_model_metric_features_and_cv() -> None:
@@ -38,6 +40,11 @@ def test_groupkfold_fixture_extracts_splitter_model_metric_features_and_cv() -> 
                 "shuffle": "True",
                 "groups": "customer_id",
             },
+            kwargs_resolved_from={
+                "n_splits": "direct",
+                "shuffle": "direct",
+                "groups": "direct",
+            },
             locator="cell_0",
         )
     ]
@@ -48,6 +55,11 @@ def test_groupkfold_fixture_extracts_splitter_model_metric_features_and_cv() -> 
                 "n_estimators": "500",
                 "learning_rate": "0.05",
                 "num_leaves": "31",
+            },
+            kwargs_resolved_from={
+                "n_estimators": "direct",
+                "learning_rate": "direct",
+                "num_leaves": "direct",
             },
             locator="cell_0",
         )
@@ -65,12 +77,130 @@ def test_timeseries_fixture_extracts_splitter_and_shift() -> None:
         CodeObservation(
             name="TimeSeriesSplit",
             kwargs={"n_splits": "6"},
+            kwargs_resolved_from={"n_splits": "direct"},
             locator="cell_0",
         )
     ]
     assert result["feature_ops"] == [
         CodeObservation(name="shift", kwargs={}, locator="cell_0")
     ]
+
+
+def test_star_kwargs_fixture_resolves_dict_literal_and_tracks_sources() -> None:
+    result = extract_observations(STAR_PARAMS_FIXTURE)
+
+    assert result["models"] == [
+        CodeObservation(
+            name="LGBMClassifier",
+            kwargs={
+                "n_estimators": "3000",
+                "learning_rate": "0.02",
+                "num_leaves": "64",
+            },
+            kwargs_resolved_from={
+                "n_estimators": "dict_literal",
+                "learning_rate": "dict_literal",
+                "num_leaves": "dict_literal",
+            },
+            locator="cell_1",
+        ),
+        CodeObservation(
+            name="XGBClassifier",
+            kwargs={
+                "n_estimators": "500",
+                "learning_rate": "0.02",
+                "num_leaves": "64",
+            },
+            kwargs_resolved_from={
+                "n_estimators": "direct",
+                "learning_rate": "dict_literal",
+                "num_leaves": "dict_literal",
+            },
+            locator="cell_2",
+        ),
+        CodeObservation(
+            name="CatBoostClassifier",
+            kwargs={},
+            kwargs_resolved_from={},
+            locator="cell_3",
+        ),
+    ]
+
+
+def test_star_kwargs_uses_last_dict_assignment_across_notebook(tmp_path: Path) -> None:
+    notebook_path = _write_notebook(
+        tmp_path,
+        [
+            _code_cell('params = {"n_estimators": 100}\n'),
+            _code_cell('params = {"n_estimators": 500}\n'),
+            _code_cell("model = LGBMClassifier(**params)\n"),
+        ],
+    )
+
+    result = extract_observations(notebook_path)
+
+    assert result["models"][0].kwargs == {"n_estimators": "500"}
+    assert result["models"][0].kwargs_resolved_from == {
+        "n_estimators": "dict_literal"
+    }
+
+
+def test_star_kwargs_allows_one_level_merge_but_skips_second_level(
+    tmp_path: Path,
+) -> None:
+    notebook_path = _write_notebook(
+        tmp_path,
+        [
+            _code_cell(
+                'base = {"n_estimators": 100, "learning_rate": 0.1}\n'
+                'params = {**base, "learning_rate": 0.02}\n'
+                'reverse = {"learning_rate": 0.03, **base}\n'
+                'nested = {**params, "max_depth": 7}\n'
+                "good = LGBMClassifier(**params)\n"
+                "reverse_order = LGBMClassifier(**reverse)\n"
+                "skipped = XGBClassifier(**nested)\n"
+            )
+        ],
+    )
+
+    result = extract_observations(notebook_path)
+
+    assert result["models"][0].kwargs == {
+        "n_estimators": "100",
+        "learning_rate": "0.02",
+    }
+    assert result["models"][1].kwargs == {
+        "n_estimators": "100",
+        "learning_rate": "0.03",
+    }
+    assert result["models"][2].kwargs == {}
+
+
+def test_star_kwargs_skips_non_string_keys_and_preserves_expressions(
+    tmp_path: Path,
+) -> None:
+    notebook_path = _write_notebook(
+        tmp_path,
+        [
+            _code_cell(
+                'bad = {1: "value"}\n'
+                'params = {"n_estimators": N * 2}\n'
+                "bad_model = LGBMClassifier(**bad)\n"
+                "good_model = LGBMClassifier(**params)\n"
+            )
+        ],
+    )
+
+    result = extract_observations(notebook_path)
+
+    assert result["models"][0].kwargs == {}
+    assert result["models"][1].kwargs == {"n_estimators": "N * 2"}
+
+
+def test_star_kwargs_fixture_fingerprint_is_stable() -> None:
+    assert ast_fingerprint(STAR_PARAMS_FIXTURE) == (
+        "37f73c205ebdb73c2df6577220b4437e172d1441a22ff7acc453d6f52ff55f15"
+    )
 
 
 def test_broken_cell_fixture_is_partial_and_keeps_valid_observations() -> None:
@@ -81,6 +211,10 @@ def test_broken_cell_fixture_is_partial_and_keeps_valid_observations() -> None:
         CodeObservation(
             name="XGBClassifier",
             kwargs={"n_estimators": "200", "max_depth": "7"},
+            kwargs_resolved_from={
+                "n_estimators": "direct",
+                "max_depth": "direct",
+            },
             locator="cell_1",
         )
     ]
@@ -668,6 +802,7 @@ def test_target_names_match_exactly_and_attribute_calls_are_supported(tmp_path: 
         CodeObservation(
             name="f1_score",
             kwargs={"average": "macro"},
+            kwargs_resolved_from={"average": "direct"},
             locator="cell_0",
         )
     ]
@@ -675,6 +810,7 @@ def test_target_names_match_exactly_and_attribute_calls_are_supported(tmp_path: 
         CodeObservation(
             name="OneHotEncoder",
             kwargs={"handle_unknown": "ignore"},
+            kwargs_resolved_from={"handle_unknown": "direct"},
             locator="cell_0",
         )
     ]
@@ -698,7 +834,10 @@ def test_declared_cv_from_code_strings_is_deduplicated_in_source_order(tmp_path:
     assert result["declared_cv"] == ["0.7001", "0.7112", "0.7223"]
 
 
-@pytest.mark.parametrize("fixture", [GROUP_FIXTURE, TIMESERIES_FIXTURE, BROKEN_FIXTURE])
+@pytest.mark.parametrize(
+    "fixture",
+    [GROUP_FIXTURE, TIMESERIES_FIXTURE, BROKEN_FIXTURE, STAR_PARAMS_FIXTURE],
+)
 def test_notebook_fixtures_have_valid_v4_structure(fixture: Path) -> None:
     notebook = json.loads(fixture.read_text(encoding="utf-8"))
 

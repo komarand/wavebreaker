@@ -264,6 +264,7 @@ _METRIC_RANGE_ALIASES = {
     "rank-1": "top1",
     "roc_auc": "auc",
 }
+_ResolvedDictLiteral = tuple[dict[str, str], int]
 
 
 def extract_observations(
@@ -293,6 +294,7 @@ def extract_observations(
     parsed_code_cells = 0
     code_cell_index = 0
     has_syntax_error = False
+    dict_literals = _collect_notebook_dict_literals(cells)
 
     for cell_index, cell in enumerate(cells):
         cell_type = _cell_value(cell, "cell_type")
@@ -331,6 +333,7 @@ def extract_observations(
             source=python_source,
             locator=locator,
             observations=observations,
+            dict_literals=dict_literals,
         )
         visitor.visit(tree)
         added, candidates_seen, candidates_excluded = _code_score_observations(
@@ -416,24 +419,28 @@ class _ObservationVisitor(ast.NodeVisitor):
         source: str,
         locator: str,
         observations: dict[str, list[CodeObservation]],
+        dict_literals: dict[str, _ResolvedDictLiteral],
     ) -> None:
         self.source = source
         self.locator = locator
         self.observations = observations
+        self.dict_literals = dict_literals
 
     def visit_Call(self, node: ast.Call) -> None:
         name = _callee_name(node.func)
         category, allowed_kwargs = _observation_category(name)
         if category is not None:
-            kwargs = _call_kwargs(
+            kwargs, kwargs_resolved_from = _call_kwargs(
                 node,
                 source=self.source,
                 allowed_names=allowed_kwargs,
+                dict_literals=self.dict_literals,
             )
             self.observations[category].append(
                 CodeObservation(
                     name=name,
                     kwargs=kwargs,
+                    kwargs_resolved_from=kwargs_resolved_from,
                     locator=self.locator,
                 )
             )
@@ -539,15 +546,93 @@ def _call_kwargs(
     *,
     source: str,
     allowed_names: set[str] | None,
-) -> dict[str, str]:
+    dict_literals: dict[str, _ResolvedDictLiteral],
+) -> tuple[dict[str, str], dict[str, Literal["direct", "dict_literal"]]]:
     kwargs: dict[str, str] = {}
+    resolved_from: dict[str, Literal["direct", "dict_literal"]] = {}
+    for keyword in call.keywords:
+        if keyword.arg is not None or not isinstance(keyword.value, ast.Name):
+            continue
+        resolved = dict_literals.get(keyword.value.id)
+        if resolved is None:
+            continue
+        for name, value in resolved[0].items():
+            if allowed_names is not None and name not in allowed_names:
+                continue
+            kwargs[name] = value
+            resolved_from[name] = "dict_literal"
     for keyword in call.keywords:
         if keyword.arg is None:
             continue
         if allowed_names is not None and keyword.arg not in allowed_names:
             continue
         kwargs[keyword.arg] = _keyword_value(keyword.value, source)
-    return kwargs
+        resolved_from[keyword.arg] = "direct"
+    return kwargs, resolved_from
+
+
+def _collect_notebook_dict_literals(
+    cells: list[Any],
+) -> dict[str, _ResolvedDictLiteral]:
+    """Collect a flat, notebook-wide map without modelling Python scopes."""
+    resolved: dict[str, _ResolvedDictLiteral] = {}
+    for cell in cells:
+        if _cell_value(cell, "cell_type") != "code":
+            continue
+        source = _strip_magics(_cell_source(cell))
+        try:
+            tree = _parse_source(source)
+        except SyntaxError:
+            continue
+        assignments = sorted(
+            (
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Dict)
+            ),
+            key=lambda node: (node.lineno, node.col_offset),
+        )
+        for assignment in assignments:
+            value = _resolve_dict_literal(assignment.value, source, resolved)
+            if value is not None:
+                resolved[assignment.targets[0].id] = value
+    return resolved
+
+
+def _resolve_dict_literal(
+    node: ast.Dict,
+    source: str,
+    known: dict[str, _ResolvedDictLiteral],
+) -> _ResolvedDictLiteral | None:
+    kwargs: dict[str, str] = {}
+    merge_depth = 0
+    if any(
+        key is not None
+        and (not isinstance(key, ast.Constant) or not isinstance(key.value, str))
+        for key in node.keys
+    ):
+        return None
+
+    for key, value in zip(node.keys, node.values, strict=True):
+        if key is not None:
+            continue
+        if not isinstance(value, ast.Name):
+            return None
+        base = known.get(value.id)
+        if base is None or base[1] >= 1:
+            return None
+        kwargs.update(base[0])
+        merge_depth = 1
+
+    for key, value in zip(node.keys, node.values, strict=True):
+        if key is None:
+            continue
+        assert isinstance(key, ast.Constant) and isinstance(key.value, str)
+        kwargs[key.value] = _keyword_value(value, source)
+    return kwargs, merge_depth
 
 
 def _keyword_value(value: ast.expr, source: str) -> str:

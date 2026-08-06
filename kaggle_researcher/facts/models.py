@@ -13,6 +13,9 @@ OptimizationDirection = Literal["maximize", "minimize"]
 class CodeObservation(BaseModel):
     name: str
     kwargs: dict[str, str]
+    kwargs_resolved_from: dict[str, Literal["direct", "dict_literal"]] = Field(
+        default_factory=dict
+    )
     locator: str
 
 
