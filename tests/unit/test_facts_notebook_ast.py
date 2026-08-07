@@ -689,6 +689,29 @@ def test_dataset_paths_are_extracted_from_markdown_and_code_strings(
     assert result["dataset_paths"] == ["some-lib", "external-features"]
 
 
+def test_dataset_paths_reject_path_segments_numeric_and_short_slugs(
+    tmp_path: Path,
+) -> None:
+    notebook_path = _write_notebook(
+        tmp_path,
+        [
+            _markdown_cell(
+                "/kaggle/input/competitions/foo/train.csv\n"
+                "/kaggle/input/notebooks/example/data.csv\n"
+                "/kaggle/input/12345/data.csv\n"
+                "/kaggle/input/ab/data.csv\n"
+                "/kaggle/input/0-926-base-model/weights.pt\n"
+                "/kaggle/input/current-comp/train.csv"
+            ),
+            _code_cell("value = 1\n"),
+        ],
+    )
+
+    result = extract_observations(notebook_path, competition_id="current-comp")
+
+    assert result["dataset_paths"] == ["0-926-base-model"]
+
+
 def test_dataset_reference_aggregation_counts_notebooks_and_lineages() -> None:
     first = _notebook_fact("author/first", "lc_shared", ["common-lib"])
     second = _notebook_fact("author/second", "lc_shared", ["common-lib", "broad-lib"])

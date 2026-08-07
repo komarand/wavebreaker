@@ -250,6 +250,9 @@ class LeaderboardShape(BaseModel):
     top_score: float | None
     score_at_rank: dict[int, float]
     median_adjacent_delta: float | None
+    tied_adjacent_pairs: int = 0
+    nonzero_adjacent_pairs: int = 0
+    tied_ratio: float | None = None
     teams_within_median_delta_of_median: int | None
     plateau_ratio: float | None
     span_top_to_last: float | None
@@ -331,6 +334,7 @@ class CvLbDiagnostics(BaseModel):
     pairs_rejected_missing_lb: int = 0
     pairs_rejected_metric_mismatch: int = 0
     pairs_rejected_scale_mismatch: int = 0
+    rejected_implausible_gap: int = 0
     pairs_rejected_implausible_gap: int = 0
     leaderboard_pairs_rejected_implausible_gap: int = 0
     pairs_rejected_ambiguous_metric: int = 0
@@ -390,6 +394,7 @@ class CompetitionFacts(BaseModel):
     similar_candidates: list[SimilarCompetition] = Field(default_factory=list)
     similar_diagnostics: SimilarSearchDiagnostics | None = None
     cv_lb_pairs: list[CvLbPair]
+    implausible_gap_pairs: list[CvLbPair] = Field(default_factory=list)
     cv_lb_diagnostics: CvLbDiagnostics = Field(default_factory=CvLbDiagnostics)
     score_diagnostics: ScoreDiagnostics = Field(default_factory=ScoreDiagnostics)
 

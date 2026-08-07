@@ -76,9 +76,19 @@ def compute_leaderboard_shape(
         abs(current - previous)
         for previous, current in zip(scores, scores[1:], strict=False)
     ]
-    median_adjacent_delta = statistics.median(adjacent_deltas)
+    nonzero_deltas = [delta for delta in adjacent_deltas if delta != 0]
+    tied_adjacent_pairs = len(adjacent_deltas) - len(nonzero_deltas)
+    nonzero_adjacent_pairs = len(nonzero_deltas)
+    tied_ratio = (
+        round(tied_adjacent_pairs / len(adjacent_deltas), 4)
+        if adjacent_deltas
+        else None
+    )
+    median_adjacent_delta = (
+        statistics.median(nonzero_deltas) if nonzero_deltas else None
+    )
     median_score = statistics.median(scores)
-    if median_adjacent_delta == 0:
+    if median_adjacent_delta is None:
         teams_within_delta = None
         plateau_ratio = None
     else:
@@ -104,6 +114,9 @@ def compute_leaderboard_shape(
             if rank in scores_by_rank
         },
         median_adjacent_delta=median_adjacent_delta,
+        tied_adjacent_pairs=tied_adjacent_pairs,
+        nonzero_adjacent_pairs=nonzero_adjacent_pairs,
+        tied_ratio=tied_ratio,
         teams_within_median_delta_of_median=teams_within_delta,
         plateau_ratio=plateau_ratio,
         span_top_to_last=abs(scores[0] - scores[-1]),

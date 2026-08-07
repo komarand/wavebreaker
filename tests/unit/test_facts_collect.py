@@ -9,10 +9,12 @@ from typing import Any
 import pytest
 
 from kaggle_researcher.facts import collect
+from kaggle_researcher.facts.cv_lb import CvLbPairList
 from kaggle_researcher.facts.discussions import DiscussionCollection
 from kaggle_researcher.facts.models import (
     CodeObservation,
     CompetitionMetadata,
+    CvLbPair,
     DiscussionFacts,
     FileManifest,
     PublicLeaderboard,
@@ -67,7 +69,17 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
     def build_pairs(notebooks, competition_metric_name=None):
         assert competition_metric_name == "roc_auc"
         calls.append(f"pairs:{len({item.lineage_cluster_id for item in notebooks})}")
-        return []
+        rejected = CvLbPair(
+            notebook_ref="author/one",
+            declared_cv=0.7,
+            public_score=0.8,
+            lineage_cluster_id="lc_rejected",
+            metric_canonical="roc_auc",
+            gap=-0.1,
+            absolute_gap=0.1,
+            comparability_status="implausible_gap",
+        )
+        return CvLbPairList([], implausible_gap_pairs=[rejected])
 
     monkeypatch.setattr(collect, "assign_lineage_clusters", assign)
     monkeypatch.setattr(
@@ -131,6 +143,9 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
     assert facts.discussion_collection_status == "collected"
     assert facts.cv_lb_diagnostics.notebooks_total == 2
     assert facts.cv_lb_diagnostics.notebooks_with_both == 2
+    assert [pair.notebook_ref for pair in facts.implausible_gap_pairs] == [
+        "author/one"
+    ]
 
 
 def test_nonfatal_stage_failures_are_recorded_and_collection_continues(

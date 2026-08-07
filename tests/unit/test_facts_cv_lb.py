@@ -463,12 +463,12 @@ def test_pairing_is_deterministic_under_notebook_and_observation_permutation() -
     first = _notebook("author/z", [], None, "lc_z")
     first.score_observations = [
         _score("lb-z", 0.8, "lb", "mAP"),
-        _score("cv-z", 0.7, "cv", "mAP"),
+        _score("cv-z", 0.78, "cv", "mAP"),
     ]
     second = _notebook("author/a", [], None, "lc_a")
     second.score_observations = [
         _score("cv-a", 0.6, "cv", "mAP"),
-        _score("lb-a", 0.65, "lb", "mAP"),
+        _score("lb-a", 0.62, "lb", "mAP"),
     ]
 
     forward = build_cv_lb_pairs([first, second], "mAP")
@@ -522,13 +522,13 @@ def test_ambiguous_leaderboard_matches_are_rejected() -> None:
 
 
 def test_leaderboard_pairs_are_built_and_summarized_separately() -> None:
-    observed = _pair("observed", 0.9, 0.8, "lc_observed")
+    observed = _pair("observed", 0.82, 0.8, "lc_observed")
     notebook = _notebook("alice/notebook", [], None, "lc_leaderboard")
-    notebook.score_observations = [_score("cv", 0.7, "cv", "mAP")]
+    notebook.score_observations = [_score("cv", 0.79, "cv", "mAP")]
     match = LeaderboardMatch(
         notebook_ref=notebook.ref,
         team_name="Alice",
-        score=0.6,
+        score=0.77,
         match_confidence="exact",
     )
 
@@ -547,10 +547,10 @@ def test_leaderboard_pairs_are_built_and_summarized_separately() -> None:
     assert len(leaderboard_pairs) == 1
     assert leaderboard_pairs[0].lb_source == "leaderboard_match"
     assert summary["count"] == 1
-    assert summary["mean_gap"] == pytest.approx(0.1)
-    assert summary["median_gap"] == pytest.approx(0.1)
+    assert summary["mean_gap"] == pytest.approx(0.02)
+    assert summary["median_gap"] == pytest.approx(0.02)
     assert summary["leaderboard_pair_count"] == 1
-    assert summary["leaderboard_median_gap"] == pytest.approx(0.1)
+    assert summary["leaderboard_median_gap"] == pytest.approx(0.02)
     assert "best submission" in str(summary["leaderboard_gap_note"])
     assert diagnostics.pairs_created == 1
     assert diagnostics.pairs_created_from_leaderboard_match == 1
@@ -577,7 +577,10 @@ def test_implausible_bounded_metric_gap_is_rejected_and_counted() -> None:
     diagnostics = diagnose_cv_lb([notebook], pairs, "Roc Auc Score")
 
     assert pairs == []
+    assert len(pairs.implausible_gap_pairs) == 1
+    assert pairs.implausible_gap_pairs[0].comparability_status == "implausible_gap"
     assert diagnostics.pairs_rejected_implausible_gap == 1
+    assert diagnostics.rejected_implausible_gap == 1
     assert diagnostics.leaderboard_pairs_rejected_implausible_gap == 0
     assert diagnostics.zero_pairs_reason is not None
     assert "implausible gap: 1" in diagnostics.zero_pairs_reason
@@ -610,8 +613,11 @@ def test_implausible_leaderboard_match_gap_is_rejected_and_counted() -> None:
     )
 
     assert pairs == []
+    assert len(pairs.implausible_gap_pairs) == 1
+    assert pairs.implausible_gap_pairs[0].lb_source == "leaderboard_match"
     assert diagnostics.pairs_rejected_implausible_gap == 0
     assert diagnostics.leaderboard_pairs_rejected_implausible_gap == 1
+    assert diagnostics.rejected_implausible_gap == 1
     summary = summarize_cv_lb(pairs)
     assert summary["leaderboard_pair_count"] == 0
     assert summary["leaderboard_median_gap"] is None
@@ -620,20 +626,38 @@ def test_implausible_leaderboard_match_gap_is_rejected_and_counted() -> None:
 def test_gap_threshold_applies_only_to_bounded_metrics() -> None:
     plausible_auc = _notebook("author/auc", [], 0.95, "lc_auc")
     plausible_auc.score_observations = [
-        _score("cv", 0.45, "cv", None, metric_raw="score")
+        _score("cv", 0.91, "cv", None, metric_raw="score")
     ]
     unbounded = _notebook("author/rmse", [], 0.95, "lc_rmse")
     unbounded.score_observations = [
-        _score("cv", 0.01, "cv", None, metric_raw="score")
+        _score("cv", 2.45, "cv", None, metric_raw="score")
     ]
 
     auc_pairs = build_cv_lb_pairs([plausible_auc], "roc_auc")
     rmse_pairs = build_cv_lb_pairs([unbounded], "rmse")
 
     assert len(auc_pairs) == 1
-    assert auc_pairs[0].gap == pytest.approx(-0.5)
+    assert auc_pairs[0].gap == pytest.approx(-0.04)
     assert len(rmse_pairs) == 1
-    assert rmse_pairs[0].gap == pytest.approx(-0.94)
+    assert rmse_pairs[0].gap == pytest.approx(1.5)
+
+
+def test_auc_gap_above_threshold_is_preserved_but_excluded_from_statistics() -> None:
+    notebook = _notebook("author/auc-gap", [], 0.95, "lc_auc")
+    notebook.score_observations = [
+        _score("cv", 0.82, "cv", "roc_auc")
+    ]
+
+    pairs = build_cv_lb_pairs([notebook], "roc_auc")
+    diagnostics = diagnose_cv_lb([notebook], pairs, "roc_auc")
+    summary = summarize_cv_lb(pairs)
+
+    assert pairs == []
+    assert len(pairs.implausible_gap_pairs) == 1
+    assert pairs.implausible_gap_pairs[0].absolute_gap == pytest.approx(0.13)
+    assert summary["count"] == 0
+    assert summary["mean_gap"] is None
+    assert diagnostics.rejected_implausible_gap == 1
 
 
 def test_implausible_score_observation_does_not_build_cv_lb_pair() -> None:

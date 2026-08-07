@@ -169,9 +169,14 @@ def collect_facts(
             metadata.metric_name,
         )
         cv_lb_pairs = [*observation_pairs, *leaderboard_pairs]
+        implausible_gap_pairs = [
+            *getattr(observation_pairs, "implausible_gap_pairs", []),
+            *getattr(leaderboard_pairs, "implausible_gap_pairs", []),
+        ]
     except Exception as exc:
         collection_errors.append(_stage_error("CV/LB pairing", exc))
         cv_lb_pairs = []
+        implausible_gap_pairs = []
     cv_lb_diagnostics = diagnose_cv_lb(
         notebooks,
         cv_lb_pairs,
@@ -263,6 +268,7 @@ def collect_facts(
         similar_candidates=similar_candidates,
         similar_diagnostics=similar_diagnostics,
         cv_lb_pairs=cv_lb_pairs,
+        implausible_gap_pairs=implausible_gap_pairs,
         cv_lb_diagnostics=cv_lb_diagnostics,
         score_diagnostics=score_diagnostics,
         discussion_collection_status=discussion_status,

@@ -204,6 +204,24 @@ EXCLUDED_SCORE_LABELS = frozenset(
 KAGGLE_INPUT_PATH = re.compile(
     r"/kaggle/input/(?P<slug>[A-Za-z0-9][A-Za-z0-9_-]{1,80})(?:/|\b)"
 )
+NON_DATASET_PATH_SEGMENTS = frozenset(
+    {
+        "c",
+        "code",
+        "competitions",
+        "datasets",
+        "input",
+        "kaggle",
+        "kernels",
+        "models",
+        "notebooks",
+        "output",
+        "temp",
+        "tmp",
+        "work",
+        "working",
+    }
+)
 CANONICAL_METRIC_ALIASES: dict[str, str] = {
     "accuracy": "accuracy",
     "acc": "accuracy",
@@ -408,7 +426,13 @@ def _append_dataset_paths(
     for match in KAGGLE_INPUT_PATH.finditer(text):
         slug = match.group("slug")
         slug_key = slug.casefold()
-        if slug_key == competition_key or slug_key in seen:
+        if (
+            slug_key == competition_key
+            or slug_key in NON_DATASET_PATH_SEGMENTS
+            or slug_key.isdigit()
+            or len(slug_key) < 3
+            or slug_key in seen
+        ):
             continue
         seen.add(slug_key)
         paths.append(slug)

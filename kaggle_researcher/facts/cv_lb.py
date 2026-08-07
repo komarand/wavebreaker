@@ -16,11 +16,18 @@ from kaggle_researcher.facts.models import (
     ScoreObservation,
 )
 from kaggle_researcher.facts.notebook_ast import (
+    METRIC_VALUE_RANGE,
     canonicalize_metric_label,
     metric_optimization_direction,
 )
 
+MAX_PLAUSIBLE_BOUNDED_GAP = 0.05
 _BOUNDED_METRICS = frozenset({"accuracy", "f1", "mAP", "rank-1", "roc_auc"})
+_METRIC_RANGE_KEYS = {
+    "mAP": "map",
+    "rank-1": "top1",
+    "roc_auc": "auc",
+}
 _METRIC_CONTEXT_TOKENS = frozenset(
     {
         "cv",
@@ -61,25 +68,36 @@ class _Representative:
 @dataclass(frozen=True)
 class _PairingResult:
     pairs: tuple[CvLbPair, ...]
+    implausible_gap_pairs: tuple[CvLbPair, ...]
     rejections: frozenset[str]
+
+
+class CvLbPairList(list[CvLbPair]):
+    def __init__(
+        self,
+        pairs: list[CvLbPair],
+        *,
+        implausible_gap_pairs: list[CvLbPair],
+    ) -> None:
+        super().__init__(pairs)
+        self.implausible_gap_pairs = implausible_gap_pairs
 
 
 def build_cv_lb_pairs(
     notebooks: list[NotebookFacts],
     competition_metric_name: str | None = None,
 ) -> list[CvLbPair]:
-    pairs = [
-        pair
-        for notebook in notebooks
-        for pair in _pair_notebook(notebook, competition_metric_name).pairs
+    results = [
+        _pair_notebook(notebook, competition_metric_name) for notebook in notebooks
     ]
-    return sorted(
-        pairs,
-        key=lambda pair: (
-            pair.notebook_ref,
-            pair.metric_canonical or pair.metric_raw or "",
-            pair.cv_score if pair.cv_score is not None else pair.declared_cv,
-            pair.lb_score if pair.lb_score is not None else pair.public_score,
+    return CvLbPairList(
+        _sorted_pairs([pair for result in results for pair in result.pairs]),
+        implausible_gap_pairs=_sorted_pairs(
+            [
+                pair
+                for result in results
+                for pair in result.implausible_gap_pairs
+            ]
         ),
     )
 
@@ -149,32 +167,48 @@ def build_leaderboard_cv_lb_pairs(
     competition_metric_name: str | None = None,
 ) -> list[CvLbPair]:
     pairs: list[CvLbPair] = []
+    implausible_gap_pairs: list[CvLbPair] = []
     for notebook in notebooks:
         match = matches.get(notebook.ref)
         if match is None:
             continue
         matched_notebook = notebook.model_copy(update={"public_score": match.score})
-        for pair in _pair_notebook(matched_notebook, competition_metric_name).pairs:
-            pairs.append(
-                pair.model_copy(
-                    update={
-                        "lb_source": "leaderboard_match",
-                        "lb_observation_ids": [],
-                        "lb_representative_observation_id": None,
-                        "lb_aggregation": "team_best_submission",
-                        "lb_selection_reason": (
-                            f"leaderboard_author_{match.match_confidence}_match"
-                        ),
-                    }
-                )
-            )
+        result = _pair_notebook(matched_notebook, competition_metric_name)
+        pairs.extend(
+            _leaderboard_pair(pair, match) for pair in result.pairs
+        )
+        implausible_gap_pairs.extend(
+            _leaderboard_pair(pair, match)
+            for pair in result.implausible_gap_pairs
+        )
+    return CvLbPairList(
+        _sorted_pairs(pairs),
+        implausible_gap_pairs=_sorted_pairs(implausible_gap_pairs),
+    )
+
+
+def _leaderboard_pair(pair: CvLbPair, match: LeaderboardMatch) -> CvLbPair:
+    return pair.model_copy(
+        update={
+            "lb_source": "leaderboard_match",
+            "lb_observation_ids": [],
+            "lb_representative_observation_id": None,
+            "lb_aggregation": "team_best_submission",
+            "lb_selection_reason": (
+                f"leaderboard_author_{match.match_confidence}_match"
+            ),
+        }
+    )
+
+
+def _sorted_pairs(pairs: list[CvLbPair]) -> list[CvLbPair]:
     return sorted(
         pairs,
         key=lambda pair: (
             pair.notebook_ref,
             pair.metric_canonical or pair.metric_raw or "",
-            pair.declared_cv,
-            pair.public_score,
+            pair.cv_score if pair.cv_score is not None else pair.declared_cv,
+            pair.lb_score if pair.lb_score is not None else pair.public_score,
         ),
     )
 
@@ -205,6 +239,9 @@ def diagnose_cv_lb(
             "ambiguous_split",
         )
     }
+    rejection_counts["implausible_gap"] = sum(
+        len(result.implausible_gap_pairs) for result in results
+    )
     leaderboard_results = [
         _pair_notebook(
             notebook.model_copy(update={"public_score": match.score}),
@@ -214,7 +251,11 @@ def diagnose_cv_lb(
         if (match := (leaderboard_matches or {}).get(notebook.ref)) is not None
     ]
     leaderboard_implausible_gap_rejections = sum(
-        "implausible_gap" in result.rejections for result in leaderboard_results
+        len(result.implausible_gap_pairs) for result in leaderboard_results
+    )
+    rejected_implausible_gap = (
+        rejection_counts["implausible_gap"]
+        + leaderboard_implausible_gap_rejections
     )
     zero_pairs_reason = (
         _zero_pairs_reason(notebooks, rejection_counts) if not observation_pairs else None
@@ -254,6 +295,7 @@ def diagnose_cv_lb(
         pairs_rejected_missing_lb=rejection_counts["missing_lb"],
         pairs_rejected_metric_mismatch=rejection_counts["metric_mismatch"],
         pairs_rejected_scale_mismatch=rejection_counts["scale_mismatch"],
+        rejected_implausible_gap=rejected_implausible_gap,
         pairs_rejected_implausible_gap=rejection_counts["implausible_gap"],
         leaderboard_pairs_rejected_implausible_gap=(
             leaderboard_implausible_gap_rejections
@@ -385,7 +427,7 @@ def _pair_notebook(
     if unknown_observations and (not cv_groups or not lb_groups):
         rejections.add("ambiguous_split")
     if not cv_groups or not lb_groups:
-        return _PairingResult((), frozenset(rejections))
+        return _PairingResult((), (), frozenset(rejections))
 
     matches, match_rejection = _match_groups(
         cv_groups,
@@ -395,6 +437,7 @@ def _pair_notebook(
         rejections.add(match_rejection)
 
     pairs: list[CvLbPair] = []
+    implausible_gap_pairs: list[CvLbPair] = []
     for cv_side, lb_side, metric_match in matches:
         metric_canonical = (
             cv_side.metric_canonical
@@ -410,37 +453,51 @@ def _pair_notebook(
             metric_canonical or competition_metric_name,
         )
         gap = cv_side.value - lb_side.value
+        pair = CvLbPair(
+            notebook_ref=notebook.ref,
+            declared_cv=cv_side.value,
+            public_score=lb_side.value,
+            lineage_cluster_id=notebook.lineage_cluster_id,
+            metric_name=metric_canonical or cv_side.metric_raw or lb_side.metric_raw,
+            metric_raw=cv_side.metric_raw or lb_side.metric_raw,
+            metric_canonical=metric_canonical,
+            metric_match=metric_match,
+            optimization_direction=direction,
+            cv_score=cv_side.value,
+            lb_score=lb_side.value,
+            cv_observation_ids=list(cv_side.observation_ids),
+            lb_observation_ids=list(lb_side.observation_ids),
+            cv_representative_observation_id=cv_side.representative_observation_id,
+            lb_representative_observation_id=lb_side.representative_observation_id,
+            cv_source=cv_side.source,
+            lb_source="observation",
+            cv_aggregation=cv_side.aggregation,
+            lb_aggregation=lb_side.aggregation,
+            cv_selection_reason=cv_side.selection_reason,
+            lb_selection_reason=lb_side.selection_reason,
+            gap=gap,
+            absolute_gap=abs(gap),
+        )
         if not _gap_is_plausible(gap, metric_canonical):
             rejections.add("implausible_gap")
-            continue
-        pairs.append(
-            CvLbPair(
-                notebook_ref=notebook.ref,
-                declared_cv=cv_side.value,
-                public_score=lb_side.value,
-                lineage_cluster_id=notebook.lineage_cluster_id,
-                metric_name=metric_canonical or cv_side.metric_raw or lb_side.metric_raw,
-                metric_raw=cv_side.metric_raw or lb_side.metric_raw,
-                metric_canonical=metric_canonical,
-                metric_match=metric_match,
-                optimization_direction=direction,
-                cv_score=cv_side.value,
-                lb_score=lb_side.value,
-                cv_observation_ids=list(cv_side.observation_ids),
-                lb_observation_ids=list(lb_side.observation_ids),
-                cv_representative_observation_id=(cv_side.representative_observation_id),
-                lb_representative_observation_id=(lb_side.representative_observation_id),
-                cv_source=cv_side.source,
-                lb_source="observation",
-                cv_aggregation=cv_side.aggregation,
-                lb_aggregation=lb_side.aggregation,
-                cv_selection_reason=cv_side.selection_reason,
-                lb_selection_reason=lb_side.selection_reason,
-                gap=gap,
-                absolute_gap=abs(gap),
+            implausible_gap_pairs.append(
+                pair.model_copy(
+                    update={
+                        "comparability_status": "implausible_gap",
+                        "comparability_reason": _implausible_gap_reason(
+                            gap,
+                            metric_canonical,
+                        ),
+                    }
+                )
             )
-        )
-    return _PairingResult(tuple(pairs), frozenset(rejections))
+            continue
+        pairs.append(pair)
+    return _PairingResult(
+        tuple(pairs),
+        tuple(implausible_gap_pairs),
+        frozenset(rejections),
+    )
 
 
 def _observation_groups(
@@ -636,7 +693,32 @@ def _scales_are_compatible(
 
 
 def _gap_is_plausible(gap: float, metric_canonical: str | None) -> bool:
-    return metric_canonical not in _BOUNDED_METRICS or abs(gap) <= 0.5
+    value_range = _bounded_metric_range(metric_canonical)
+    return value_range is None or abs(gap) <= MAX_PLAUSIBLE_BOUNDED_GAP
+
+
+def _bounded_metric_range(
+    metric_canonical: str | None,
+) -> tuple[float, float] | None:
+    range_key = _METRIC_RANGE_KEYS.get(metric_canonical or "", metric_canonical)
+    value_range = METRIC_VALUE_RANGE.get(range_key or "")
+    if value_range is None:
+        return None
+    lower, upper = value_range
+    if not math.isfinite(lower) or not math.isfinite(upper) or upper - lower > 2.0:
+        return None
+    return value_range
+
+
+def _implausible_gap_reason(
+    gap: float,
+    metric_canonical: str | None,
+) -> str:
+    return (
+        f"absolute gap {abs(gap):.6g} exceeds "
+        f"{MAX_PLAUSIBLE_BOUNDED_GAP:.6g} for bounded metric "
+        f"{metric_canonical or 'unknown'}"
+    )
 
 
 def _resolve_direction(

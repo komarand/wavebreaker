@@ -313,8 +313,10 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
             shape_parts.append(f"rank50 {leaderboard_shape.score_at_rank[50]:.5f}")
         if leaderboard_shape.median_adjacent_delta is not None:
             shape_parts.append(
-                f"adjacent delta {leaderboard_shape.median_adjacent_delta:.5f}"
+                f"nonzero delta {leaderboard_shape.median_adjacent_delta:.5f}"
             )
+        if leaderboard_shape.tied_ratio is not None:
+            shape_parts.append(f"tied ratio {leaderboard_shape.tied_ratio:.4g}")
         if leaderboard_shape.plateau_ratio is not None:
             shape_parts.append(f"plateau ratio {leaderboard_shape.plateau_ratio:.4g}")
         print(f"leaderboard shape: {', '.join(shape_parts)}")
@@ -410,7 +412,18 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
             "notebook pull failures by exception: "
             f"{score_diagnostics.notebooks_failed_by_exception}"
         )
-    if not facts.cv_lb_pairs:
+    rejection_total = sum(
+        (
+            diagnostics.pairs_rejected_missing_cv,
+            diagnostics.pairs_rejected_missing_lb,
+            diagnostics.pairs_rejected_metric_mismatch,
+            diagnostics.pairs_rejected_ambiguous_metric,
+            diagnostics.pairs_rejected_scale_mismatch,
+            diagnostics.rejected_implausible_gap,
+            diagnostics.pairs_rejected_ambiguous_split,
+        )
+    )
+    if not facts.cv_lb_pairs or rejection_total:
         print(
             "cv/lb rejections: "
             f"missing_cv={diagnostics.pairs_rejected_missing_cv}, "
@@ -418,9 +431,7 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
             f"metric_mismatch={diagnostics.pairs_rejected_metric_mismatch}, "
             f"ambiguous_metric={diagnostics.pairs_rejected_ambiguous_metric}, "
             f"scale_mismatch={diagnostics.pairs_rejected_scale_mismatch}, "
-            f"implausible_gap={diagnostics.pairs_rejected_implausible_gap}, "
-            "leaderboard_implausible_gap="
-            f"{diagnostics.leaderboard_pairs_rejected_implausible_gap}, "
+            f"implausible_gap={diagnostics.rejected_implausible_gap}, "
             f"ambiguous_split={diagnostics.pairs_rejected_ambiguous_split}"
         )
     competition_discussions = [

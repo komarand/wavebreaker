@@ -110,6 +110,9 @@ def test_compute_leaderboard_shape_for_known_200_entry_distribution() -> None:
         {1: 0.999, 10: 0.99, 25: 0.975, 50: 0.95, 100: 0.9, 200: 0.8}
     )
     assert shape.median_adjacent_delta == pytest.approx(0.001)
+    assert shape.tied_adjacent_pairs == 0
+    assert shape.nonzero_adjacent_pairs == 199
+    assert shape.tied_ratio == pytest.approx(0.0)
     assert shape.teams_within_median_delta_of_median == 2
     assert shape.plateau_ratio == pytest.approx(0.05)
     assert shape.span_top_to_last == pytest.approx(0.199)
@@ -134,9 +137,32 @@ def test_compute_leaderboard_shape_handles_identical_scores() -> None:
     shape = compute_leaderboard_shape(leaderboard, None)
 
     assert shape is not None
-    assert shape.median_adjacent_delta == 0
+    assert shape.median_adjacent_delta is None
     assert shape.teams_within_median_delta_of_median is None
     assert shape.plateau_ratio is None
+    assert shape.tied_adjacent_pairs == 9
+    assert shape.nonzero_adjacent_pairs == 0
+    assert shape.tied_ratio == pytest.approx(1.0)
+
+
+def test_compute_leaderboard_shape_uses_only_nonzero_adjacent_deltas() -> None:
+    scores = [1.0, 1.0, 0.99, 0.99, 0.98, 0.98, 0.97, 0.97, 0.96, 0.96]
+    leaderboard = _leaderboard(
+        [
+            LeaderboardEntry(team_name=str(rank), score=score, rank=rank)
+            for rank, score in enumerate(scores, start=1)
+        ]
+    )
+
+    shape = compute_leaderboard_shape(leaderboard, "accuracy")
+
+    assert shape is not None
+    assert shape.median_adjacent_delta == pytest.approx(0.01)
+    assert shape.plateau_ratio is not None
+    assert shape.tied_adjacent_pairs == 5
+    assert shape.nonzero_adjacent_pairs == 4
+    assert shape.tied_adjacent_pairs + shape.nonzero_adjacent_pairs == 9
+    assert shape.tied_ratio == pytest.approx(0.5556)
 
 
 def test_compute_leaderboard_shape_infers_lower_is_better_from_order() -> None:
