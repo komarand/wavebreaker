@@ -201,6 +201,9 @@ EXCLUDED_SCORE_LABELS = frozenset(
         "xtol",
     }
 )
+KAGGLE_INPUT_PATH = re.compile(
+    r"/kaggle/input/(?P<slug>[A-Za-z0-9][A-Za-z0-9_-]{1,80})(?:/|\b)"
+)
 CANONICAL_METRIC_ALIASES: dict[str, str] = {
     "accuracy": "accuracy",
     "acc": "accuracy",
@@ -271,6 +274,7 @@ def extract_observations(
     notebook_path: Path,
     *,
     metric_hints: Iterable[str] = (),
+    competition_id: str | None = None,
 ) -> dict[str, Any]:
     metric_hints = _normalized_metric_hints(metric_hints)
     try:
@@ -290,6 +294,8 @@ def extract_observations(
     score_observations: list[ScoreObservation] = []
     score_candidates_seen = 0
     score_candidates_excluded = 0
+    dataset_paths: list[str] = []
+    seen_dataset_paths: set[str] = set()
     seen_cv: set[str] = set()
     parsed_code_cells = 0
     code_cell_index = 0
@@ -300,6 +306,12 @@ def extract_observations(
         cell_type = _cell_value(cell, "cell_type")
         source = _cell_source(cell)
         if cell_type == "markdown":
+            _append_dataset_paths(
+                source,
+                competition_id=competition_id,
+                paths=dataset_paths,
+                seen=seen_dataset_paths,
+            )
             added, candidates_seen, candidates_excluded = extract_score_observations(
                 source,
                 locator=f"cell_{cell_index}",
@@ -346,6 +358,12 @@ def extract_observations(
         score_candidates_seen += candidates_seen
         score_candidates_excluded += candidates_excluded
         for string_value in _string_literals_in_source_order(tree):
+            _append_dataset_paths(
+                string_value,
+                competition_id=competition_id,
+                paths=dataset_paths,
+                seen=seen_dataset_paths,
+            )
             added, candidates_seen, candidates_excluded = extract_score_observations(
                 string_value,
                 locator=locator,
@@ -363,7 +381,9 @@ def extract_observations(
             )
 
     if parsed_code_cells == 0:
-        return _empty_result()
+        result = _empty_result()
+        result["dataset_paths"] = dataset_paths
+        return result
 
     return {
         **observations,
@@ -372,8 +392,26 @@ def extract_observations(
         "score_observations": score_observations,
         "score_candidates_seen": score_candidates_seen,
         "score_candidates_excluded": score_candidates_excluded,
+        "dataset_paths": dataset_paths,
         "parse_status": "partial" if has_syntax_error else "ok",
     }
+
+
+def _append_dataset_paths(
+    text: str,
+    *,
+    competition_id: str | None,
+    paths: list[str],
+    seen: set[str],
+) -> None:
+    competition_key = competition_id.casefold() if competition_id else None
+    for match in KAGGLE_INPUT_PATH.finditer(text):
+        slug = match.group("slug")
+        slug_key = slug.casefold()
+        if slug_key == competition_key or slug_key in seen:
+            continue
+        seen.add(slug_key)
+        paths.append(slug)
 
 
 def ast_fingerprint(notebook_path: Path) -> str:
@@ -1442,5 +1480,6 @@ def _empty_result() -> dict[str, Any]:
         "score_observations": [],
         "score_candidates_seen": 0,
         "score_candidates_excluded": 0,
+        "dataset_paths": [],
         "parse_status": "failed",
     }

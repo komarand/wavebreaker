@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from kaggle_researcher.facts.cv_lb import summarize_cv_lb
 from kaggle_researcher.facts.models import (
     CompetitionFacts,
+    DatasetReference,
     DiscussionFacts,
     NotebookFacts,
     ScoreObservation,
@@ -25,6 +26,7 @@ TRUSTED_SOURCE_IDS = frozenset({FACTS_SOURCE_ID, CV_LB_SOURCE_ID, NOTEBOOK_AST_S
 TRUSTED_CATEGORIES = frozenset({"official", "cv_lb", "notebook_ast"})
 SCORE_EXAMPLES_PER_CLUSTER = 3
 RAW_TEXT_EXAMPLE_LIMIT = 160
+DATASET_REFS_IN_CONTEXT = 15
 _CONTEXT_SEPARATOR = "\n\n"
 _TRUSTED_CATEGORY_ORDER = ("official", "cv_lb", "notebook_ast")
 
@@ -203,6 +205,8 @@ def _ordered_context_units(facts: CompetitionFacts) -> list[_ContextUnit]:
     units = [_official_facts_unit(facts)]
     if facts.cv_lb_pairs or facts.similar_competitions:
         units.append(_cv_lb_unit(facts))
+    if facts.dataset_references:
+        units.append(_dataset_references_unit(facts.dataset_references))
     units.extend(_notebook_ast_units(facts.notebooks))
 
     discussions = sorted(facts.discussions, key=_discussion_sort_key)
@@ -240,6 +244,11 @@ def _official_facts_unit(facts: CompetitionFacts) -> _ContextUnit:
         "competition_id": facts.competition_id,
         "files": facts.files.model_dump(mode="json"),
         "metadata": facts.metadata.model_dump(mode="json"),
+        "public_leaderboard_shape": (
+            facts.public_leaderboard.shape.model_dump(mode="json")
+            if facts.public_leaderboard.shape is not None
+            else None
+        ),
         "schema_version": facts.schema_version,
         "score_diagnostics": facts.score_diagnostics.model_dump(mode="json"),
         "user_constraints": facts.user_constraints.model_dump(mode="json"),
@@ -252,6 +261,34 @@ def _official_facts_unit(facts: CompetitionFacts) -> _ContextUnit:
         ),
         source_ids=(FACTS_SOURCE_ID,),
         category="official",
+    )
+
+
+def _dataset_references_unit(
+    references: list[DatasetReference],
+) -> _ContextUnit:
+    ordered = sorted(
+        references,
+        key=lambda item: (-item.cluster_count, item.slug.casefold()),
+    )
+    included = ordered[:DATASET_REFS_IN_CONTEXT]
+    payload = {
+        "dataset_references": [item.model_dump(mode="json") for item in included],
+    }
+    omitted_count = len(ordered) - len(included)
+    if omitted_count:
+        payload["dataset_references_omitted"] = omitted_count
+    notebook_refs = _ordered_unique(
+        notebook_ref for item in included for notebook_ref in item.notebook_refs
+    )
+    return _ContextUnit(
+        text=_trusted_block(
+            "TRUSTED_NOTEBOOK_AST",
+            payload,
+            source_id=NOTEBOOK_AST_SOURCE_ID,
+        ),
+        source_ids=(NOTEBOOK_AST_SOURCE_ID, *notebook_refs),
+        category="notebook_ast",
     )
 
 

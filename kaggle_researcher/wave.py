@@ -298,6 +298,26 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
         f"public leaderboard: {facts.public_leaderboard.status} "
         f"({facts.public_leaderboard.entry_count} entries)"
     )
+    leaderboard_shape = facts.public_leaderboard.shape
+    if leaderboard_shape is not None:
+        shape_parts = [
+            f"{leaderboard_shape.entry_count} entries",
+            "top "
+            + (
+                f"{leaderboard_shape.top_score:.5f}"
+                if leaderboard_shape.top_score is not None
+                else "unavailable"
+            ),
+        ]
+        if 50 in leaderboard_shape.score_at_rank:
+            shape_parts.append(f"rank50 {leaderboard_shape.score_at_rank[50]:.5f}")
+        if leaderboard_shape.median_adjacent_delta is not None:
+            shape_parts.append(
+                f"adjacent delta {leaderboard_shape.median_adjacent_delta:.5f}"
+            )
+        if leaderboard_shape.plateau_ratio is not None:
+            shape_parts.append(f"plateau ratio {leaderboard_shape.plateau_ratio:.4g}")
+        print(f"leaderboard shape: {', '.join(shape_parts)}")
     match_confidences = Counter(
         match.match_confidence for match in facts.leaderboard_matches
     )
@@ -306,6 +326,17 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
         f"{match_confidences['exact']} exact, {match_confidences['partial']} partial"
     )
     print(f"lineage clusters: {len(clusters)}")
+    if facts.dataset_references:
+        top_references = ", ".join(
+            f"{item.slug} {item.cluster_count} clusters"
+            for item in facts.dataset_references[:2]
+        )
+        print(
+            f"dataset references: {len(facts.dataset_references)} "
+            f"(top: {top_references})"
+        )
+    else:
+        print("dataset references: 0")
     print(f"splitters by lineage cluster: {dict(_splitter_distribution(facts))}")
     print(f"cv/lb: {summarize_cv_lb(facts.cv_lb_pairs)}")
     diagnostics = facts.cv_lb_diagnostics

@@ -12,7 +12,10 @@ from tqdm.auto import tqdm
 
 from kaggle_researcher.config import get_notebook_concurrency
 from kaggle_researcher.facts.competition import fetch_competition_metadata
-from kaggle_researcher.facts.competition_leaderboard import fetch_public_leaderboard
+from kaggle_researcher.facts.competition_leaderboard import (
+    compute_leaderboard_shape,
+    fetch_public_leaderboard,
+)
 from kaggle_researcher.facts.cv_lb import (
     build_cv_lb_pairs,
     build_leaderboard_cv_lb_pairs,
@@ -27,6 +30,7 @@ from kaggle_researcher.facts.discussions import (
 from kaggle_researcher.facts.files import fetch_file_manifest
 from kaggle_researcher.facts.models import (
     CompetitionFacts,
+    DatasetReference,
     FileManifest,
     LeaderboardStability,
     NotebookFacts,
@@ -37,6 +41,7 @@ from kaggle_researcher.facts.models import (
 from kaggle_researcher.facts.notebook_ast import (
     assign_lineage_clusters,
     ast_fingerprint,
+    canonicalize_metric_label,
     diagnose_scores,
     extract_observations,
     extract_score_observations,
@@ -115,6 +120,7 @@ def collect_facts(
         notebooks = assign_lineage_clusters(notebooks)
     except Exception as exc:
         collection_errors.append(_stage_error("notebook lineage clustering", exc))
+    dataset_references = aggregate_dataset_references(notebooks)
 
     try:
         public_leaderboard = fetch_public_leaderboard(slug)
@@ -134,6 +140,14 @@ def collect_facts(
                 else ""
             )
         )
+    public_leaderboard = public_leaderboard.model_copy(
+        update={
+            "shape": compute_leaderboard_shape(
+                public_leaderboard,
+                canonicalize_metric_label(metadata.metric_name),
+            )
+        }
+    )
 
     try:
         leaderboard_matches = match_leaderboard_scores(notebooks, public_leaderboard)
@@ -218,6 +232,7 @@ def collect_facts(
         notebooks=notebooks,
         public_leaderboard=public_leaderboard,
         leaderboard_matches=list(leaderboard_matches.values()),
+        dataset_references=dataset_references,
         discussions=discussions,
         similar_competitions=similar_competitions,
         cv_lb_pairs=cv_lb_pairs,
@@ -230,6 +245,35 @@ def collect_facts(
         user_constraints=user_constraints,
         collection_errors=collection_errors,
     )
+
+
+def aggregate_dataset_references(
+    notebooks: list[NotebookFacts],
+) -> list[DatasetReference]:
+    grouped: dict[str, list[NotebookFacts]] = {}
+    display_slugs: dict[str, str] = {}
+    for notebook in notebooks:
+        for slug in notebook.dataset_paths:
+            key = slug.casefold()
+            display_slugs.setdefault(key, slug)
+            grouped.setdefault(key, []).append(notebook)
+
+    references: list[DatasetReference] = []
+    for key, members in grouped.items():
+        slug = display_slugs[key]
+        notebook_refs = sorted({notebook.ref for notebook in members})
+        cluster_ids = sorted({notebook.lineage_cluster_id for notebook in members})
+        references.append(
+            DatasetReference(
+                slug=slug,
+                raw_path=f"/kaggle/input/{slug}/",
+                notebook_refs=notebook_refs,
+                lineage_cluster_ids=cluster_ids,
+                reference_count=len(notebook_refs),
+                cluster_count=len(cluster_ids),
+            )
+        )
+    return sorted(references, key=lambda item: (-item.cluster_count, item.slug.casefold()))
 
 
 def _collect_notebooks(
@@ -256,6 +300,7 @@ def _collect_notebooks(
                 collection_errors,
                 notebook_concurrency,
                 competition_metric_name,
+                slug,
             )
         )
 
@@ -266,6 +311,7 @@ async def _collect_notebooks_async(
     collection_errors: list[str],
     notebook_concurrency: int,
     competition_metric_name: str | None = None,
+    competition_id: str | None = None,
 ) -> tuple[list[NotebookFacts], dict[int, int], dict[str, int]]:
     semaphore = asyncio.Semaphore(notebook_concurrency)
     tasks = [
@@ -276,6 +322,7 @@ async def _collect_notebooks_async(
                 destination=temp_dir / f"notebook_{index:04d}",
                 semaphore=semaphore,
                 competition_metric_name=competition_metric_name,
+                competition_id=competition_id,
             )
         )
         for index, record in enumerate(notebook_records)
@@ -325,12 +372,14 @@ async def _collect_one_notebook_indexed(
     destination: Path,
     semaphore: asyncio.Semaphore,
     competition_metric_name: str | None = None,
+    competition_id: str | None = None,
 ) -> tuple[int, NotebookFacts | _NotebookCollectionFailure]:
     result = await _collect_one_notebook(
         record=record,
         destination=destination,
         semaphore=semaphore,
         competition_metric_name=competition_metric_name,
+        competition_id=competition_id,
     )
     return index, result
 
@@ -341,6 +390,7 @@ async def _collect_one_notebook(
     destination: Path,
     semaphore: asyncio.Semaphore,
     competition_metric_name: str | None = None,
+    competition_id: str | None = None,
 ) -> NotebookFacts | _NotebookCollectionFailure:
     ref = str(record.get("ref") or "<unknown>")
     try:
@@ -368,6 +418,7 @@ async def _collect_one_notebook(
             _analyze_downloaded_notebook,
             notebook_path,
             competition_metric_name,
+            competition_id,
         )
         context_scores, context_candidates, context_excluded = _notebook_context_scores(
             record, competition_metric_name
@@ -402,6 +453,7 @@ async def _collect_one_notebook(
                 0,
             )
             + context_excluded,
+            dataset_paths=observations.get("dataset_paths", []),
             parse_status=observations["parse_status"],
         )
     except Exception as exc:
@@ -414,12 +466,19 @@ async def _collect_one_notebook(
 def _analyze_downloaded_notebook(
     notebook_path: Path,
     competition_metric_name: str | None = None,
+    competition_id: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     metric_hints = (competition_metric_name,) if competition_metric_name is not None else ()
     observations = extract_observations(
         notebook_path,
         metric_hints=metric_hints,
     )
+    if competition_id is not None:
+        observations["dataset_paths"] = [
+            slug
+            for slug in observations.get("dataset_paths", [])
+            if slug.casefold() != competition_id.casefold()
+        ]
     fingerprint = ast_fingerprint(notebook_path)
     return observations, fingerprint
 

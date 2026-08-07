@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from kaggle_researcher.facts.models import CodeObservation, NotebookFacts, ScoreObservation
+from kaggle_researcher.facts.collect import aggregate_dataset_references
 from kaggle_researcher.facts.notebook_ast import (
     _cell_source,
     _strip_magics,
@@ -661,8 +662,58 @@ def test_notebook_with_no_parseable_code_returns_empty_failed_result(tmp_path: P
         "score_observations": [],
         "score_candidates_seen": 0,
         "score_candidates_excluded": 0,
+        "dataset_paths": [],
         "parse_status": "failed",
     }
+
+
+def test_dataset_paths_are_extracted_from_markdown_and_code_strings(
+    tmp_path: Path,
+) -> None:
+    notebook_path = _write_notebook(
+        tmp_path,
+        [
+            _markdown_cell(
+                "External: /kaggle/input/some-lib/oof/train.csv\n"
+                "Current: /kaggle/input/current-comp/train.csv"
+            ),
+            _code_cell(
+                'first = "/kaggle/input/external-features/data.csv"\n'
+                'duplicate = "/kaggle/input/some-lib/test.csv"\n'
+            ),
+        ],
+    )
+
+    result = extract_observations(notebook_path, competition_id="CURRENT-COMP")
+
+    assert result["dataset_paths"] == ["some-lib", "external-features"]
+
+
+def test_dataset_reference_aggregation_counts_notebooks_and_lineages() -> None:
+    first = _notebook_fact("author/first", "lc_shared", ["common-lib"])
+    second = _notebook_fact("author/second", "lc_shared", ["common-lib", "broad-lib"])
+    third = _notebook_fact("author/third", "lc_other", ["broad-lib"])
+
+    references = aggregate_dataset_references([first, second, third])
+
+    assert [item.slug for item in references] == ["broad-lib", "common-lib"]
+    assert references[0].cluster_count == 2
+    assert references[0].reference_count == 2
+    assert references[1].cluster_count == 1
+    assert references[1].reference_count == 2
+    assert references[1].raw_path == "/kaggle/input/common-lib/"
+
+
+def test_dataset_extraction_does_not_change_ast_fingerprint(tmp_path: Path) -> None:
+    notebook_path = _write_notebook(
+        tmp_path,
+        [_code_cell('path = "/kaggle/input/some-lib/data.csv"\n')],
+    )
+    before = ast_fingerprint(notebook_path)
+
+    extract_observations(notebook_path, competition_id="current-comp")
+
+    assert ast_fingerprint(notebook_path) == before
 
 
 def test_invalid_notebook_file_returns_failed_result_without_raising(tmp_path: Path) -> None:
@@ -915,6 +966,26 @@ def _notebook_facts(
         feature_ops=[],
         declared_cv=[],
         score_observations=score_observations,
+        parse_status="ok",
+    )
+
+
+def _notebook_fact(
+    ref: str,
+    lineage_cluster_id: str,
+    dataset_paths: list[str],
+) -> NotebookFacts:
+    return NotebookFacts(
+        ref=ref,
+        title=ref,
+        ast_fingerprint="a" * 64,
+        lineage_cluster_id=lineage_cluster_id,
+        splitters=[],
+        models=[],
+        metrics=[],
+        feature_ops=[],
+        declared_cv=[],
+        dataset_paths=dataset_paths,
         parse_status="ok",
     )
 

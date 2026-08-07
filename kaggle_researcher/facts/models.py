@@ -105,6 +105,7 @@ class NotebookFacts(BaseModel):
     score_observations: list[ScoreObservation] = Field(default_factory=list)
     score_candidates_seen: int = 0
     score_candidates_excluded: int = 0
+    dataset_paths: list[str] = Field(default_factory=list)
 
     parse_status: Literal["ok", "partial", "failed"]
 
@@ -209,11 +210,36 @@ class LeaderboardEntry(BaseModel):
     rank: int | None
 
 
+class LeaderboardShape(BaseModel):
+    entry_count: int
+    top_score: float | None
+    score_at_rank: dict[int, float]
+    median_adjacent_delta: float | None
+    teams_within_median_delta_of_median: int | None
+    plateau_ratio: float | None
+    span_top_to_last: float | None
+    direction: Literal[
+        "higher_is_better",
+        "lower_is_better",
+        "unknown",
+    ]
+
+
 class PublicLeaderboard(BaseModel):
     status: Literal["collected", "unavailable"]
     entries: list[LeaderboardEntry]
     entry_count: int
     unavailable_reason: str | None
+    shape: LeaderboardShape | None = None
+
+
+class DatasetReference(BaseModel):
+    slug: str
+    raw_path: str
+    notebook_refs: list[str]
+    lineage_cluster_ids: list[str]
+    reference_count: int
+    cluster_count: int
 
 
 class LeaderboardMatch(BaseModel):
@@ -323,6 +349,7 @@ class CompetitionFacts(BaseModel):
         )
     )
     leaderboard_matches: list[LeaderboardMatch] = Field(default_factory=list)
+    dataset_references: list[DatasetReference] = Field(default_factory=list)
     discussions: list[DiscussionFacts]
     similar_competitions: list[LeaderboardStability]
     cv_lb_pairs: list[CvLbPair]

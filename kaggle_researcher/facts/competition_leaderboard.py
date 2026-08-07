@@ -2,16 +2,23 @@ from __future__ import annotations
 
 import inspect
 import math
-from typing import Any
+import statistics
+from typing import Any, Literal
 
 from kaggle_researcher.facts.kaggle_api import (
     GLOBAL_KAGGLE_POLICY,
     create_kaggle_api,
     unwrap_response,
 )
-from kaggle_researcher.facts.models import LeaderboardEntry, PublicLeaderboard
+from kaggle_researcher.facts.models import (
+    LeaderboardEntry,
+    LeaderboardShape,
+    PublicLeaderboard,
+)
+from kaggle_researcher.facts.notebook_ast import metric_optimization_direction
 
 _LEADERBOARD_COLLECTION_FIELDS = ("submissions", "entries", "leaderboard")
+_SHAPE_RANKS = (1, 10, 25, 50, 100, 200)
 
 
 def fetch_public_leaderboard(
@@ -28,7 +35,10 @@ def fetch_public_leaderboard(
             lambda: _leaderboard_view(client, slug, max_entries)
         )
         records = unwrap_response(response, *_LEADERBOARD_COLLECTION_FIELDS)
-        entries = [_leaderboard_entry(record) for record in records[:max_entries]]
+        entries = [
+            _leaderboard_entry(record, fallback_rank=index + 1)
+            for index, record in enumerate(records[:max_entries])
+        ]
         return PublicLeaderboard(
             status="collected",
             entries=entries,
@@ -44,14 +54,89 @@ def fetch_public_leaderboard(
         )
 
 
-def _leaderboard_entry(record: Any) -> LeaderboardEntry:
+def compute_leaderboard_shape(
+    leaderboard: PublicLeaderboard,
+    metric_canonical: str | None,
+) -> LeaderboardShape | None:
+    if leaderboard.status != "collected":
+        return None
+    entries = sorted(
+        (
+            entry
+            for entry in leaderboard.entries
+            if entry.score is not None and entry.rank is not None
+        ),
+        key=lambda entry: entry.rank,
+    )
+    if len(entries) < 10:
+        return None
+
+    scores = [entry.score for entry in entries]
+    adjacent_deltas = [
+        abs(current - previous)
+        for previous, current in zip(scores, scores[1:], strict=False)
+    ]
+    median_adjacent_delta = statistics.median(adjacent_deltas)
+    median_score = statistics.median(scores)
+    if median_adjacent_delta == 0:
+        teams_within_delta = None
+        plateau_ratio = None
+    else:
+        teams_within_delta = sum(
+            abs(score - median_score) <= median_adjacent_delta for score in scores
+        )
+        plateau_ratio = round(
+            sum(
+                abs(score - median_score) <= 5 * median_adjacent_delta
+                for score in scores
+            )
+            / len(scores),
+            4,
+        )
+
+    scores_by_rank = {entry.rank: entry.score for entry in entries}
+    return LeaderboardShape(
+        entry_count=len(entries),
+        top_score=scores[0],
+        score_at_rank={
+            rank: scores_by_rank[rank]
+            for rank in _SHAPE_RANKS
+            if rank in scores_by_rank
+        },
+        median_adjacent_delta=median_adjacent_delta,
+        teams_within_median_delta_of_median=teams_within_delta,
+        plateau_ratio=plateau_ratio,
+        span_top_to_last=abs(scores[0] - scores[-1]),
+        direction=_leaderboard_direction(scores, metric_canonical),
+    )
+
+
+def _leaderboard_direction(
+    scores: list[float],
+    metric_canonical: str | None,
+) -> Literal["higher_is_better", "lower_is_better", "unknown"]:
+    metric_direction = metric_optimization_direction(metric_canonical)
+    if metric_direction == "maximize":
+        return "higher_is_better"
+    if metric_direction == "minimize":
+        return "lower_is_better"
+    decreases = all(left >= right for left, right in zip(scores, scores[1:], strict=False))
+    increases = all(left <= right for left, right in zip(scores, scores[1:], strict=False))
+    if decreases and any(left > right for left, right in zip(scores, scores[1:], strict=False)):
+        return "higher_is_better"
+    if increases and any(left < right for left, right in zip(scores, scores[1:], strict=False)):
+        return "lower_is_better"
+    return "unknown"
+
+
+def _leaderboard_entry(record: Any, *, fallback_rank: int) -> LeaderboardEntry:
     # Read submission_date as part of the version-tolerant SDK contract even though
     # the compact facts model intentionally does not persist it.
     _field(record, "submission_date", "submissionDate")
     return LeaderboardEntry(
         team_name=_optional_text(_field(record, "team_name", "teamName")),
         score=_finite_float(_field(record, "score", "publicScore")),
-        rank=_optional_int(_field(record, "rank")),
+        rank=_optional_int(_field(record, "rank")) or fallback_rank,
     )
 
 

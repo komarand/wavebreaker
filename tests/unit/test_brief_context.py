@@ -13,10 +13,14 @@ from kaggle_researcher.facts.models import (
     CompetitionFacts,
     CompetitionMetadata,
     CvLbPair,
+    DatasetReference,
     DiscussionFacts,
     FileManifest,
     LeaderboardStability,
+    LeaderboardEntry,
+    LeaderboardShape,
     NotebookFacts,
+    PublicLeaderboard,
     ScoreObservation,
     UserConstraints,
 )
@@ -41,6 +45,63 @@ def test_official_metadata_is_included_at_its_reasonable_minimum_budget() -> Non
     assert packed.text == official
     assert '"metric_name":"roc_auc"' in packed.text
     assert packed.stats.estimated_tokens_used <= packed.stats.token_budget
+
+
+def test_official_context_contains_shape_but_not_raw_leaderboard_entries() -> None:
+    facts = _facts()
+    facts.public_leaderboard = PublicLeaderboard(
+        status="collected",
+        entries=[
+            LeaderboardEntry(team_name=f"team-secret-{rank}", score=1 - rank / 100, rank=rank)
+            for rank in range(1, 11)
+        ],
+        entry_count=10,
+        unavailable_reason=None,
+        shape=LeaderboardShape(
+            entry_count=10,
+            top_score=0.99,
+            score_at_rank={1: 0.99, 10: 0.9},
+            median_adjacent_delta=0.01,
+            teams_within_median_delta_of_median=2,
+            plateau_ratio=1.0,
+            span_top_to_last=0.09,
+            direction="higher_is_better",
+        ),
+    )
+
+    packed = pack_brief_context(facts, 20_000)
+
+    assert '"public_leaderboard_shape"' in packed.text
+    assert '"top_score":0.99' in packed.text
+    assert '"entries"' not in packed.text
+    assert "team-secret" not in packed.text
+
+
+def test_dataset_reference_context_is_limited_and_reports_omissions() -> None:
+    facts = _facts()
+    facts.dataset_references = [
+        DatasetReference(
+            slug=f"dataset-{index:02d}",
+            raw_path=f"/kaggle/input/dataset-{index:02d}/",
+            notebook_refs=[f"author/notebook-{index:02d}"],
+            lineage_cluster_ids=[f"lc_{cluster}" for cluster in range(index + 1)],
+            reference_count=1,
+            cluster_count=index + 1,
+        )
+        for index in range(17)
+    ]
+
+    packed = pack_brief_context(facts, 50_000)
+    dataset_payload = next(
+        payload for payload in _ast_payloads(packed.text) if "dataset_references" in payload
+    )
+
+    references = dataset_payload["dataset_references"]
+    assert isinstance(references, list)
+    assert len(references) == 15
+    assert references[0]["slug"] == "dataset-16"
+    assert references[-1]["slug"] == "dataset-02"
+    assert dataset_payload["dataset_references_omitted"] == 2
 
 
 def test_ast_cluster_block_precedes_discussion_text() -> None:
