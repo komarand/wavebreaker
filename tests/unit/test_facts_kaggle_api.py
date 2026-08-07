@@ -42,7 +42,6 @@ def test_facts_kaggle_consumers_share_one_process_wide_policy() -> None:
     assert notebooks_module._NOTEBOOK_REQUEST_POLICY is GLOBAL_KAGGLE_POLICY
     assert files_module._FILE_REQUEST_POLICY is GLOBAL_KAGGLE_POLICY
     assert discussions_module._COMPETITION_REQUEST_POLICY is GLOBAL_KAGGLE_POLICY
-    assert discussions_module._FORUMS_REQUEST_POLICY is GLOBAL_KAGGLE_POLICY
 
 
 def test_unpack_list_response_accepts_kaggle_1_direct_list() -> None:

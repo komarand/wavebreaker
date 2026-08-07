@@ -387,6 +387,50 @@ def test_writeup_candidate_classification(title: str, candidate: bool) -> None:
     assert bool(signals) is candidate
 
 
+def test_winner_writeups_filter_regular_competition_topics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int]] = []
+
+    def fetch(slug: str, limit: int) -> discussions.DiscussionCollection:
+        calls.append((slug, limit))
+        return discussions.DiscussionCollection(
+            [
+                discussions._competition_topic_fact(
+                    _topic(1, "Round 1 and 2 solution: 1st place"),
+                    slug,
+                ),
+                discussions._competition_topic_fact(
+                    _topic(2, "How do I load the data?"),
+                    slug,
+                ),
+            ],
+            status="collected",
+        )
+
+    monkeypatch.setattr(discussions, "fetch_competition_discussions", fetch)
+
+    facts = discussions.fetch_winner_writeups(["round-2-jaguar"], 10)
+
+    assert calls == [("round-2-jaguar", 10)]
+    assert [fact.topic_id for fact in facts] == ["1"]
+    assert facts[0].source_type == "winner_writeup"
+    assert facts[0].is_writeup_candidate is True
+    assert facts[0].writeup_signals == ["solution", "place", "placement"]
+
+
+def test_zero_writeup_limit_does_not_collect_discussions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        discussions,
+        "fetch_competition_discussions",
+        lambda slug, limit: pytest.fail("discussion collection must not start"),
+    )
+
+    assert discussions.fetch_winner_writeups(["example"], 0) == []
+
+
 def test_low_level_competition_requests_use_confirmed_fields() -> None:
     class LowLevelClient:
         def __init__(self) -> None:
@@ -488,12 +532,14 @@ def test_403_is_not_retried_and_five_429s_are_bounded() -> None:
 def test_competition_collector_source_has_no_generic_fallback() -> None:
     source = Path(discussions.__file__).read_text(encoding="utf-8")
     collector_source = source.split("def _collect_competition_topics", 1)[1].split(
-        "def _collect_forum_topics", 1
+        "def _competition_topic_fact", 1
     )[0]
 
     assert "discussion_api_client" not in collector_source
     assert "forum_slug" not in collector_source
     assert "list_forums" not in collector_source
+    assert "TopicListCategory" not in source
+    assert "competition_write_ups" not in source
 
 
 def test_zero_limit_does_not_create_client(monkeypatch: pytest.MonkeyPatch) -> None:
