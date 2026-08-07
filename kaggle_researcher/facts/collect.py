@@ -10,7 +10,10 @@ from typing import Any
 
 from tqdm.auto import tqdm
 
-from kaggle_researcher.config import get_notebook_concurrency
+from kaggle_researcher.config import (
+    get_max_similar_verifications,
+    get_notebook_concurrency,
+)
 from kaggle_researcher.facts.competition import fetch_competition_metadata
 from kaggle_researcher.facts.competition_leaderboard import (
     compute_leaderboard_shape,
@@ -36,6 +39,7 @@ from kaggle_researcher.facts.models import (
     NotebookFacts,
     PublicLeaderboard,
     ScoreObservation,
+    SimilarSearchDiagnostics,
     UserConstraints,
 )
 from kaggle_researcher.facts.notebook_ast import (
@@ -54,6 +58,7 @@ from kaggle_researcher.facts.notebooks import (
 from kaggle_researcher.facts.notebooks import (
     pull_notebook_with_diagnostics as pull_notebook,
 )
+from kaggle_researcher.facts.similar import build_similar_candidates
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +77,7 @@ def collect_facts(
     max_sample_sub_bytes: int,
     writeups_per_competition: int = 10,
     notebook_concurrency: int | None = None,
+    max_similar_verifications: int | None = None,
 ) -> CompetitionFacts:
     if writeups_per_competition <= 0:
         raise ValueError("writeups_per_competition must be a positive integer")
@@ -209,6 +215,25 @@ def collect_facts(
         collection_errors.append(_stage_error("competition discussions", exc))
         discussion_status = "failed"
         discussion_error = _stage_error("competition discussions", exc)
+
+    verification_limit = (
+        get_max_similar_verifications()
+        if max_similar_verifications is None
+        else max_similar_verifications
+    )
+    similar_candidates = []
+    similar_diagnostics: SimilarSearchDiagnostics | None = None
+    try:
+        similar_candidates, similar_diagnostics = build_similar_candidates(
+            discussions=discussions,
+            self_metadata=metadata,
+            self_submission_columns=files.sample_submission_columns,
+            manual=similar,
+            max_verifications=verification_limit,
+            metadata_fetcher=fetch_competition_metadata,
+        )
+    except Exception as exc:
+        collection_errors.append(_stage_error("similar competition verification", exc))
     try:
         discussions.extend(fetch_winner_writeups(similar, writeups_per_competition))
     except Exception as exc:
@@ -235,6 +260,8 @@ def collect_facts(
         dataset_references=dataset_references,
         discussions=discussions,
         similar_competitions=similar_competitions,
+        similar_candidates=similar_candidates,
+        similar_diagnostics=similar_diagnostics,
         cv_lb_pairs=cv_lb_pairs,
         cv_lb_diagnostics=cv_lb_diagnostics,
         score_diagnostics=score_diagnostics,

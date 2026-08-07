@@ -11,6 +11,7 @@ DEFAULT_MAX_EMBED_BATCH_SIZE = 8
 DEFAULT_WRITEUPS_PER_COMPETITION = 10
 DEFAULT_NOTEBOOK_CONCURRENCY = 2
 DEFAULT_MAX_SAMPLE_SUB_BYTES = 50_000_000
+DEFAULT_MAX_SIMILAR_VERIFICATIONS = 10
 
 load_dotenv(".env")
 
@@ -38,6 +39,7 @@ class Settings:
     writeups_per_competition: int = DEFAULT_WRITEUPS_PER_COMPETITION
     max_context_tokens: int = 120_000
     max_sample_sub_bytes: int = DEFAULT_MAX_SAMPLE_SUB_BYTES
+    max_similar_verifications: int = DEFAULT_MAX_SIMILAR_VERIFICATIONS
     meta_kaggle_dir: str | None = None
     run_budget_tokens: int | None = None
     kaggle_api_token: str | None = None
@@ -77,6 +79,7 @@ def load_config() -> Settings:
             "MAX_SAMPLE_SUB_BYTES",
             DEFAULT_MAX_SAMPLE_SUB_BYTES,
         ),
+        max_similar_verifications=get_max_similar_verifications(),
         meta_kaggle_dir=os.getenv("META_KAGGLE_DIR"),
         run_budget_tokens=_get_optional_positive_int_env("RUN_BUDGET_TOKENS"),
         kaggle_api_token=os.getenv("KAGGLE_API_TOKEN"),
@@ -99,6 +102,14 @@ def get_notebook_concurrency() -> int:
     return _get_positive_int_env(
         "NOTEBOOK_CONCURRENCY",
         DEFAULT_NOTEBOOK_CONCURRENCY,
+    )
+
+
+def get_max_similar_verifications() -> int:
+    """Return the metadata verification cap without requiring model credentials."""
+    return _get_positive_int_env(
+        "MAX_SIMILAR_VERIFICATIONS",
+        DEFAULT_MAX_SIMILAR_VERIFICATIONS,
     )
 
 

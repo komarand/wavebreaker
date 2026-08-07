@@ -111,6 +111,7 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
         "leaderboard",
         "pairs:1",
         "discussions",
+        "metadata",
         "writeups:10",
     ]
     assert len(facts.notebooks) == 2
@@ -533,7 +534,9 @@ def test_discussion_and_writeup_limits_are_independent(
 
     def discussions(slug: str, limit: int) -> list[DiscussionFacts]:
         calls.append(("discussions", slug, limit))
-        return [_discussion(slug)]
+        discussion = _discussion(slug)
+        discussion.text = "competitions/auto-detected"
+        return [discussion]
 
     def writeups(slugs: list[str], limit: int) -> list[DiscussionFacts]:
         calls.append(("writeups", tuple(slugs), limit))
@@ -559,6 +562,7 @@ def test_discussion_and_writeup_limits_are_independent(
     writeups = [item for item in facts.discussions if item.source_type == "winner_writeup"]
     assert len(writeups) == 3
     assert all(item.status == "not_computable" for item in facts.similar_competitions)
+    assert any(item.slug == "auto-detected" for item in facts.similar_candidates)
 
 
 @pytest.mark.parametrize("limit", [0, -1])

@@ -294,8 +294,28 @@ def test_html_parser_normalizes_blocks_entities_and_unsafe_links() -> None:
         ("https://medium.com/x", "external"),
         ("/competitions/example", "relative"),
     ]
+    assert links[0].competition_slug is None
+    assert links[1].competition_slug == "example"
     assert "secret" not in text
     assert "hidden" not in text
+
+
+@pytest.mark.parametrize(
+    ("href", "expected_slug"),
+    [
+        ("https://www.kaggle.com/c/happywhale/discussion/12", "happywhale"),
+        ("https://www.kaggle.com/competitions/foo-bar", "foo-bar"),
+        ("/competitions/foo-bar/data", "foo-bar"),
+        ("https://www.kaggle.com/username", None),
+    ],
+)
+def test_competition_slug_is_read_from_kaggle_link_path(
+    href: str,
+    expected_slug: str | None,
+) -> None:
+    _, links = discussions._parse_discussion_html(f'<a href="{href}">source</a>')
+
+    assert links[0].competition_slug == expected_slug
 
 
 @pytest.mark.parametrize(

@@ -114,6 +114,7 @@ class DiscussionLink(BaseModel):
     url: str
     text: str | None = None
     kind: Literal["kaggle", "external", "relative"]
+    competition_slug: str | None = None
 
 
 class DiscussionMessageFacts(BaseModel):
@@ -202,6 +203,40 @@ class LeaderboardStability(BaseModel):
                     "not_computable leaderboard stability cannot contain derived metrics"
                 )
         return self
+
+
+class SimilarityEvidence(BaseModel):
+    same_metric: bool | None = None
+    same_submission_shape: bool | None = None
+    same_code_competition: bool | None = None
+    same_category: bool | None = None
+    matched_features: list[str] = Field(default_factory=list)
+    metric_self: str | None = None
+    metric_candidate: str | None = None
+
+
+class SimilarCompetition(BaseModel):
+    slug: str
+    title: str | None = None
+    discovered_by: Literal["manual", "discussion_mention"]
+    confirmed: bool = False
+    verification: Literal["verified", "rejected", "not_found", "unchecked"] = (
+        "unchecked"
+    )
+    evidence: SimilarityEvidence = Field(default_factory=SimilarityEvidence)
+    rejection_reason: str | None = None
+    evidence_topic_ids: list[str] = Field(default_factory=list)
+    mention_topic_count: int = 0
+    mention_total: int = 0
+
+
+class SimilarSearchDiagnostics(BaseModel):
+    status: Literal["found_by_mention", "no_candidates", "all_rejected"]
+    candidates_seen: int
+    verified: int
+    rejected: int
+    not_found: int
+    metadata_lookups: int
 
 
 class LeaderboardEntry(BaseModel):
@@ -352,6 +387,8 @@ class CompetitionFacts(BaseModel):
     dataset_references: list[DatasetReference] = Field(default_factory=list)
     discussions: list[DiscussionFacts]
     similar_competitions: list[LeaderboardStability]
+    similar_candidates: list[SimilarCompetition] = Field(default_factory=list)
+    similar_diagnostics: SimilarSearchDiagnostics | None = None
     cv_lb_pairs: list[CvLbPair]
     cv_lb_diagnostics: CvLbDiagnostics = Field(default_factory=CvLbDiagnostics)
     score_diagnostics: ScoreDiagnostics = Field(default_factory=ScoreDiagnostics)

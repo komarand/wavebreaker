@@ -22,6 +22,8 @@ from kaggle_researcher.facts.models import (
     NotebookFacts,
     PublicLeaderboard,
     ScoreObservation,
+    SimilarCompetition,
+    SimilarSearchDiagnostics,
     UserConstraints,
 )
 
@@ -75,6 +77,33 @@ def test_official_context_contains_shape_but_not_raw_leaderboard_entries() -> No
     assert '"top_score":0.99' in packed.text
     assert '"entries"' not in packed.text
     assert "team-secret" not in packed.text
+
+
+def test_similar_no_candidates_and_top_ten_reach_official_context() -> None:
+    facts = _facts()
+    facts.similar_candidates = [
+        SimilarCompetition(
+            slug=f"candidate-{index:02d}",
+            discovered_by="discussion_mention",
+            mention_topic_count=20 - index,
+            mention_total=20 - index,
+        )
+        for index in range(12)
+    ]
+    facts.similar_diagnostics = SimilarSearchDiagnostics(
+        status="no_candidates",
+        candidates_seen=12,
+        verified=0,
+        rejected=0,
+        not_found=0,
+        metadata_lookups=0,
+    )
+
+    packed = pack_brief_context(facts, 20_000)
+
+    assert '"status":"no_candidates"' in packed.text
+    assert '"slug":"candidate-09"' in packed.text
+    assert '"slug":"candidate-10"' not in packed.text
 
 
 def test_dataset_reference_context_is_limited_and_reports_omissions() -> None:

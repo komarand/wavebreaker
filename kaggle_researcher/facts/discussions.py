@@ -37,6 +37,9 @@ BETWEEN_TOPICS_DELAY_SECONDS = 0.4
 _between_topics_sleep = time.sleep
 _FORUMS_REQUEST_POLICY = GLOBAL_KAGGLE_POLICY
 _COMPETITION_REQUEST_POLICY = GLOBAL_KAGGLE_POLICY
+COMPETITION_PATH = re.compile(
+    r"^/(?:c|competitions)/(?P<slug>[a-z0-9][a-z0-9-]{1,80})(?:/|$)"
+)
 DiscussionStatus = Literal[
     "collected",
     "partial",
@@ -665,11 +668,18 @@ class _DiscussionHtmlParser(HTMLParser):
             return
         classified = _classify_link(self._active_href)
         if classified is not None:
-            url, kind = classified
+            url, kind, competition_slug = classified
             if url not in self._seen_urls:
                 self._seen_urls.add(url)
                 text = _normalize_inline_text("".join(self._active_link_text)) or None
-                self.links.append(DiscussionLink(url=url, text=text, kind=kind))
+                self.links.append(
+                    DiscussionLink(
+                        url=url,
+                        text=text,
+                        kind=kind,
+                        competition_slug=competition_slug,
+                    )
+                )
         self._active_href = None
         self._active_link_text = []
 
@@ -687,7 +697,7 @@ def _parse_discussion_html(raw_html: str) -> tuple[str, list[DiscussionLink]]:
 
 def _classify_link(
     raw_href: str,
-) -> tuple[str, Literal["kaggle", "external", "relative"]] | None:
+) -> tuple[str, Literal["kaggle", "external", "relative"], str | None] | None:
     href = unescape(raw_href).strip()
     if not href:
         return None
@@ -697,10 +707,15 @@ def _classify_link(
         kind: Literal["kaggle", "external", "relative"] = (
             "kaggle" if hostname == "kaggle.com" or hostname.endswith(".kaggle.com") else "external"
         )
-        return href, kind
+        return href, kind, _competition_slug(parsed.path) if kind == "kaggle" else None
     if parsed.scheme or parsed.netloc:
         return None
-    return href, "relative"
+    return href, "relative", _competition_slug(parsed.path)
+
+
+def _competition_slug(path: str) -> str | None:
+    match = COMPETITION_PATH.match(path.lower())
+    return match.group("slug") if match is not None else None
 
 
 def _normalize_inline_text(value: str) -> str:

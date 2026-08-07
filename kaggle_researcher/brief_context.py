@@ -27,6 +27,7 @@ TRUSTED_CATEGORIES = frozenset({"official", "cv_lb", "notebook_ast"})
 SCORE_EXAMPLES_PER_CLUSTER = 3
 RAW_TEXT_EXAMPLE_LIMIT = 160
 DATASET_REFS_IN_CONTEXT = 15
+SIMILAR_CANDIDATES_IN_CONTEXT = 10
 _CONTEXT_SEPARATOR = "\n\n"
 _TRUSTED_CATEGORY_ORDER = ("official", "cv_lb", "notebook_ast")
 
@@ -251,6 +252,15 @@ def _official_facts_unit(facts: CompetitionFacts) -> _ContextUnit:
         ),
         "schema_version": facts.schema_version,
         "score_diagnostics": facts.score_diagnostics.model_dump(mode="json"),
+        "similar_candidates": [
+            item.model_dump(mode="json")
+            for item in facts.similar_candidates[:SIMILAR_CANDIDATES_IN_CONTEXT]
+        ],
+        "similar_diagnostics": (
+            facts.similar_diagnostics.model_dump(mode="json")
+            if facts.similar_diagnostics is not None
+            else None
+        ),
         "user_constraints": facts.user_constraints.model_dump(mode="json"),
     }
     return _ContextUnit(

@@ -337,6 +337,24 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
         )
     else:
         print("dataset references: 0")
+    if facts.similar_diagnostics is not None:
+        similar_diagnostics = facts.similar_diagnostics
+        print(
+            f"similar candidates: {similar_diagnostics.candidates_seen} "
+            f"({similar_diagnostics.verified} verified, "
+            f"{similar_diagnostics.rejected} rejected, "
+            f"{similar_diagnostics.not_found} not found)"
+        )
+        for candidate in facts.similar_candidates:
+            detail = (
+                candidate.rejection_reason
+                if candidate.rejection_reason is not None
+                else f"{candidate.mention_topic_count} topics"
+            )
+            print(
+                f"  {candidate.slug:<22} {candidate.verification:<10} "
+                f"{candidate.discovered_by:<19} {detail}"
+            )
     print(f"splitters by lineage cluster: {dict(_splitter_distribution(facts))}")
     print(f"cv/lb: {summarize_cv_lb(facts.cv_lb_pairs)}")
     diagnostics = facts.cv_lb_diagnostics
