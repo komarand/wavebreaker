@@ -704,6 +704,46 @@ def test_implausible_score_observation_does_not_build_cv_lb_pair() -> None:
     assert build_cv_lb_pairs([notebook], "roc_auc") == []
 
 
+def test_implausible_observations_do_not_inflate_side_diagnostics() -> None:
+    bad_cv = _notebook("author/bad-cv", [], None, "lc_bad_cv")
+    bad_cv.score_observations = [
+        _score(
+            "bad-cv",
+            1e-5,
+            "cv",
+            "roc_auc",
+            plausible=False,
+            implausible_reason="excluded_label",
+        ),
+        _score("good-lb", 0.97, "lb", "roc_auc"),
+    ]
+    bad_lb = _notebook("author/bad-lb", [], None, "lc_bad_lb")
+    bad_lb.score_observations = [
+        _score("good-cv", 0.95, "cv", "roc_auc"),
+        _score(
+            "bad-lb",
+            32.0,
+            "lb",
+            "roc_auc",
+            plausible=False,
+            implausible_reason="excluded_label",
+        ),
+    ]
+
+    pairs = build_cv_lb_pairs([bad_cv, bad_lb], "roc_auc")
+    diagnostics = diagnose_cv_lb([bad_cv, bad_lb], pairs, "roc_auc")
+
+    assert pairs == []
+    assert diagnostics.notebooks_with_cv_scores == 1
+    assert diagnostics.notebooks_with_lb_scores == 1
+    assert diagnostics.notebooks_with_both_sides == 0
+    assert diagnostics.pairs_rejected_missing_cv == 1
+    assert diagnostics.pairs_rejected_missing_lb == 1
+    assert diagnostics.zero_pairs_reason is not None
+    assert "missing CV side: 1" in diagnostics.zero_pairs_reason
+    assert "missing leaderboard side: 1" in diagnostics.zero_pairs_reason
+
+
 def _score(
     observation_id: str,
     value: float,

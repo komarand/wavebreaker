@@ -378,24 +378,23 @@ def _pair_notebook(
     notebook: NotebookFacts,
     competition_metric_name: str | None,
 ) -> _PairingResult:
+    plausible_observations = _plausible(notebook.score_observations)
     cv_observations = _deduplicate_observations(
         observation
-        for observation in notebook.score_observations
-        if observation.plausible
-        and observation.split == "cv"
+        for observation in plausible_observations
+        if observation.split == "cv"
         and _finite_float(observation.value) is not None
     )
     lb_observations = _deduplicate_observations(
         observation
-        for observation in notebook.score_observations
-        if observation.plausible
-        and observation.split == "lb"
+        for observation in plausible_observations
+        if observation.split == "lb"
         and _finite_float(observation.value) is not None
     )
     unknown_observations = [
         observation
-        for observation in notebook.score_observations
-        if observation.plausible and observation.split == "unknown"
+        for observation in plausible_observations
+        if observation.split == "unknown"
     ]
     cv_groups = _observation_groups(
         cv_observations,
@@ -840,15 +839,25 @@ def _lb_observation_source(observation: ScoreObservation) -> str:
 
 
 def _has_cv_side(notebook: NotebookFacts) -> bool:
-    return any(observation.split == "cv" for observation in notebook.score_observations) or bool(
-        notebook.declared_cv
-    )
+    return any(
+        observation.split == "cv"
+        for observation in _plausible(notebook.score_observations)
+    ) or bool(notebook.declared_cv)
 
 
 def _has_lb_side(notebook: NotebookFacts) -> bool:
     return notebook.public_score is not None or any(
-        observation.split == "lb" for observation in notebook.score_observations
+        observation.split == "lb"
+        for observation in _plausible(notebook.score_observations)
     )
+
+
+def _plausible(observations: list[ScoreObservation]) -> list[ScoreObservation]:
+    return [
+        observation
+        for observation in observations
+        if getattr(observation, "plausible", True)
+    ]
 
 
 def _zero_pairs_reason(
