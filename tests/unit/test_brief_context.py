@@ -316,6 +316,102 @@ def test_writeup_precedes_ordinary_current_discussion() -> None:
     )
 
 
+def test_similar_writeup_candidate_is_prioritized_labelled_and_not_duplicated() -> None:
+    facts = _facts(
+        discussions=[
+            _discussion("topic-current", votes=100, text="ordinary"),
+            _discussion(
+                "topic-candidate",
+                competition_id="past-comp",
+                is_writeup_candidate=True,
+                writeup_signals=["solution", "place", "placement"],
+                votes=0,
+                text="placed solution",
+            ),
+        ]
+    )
+
+    packed = pack_brief_context(facts, 20_000)
+
+    assert packed.text.index('source_id="topic-candidate"') < packed.text.index(
+        'source_id="topic-current"'
+    )
+    assert packed.text.count('source_id="topic-candidate"') == 1
+    candidate_header = packed.text.split('source_id="topic-candidate"', 1)[1].split(
+        ">",
+        1,
+    )[0]
+    assert 'source_type="discussion"' in candidate_header
+    assert 'evidence_class="winner_writeup"' in candidate_header
+    assert 'writeup_signals="solution,place,placement"' in candidate_header
+    assert 'competition_relation="similar"' in candidate_header
+    assert packed.stats.similar_writeup_counts == {"past-comp": 1}
+
+
+def test_current_discussion_header_has_discussion_evidence_class() -> None:
+    packed = pack_brief_context(
+        _facts(discussions=[_discussion("topic-current")]),
+        20_000,
+    )
+
+    header = packed.text.split('source_id="topic-current"', 1)[1].split(">", 1)[0]
+    assert 'evidence_class="discussion"' in header
+    assert 'writeup_signals=""' in header
+    assert 'competition_relation="current"' in header
+    assert "<UNTRUSTED_SOURCE" in packed.text
+
+
+def test_similar_writeup_sorts_above_current_writeup() -> None:
+    facts = _facts(
+        discussions=[
+            _discussion(
+                "current-writeup",
+                source_type="winner_writeup",
+                votes=100,
+            ),
+            _discussion(
+                "similar-writeup",
+                competition_id="past-comp",
+                source_type="winner_writeup",
+                votes=0,
+            ),
+        ]
+    )
+
+    packed = pack_brief_context(facts, 20_000)
+
+    assert packed.text.index('source_id="similar-writeup"') < packed.text.index(
+        'source_id="current-writeup"'
+    )
+
+
+def test_writeup_signal_count_precedes_votes_within_writeup_bucket() -> None:
+    facts = _facts(
+        discussions=[
+            _discussion(
+                "popular-one-signal",
+                competition_id="past-a",
+                is_writeup_candidate=True,
+                writeup_signals=["solution"],
+                votes=100,
+            ),
+            _discussion(
+                "quiet-three-signals",
+                competition_id="past-b",
+                is_writeup_candidate=True,
+                writeup_signals=["solution", "place", "placement"],
+                votes=0,
+            ),
+        ]
+    )
+
+    packed = pack_brief_context(facts, 20_000)
+
+    assert packed.text.index('source_id="quiet-three-signals"') < packed.text.index(
+        'source_id="popular-one-signal"'
+    )
+
+
 def test_host_discussion_precedes_non_host_discussion() -> None:
     facts = _facts(
         discussions=[
@@ -790,6 +886,8 @@ def _discussion(
     votes: int = 0,
     created_at: datetime | None = None,
     text: str = "Source body.",
+    is_writeup_candidate: bool = False,
+    writeup_signals: list[str] | None = None,
 ) -> DiscussionFacts:
     return DiscussionFacts(
         topic_id=topic_id,
@@ -801,6 +899,8 @@ def _discussion(
         source_type=source_type,
         competition_id=competition_id,
         text=text,
+        is_writeup_candidate=is_writeup_candidate,
+        writeup_signals=writeup_signals or [],
     )
 
 

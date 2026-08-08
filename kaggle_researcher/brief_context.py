@@ -211,25 +211,32 @@ def _ordered_context_units(facts: CompetitionFacts) -> list[_ContextUnit]:
     units.extend(_notebook_ast_units(facts.notebooks))
 
     discussions = sorted(facts.discussions, key=_discussion_sort_key)
-    writeups = [item for item in discussions if item.source_type == "winner_writeup"]
+    writeups = sorted(
+        (item for item in discussions if _is_winner_writeup(item)),
+        key=lambda item: _writeup_sort_key(item, facts.competition_id),
+    )
     current_host = [
         item
         for item in discussions
-        if item.source_type == "discussion"
+        if not _is_winner_writeup(item)
+        and item.source_type == "discussion"
         and item.competition_id == facts.competition_id
         and item.author_is_host
     ]
     current_other = [
         item
         for item in discussions
-        if item.source_type == "discussion"
+        if not _is_winner_writeup(item)
+        and item.source_type == "discussion"
         and item.competition_id == facts.competition_id
         and not item.author_is_host
     ]
     other = [
         item
         for item in discussions
-        if item.source_type == "discussion" and item.competition_id != facts.competition_id
+        if not _is_winner_writeup(item)
+        and item.source_type == "discussion"
+        and item.competition_id != facts.competition_id
     ]
     units.extend(_untrusted_unit(item, facts.competition_id) for item in writeups)
     units.extend(_untrusted_unit(item, facts.competition_id) for item in current_host)
@@ -450,10 +457,21 @@ def _untrusted_unit(
     discussion: DiscussionFacts,
     current_competition_id: str,
 ) -> _ContextUnit:
+    is_writeup = _is_winner_writeup(discussion)
+    evidence_class = "winner_writeup" if is_writeup else "discussion"
+    competition_relation = (
+        "current"
+        if discussion.competition_id == current_competition_id
+        else "similar"
+    )
+    writeup_signals = ",".join(discussion.writeup_signals)
     header = (
         "<UNTRUSTED_SOURCE\n"
         f'  source_id="{escape(discussion.topic_id, quote=True)}"\n'
         f'  source_type="{discussion.source_type}"\n'
+        f'  evidence_class="{evidence_class}"\n'
+        f'  writeup_signals="{escape(writeup_signals, quote=True)}"\n'
+        f'  competition_relation="{competition_relation}"\n'
         f'  author="{escape(discussion.author or "", quote=True)}"\n'
         f'  competition_id="{escape(discussion.competition_id, quote=True)}"\n'
         ">"
@@ -461,11 +479,33 @@ def _untrusted_unit(
     return _ContextUnit(
         text=f"{header}\n{discussion.text}\n</UNTRUSTED_SOURCE>",
         source_ids=(discussion.topic_id,),
-        category=("writeup" if discussion.source_type == "winner_writeup" else "discussion"),
+        category=("writeup" if is_writeup else "discussion"),
         current_discussion=(
-            discussion.source_type == "discussion"
+            not is_writeup
+            and discussion.source_type == "discussion"
             and discussion.competition_id == current_competition_id
         ),
+    )
+
+
+def _is_winner_writeup(item: DiscussionFacts) -> bool:
+    return item.source_type == "winner_writeup" or bool(
+        getattr(item, "is_writeup_candidate", False)
+    )
+
+
+def _writeup_sort_key(
+    item: DiscussionFacts,
+    current_competition_id: str,
+) -> tuple[Any, ...]:
+    # Completed similar competitions provide verified placement evidence before current writeups.
+    return (
+        item.competition_id == current_competition_id,
+        -len(item.writeup_signals),
+        -item.votes,
+        -_datetime_timestamp(item.created_at),
+        item.topic_id,
+        item.competition_id,
     )
 
 
@@ -536,7 +576,7 @@ def _ordered_unique(values: Any) -> list[str]:
 
 def _similar_writeup_counts(facts: CompetitionFacts) -> dict[str, int]:
     counts = Counter(
-        item.competition_id for item in facts.discussions if item.source_type == "winner_writeup"
+        item.competition_id for item in facts.discussions if _is_winner_writeup(item)
     )
     return dict(sorted(counts.items()))
 
@@ -576,9 +616,11 @@ def _packing_limitations(
     if not facts.similar_competitions:
         limitations.append("No similar-competition leaderboard stability records were available.")
 
-    writeup_count = sum(item.source_type == "winner_writeup" for item in facts.discussions)
+    writeup_count = sum(_is_winner_writeup(item) for item in facts.discussions)
     current_discussion_count = sum(
-        item.source_type == "discussion" and item.competition_id == facts.competition_id
+        not _is_winner_writeup(item)
+        and item.source_type == "discussion"
+        and item.competition_id == facts.competition_id
         for item in facts.discussions
     )
     if not writeup_count:
