@@ -12,9 +12,11 @@ from kaggle_researcher.facts.models import (
     DiscussionMessageFacts,
     SimilarCompetition,
 )
+from kaggle_researcher.facts.notebook_ast import canonicalize_metric_label
 from kaggle_researcher.facts.similar import (
     build_similar_candidates,
     collect_mentions,
+    slug_family,
     verify_candidate,
 )
 
@@ -89,6 +91,71 @@ def test_verify_candidate_accepts_canonical_metric_match() -> None:
         "same_code_competition",
         "same_category",
     ]
+    assert verified.match_strength == "metric_only"
+
+
+@pytest.mark.parametrize(
+    ("slug", "expected"),
+    [
+        ("march-machine-learning-mania-2026", "march-machine-learning-mania"),
+        ("march-machine-learning-mania-2024", "march-machine-learning-mania"),
+        ("nfl-draft-2026", "nfl-draft"),
+        ("ncaam-march-mania-2021-spread", "ncaam-march-mania-2021-spread"),
+    ],
+)
+def test_slug_family(slug: str, expected: str) -> None:
+    assert slug_family(slug) == expected
+
+
+def test_slug_family_verifies_candidate_with_unrecognized_metric() -> None:
+    verified = verify_candidate(
+        SimilarCompetition(
+            slug="march-machine-learning-mania-2024",
+            discovered_by="discussion_mention",
+        ),
+        _metadata("march-machine-learning-mania-2026", "Mean Squared Error"),
+        [],
+        metadata_fetcher=lambda slug: _metadata(slug, "March Mania 2024 Metric"),
+    )
+
+    assert verified.verification == "verified"
+    assert verified.evidence.same_metric is False
+    assert verified.evidence.same_slug_family is True
+    assert "same_slug_family" in verified.evidence.matched_features
+    assert verified.match_strength == "family"
+    assert verified.rejection_reason is None
+
+
+def test_metric_only_candidate_sorts_below_slug_family_candidate() -> None:
+    discussions = [
+        _discussion(
+            "topic-1",
+            "competitions/nfl-draft-2026 "
+            "competitions/march-machine-learning-mania-2024",
+        )
+    ]
+
+    def metadata(slug: str) -> CompetitionMetadata:
+        metric = "March Mania 2024 Metric" if slug.endswith("2024") else "Brier Score"
+        return _metadata(slug, metric)
+
+    candidates, _ = build_similar_candidates(
+        discussions,
+        _metadata("march-machine-learning-mania-2026", "Mean Squared Error"),
+        [],
+        manual=[],
+        max_verifications=10,
+        metadata_fetcher=metadata,
+    )
+
+    assert [(item.slug, item.match_strength) for item in candidates] == [
+        ("march-machine-learning-mania-2024", "family"),
+        ("nfl-draft-2026", "metric_only"),
+    ]
+
+
+def test_root_mean_squared_error_alias_is_canonicalized() -> None:
+    assert canonicalize_metric_label("root mean squared error") == "rmse"
 
 
 def test_verify_candidate_rejects_metric_mismatch_with_both_metrics() -> None:

@@ -111,6 +111,8 @@ class NotebookFacts(BaseModel):
     score_candidates_seen: int = 0
     score_candidates_excluded: int = 0
     style_markup_stripped_cells: int = 0
+    style_markup_stripped_markdown_cells: int = 0
+    style_markup_stripped_code_strings: int = 0
     dataset_paths: list[str] = Field(default_factory=list)
 
     parse_status: Literal["ok", "partial", "failed"]
@@ -213,6 +215,7 @@ class LeaderboardStability(BaseModel):
 
 class SimilarityEvidence(BaseModel):
     same_metric: bool | None = None
+    same_slug_family: bool | None = None
     same_submission_shape: bool | None = None
     same_code_competition: bool | None = None
     same_category: bool | None = None
@@ -230,6 +233,7 @@ class SimilarCompetition(BaseModel):
         "unchecked"
     )
     evidence: SimilarityEvidence = Field(default_factory=SimilarityEvidence)
+    match_strength: Literal["family", "metric_and_family", "metric_only"] | None = None
     rejection_reason: str | None = None
     evidence_topic_ids: list[str] = Field(default_factory=list)
     mention_topic_count: int = 0
@@ -359,6 +363,8 @@ class ScoreDiagnostics(BaseModel):
     canonical_by_alias: int = 0
     canonical_by_competition_hint: int = 0
     style_markup_stripped_cells: int = 0
+    style_markup_stripped_markdown_cells: int = 0
+    style_markup_stripped_code_strings: int = 0
     title_or_ref_observations: int = 0
     candidates_seen: int = 0
     candidates_excluded: int = 0
@@ -369,6 +375,7 @@ class ScoreDiagnostics(BaseModel):
     notebooks_with_lb_scores: int = 0
     notebooks_with_both_sides: int = 0
     implausible_observations: dict[str, int] = Field(default_factory=dict)
+    implausible_top_labels: dict[str, int] = Field(default_factory=dict)
     notebooks_failed_by_status: dict[int, int] = Field(default_factory=dict)
     notebooks_failed_by_exception: dict[str, int] = Field(default_factory=dict)
 

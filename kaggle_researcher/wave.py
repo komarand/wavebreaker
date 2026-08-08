@@ -361,10 +361,16 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
     print(f"cv/lb: {summarize_cv_lb(facts.cv_lb_pairs)}")
     diagnostics = facts.cv_lb_diagnostics
     print(f"public notebook scores: {diagnostics.notebooks_with_public_score}")
-    print(f"cv observations: {diagnostics.notebooks_with_declared_cv}")
+    print(
+        "notebooks with declared CV text: "
+        f"{diagnostics.notebooks_with_declared_cv}"
+    )
     print(f"notebooks with both: {diagnostics.notebooks_with_both}")
     print(f"comparable cv/lb pairs: {diagnostics.comparable_pairs}")
-    print(f"notebooks with CV: {diagnostics.notebooks_with_cv_scores}")
+    print(
+        "notebooks with CV-side score observations: "
+        f"{diagnostics.notebooks_with_cv_scores}"
+    )
     print(f"notebooks with LB: {diagnostics.notebooks_with_lb_scores}")
     print(f"notebooks with both sides: {diagnostics.notebooks_with_both_sides}")
     print(f"cv/lb pairs: {diagnostics.pairs_created}")
@@ -407,6 +413,14 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
             f"{sum(score_diagnostics.implausible_observations.values())} "
             f"({implausible_details})"
         )
+    if score_diagnostics.implausible_top_labels:
+        top_labels = ", ".join(
+            f"{label} {count}"
+            for label, count in list(
+                score_diagnostics.implausible_top_labels.items()
+            )[:8]
+        )
+        print(f"top excluded labels: {top_labels}")
     if score_diagnostics.notebooks_failed_by_status:
         print(
             "notebook pull failures by HTTP status: "

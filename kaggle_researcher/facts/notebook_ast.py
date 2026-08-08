@@ -248,6 +248,9 @@ _CSS_FENCED_BLOCK = re.compile(
     r"```[ \t]*css[^\r\n]*(?:\r\n|\r|\n).*?```",
     re.IGNORECASE | re.DOTALL,
 )
+_CSS_DECLARATION_BLOCK = re.compile(
+    r"[A-Za-z-]+\s*\{[^{}]*:[^{}]*\}",
+)
 KAGGLE_INPUT_PATH = re.compile(
     r"/kaggle/input/(?P<slug>[A-Za-z0-9][A-Za-z0-9_-]{1,80})(?:/|\b)"
 )
@@ -283,11 +286,14 @@ CANONICAL_METRIC_ALIASES: dict[str, str] = {
     "mae": "mae",
     "map": "mAP",
     "meanabsoluteerror": "mae",
+    "meanabsolutepercentageerror": "mape",
     "meanaverageprecision": "mAP",
     "meansquarederror": "mse",
+    "meansquaredlogarithmicerror": "rmsle",
     "mse": "mse",
     "rank1": "rank-1",
     "rmse": "rmse",
+    "rootmeansquarederror": "rmse",
     "rocauc": "roc_auc",
     "top1": "rank-1",
 }
@@ -311,6 +317,7 @@ GENERIC_METRIC_LABELS = frozenset(
 MAX_EXPRESSION_LENGTH = 80
 MAX_METRIC_LABEL_CHARS = 24
 MAX_METRIC_LABEL_TOKENS = 3
+IMPLAUSIBLE_TOP_LABELS = 15
 METRIC_VALUE_RANGE: dict[str, tuple[float, float]] = {
     "auc": (0.0, 1.0),
     "average_precision": (0.0, 1.0),
@@ -344,6 +351,7 @@ def strip_style_markup(text: str) -> str:
         _STYLE_OR_SCRIPT_BLOCK,
         _CSS_FENCED_BLOCK,
         _STYLE_ATTRIBUTE,
+        _CSS_DECLARATION_BLOCK,
     ):
         stripped = pattern.sub(_blank_markup, stripped)
     return stripped
@@ -378,6 +386,8 @@ def extract_observations(
     score_candidates_seen = 0
     score_candidates_excluded = 0
     style_markup_stripped_cells = 0
+    style_markup_stripped_markdown_cells = 0
+    style_markup_stripped_code_strings = 0
     dataset_paths: list[str] = []
     seen_dataset_paths: set[str] = set()
     seen_cv: set[str] = set()
@@ -399,6 +409,7 @@ def extract_observations(
             score_source = strip_style_markup(source)
             if score_source != source:
                 style_markup_stripped_cells += 1
+                style_markup_stripped_markdown_cells += 1
             added, candidates_seen, candidates_excluded = extract_score_observations(
                 score_source,
                 locator=f"cell_{cell_index}",
@@ -451,8 +462,12 @@ def extract_observations(
                 paths=dataset_paths,
                 seen=seen_dataset_paths,
             )
+            score_string = strip_style_markup(string_value)
+            if score_string != string_value:
+                style_markup_stripped_cells += 1
+                style_markup_stripped_code_strings += 1
             added, candidates_seen, candidates_excluded = extract_score_observations(
-                string_value,
+                score_string,
                 locator=locator,
                 source="code_string",
                 metric_hints=metric_hints,
@@ -471,6 +486,10 @@ def extract_observations(
         result = _empty_result()
         result["dataset_paths"] = dataset_paths
         result["style_markup_stripped_cells"] = style_markup_stripped_cells
+        result["style_markup_stripped_markdown_cells"] = (
+            style_markup_stripped_markdown_cells
+        )
+        result["style_markup_stripped_code_strings"] = style_markup_stripped_code_strings
         return result
 
     return {
@@ -481,6 +500,8 @@ def extract_observations(
         "score_candidates_seen": score_candidates_seen,
         "score_candidates_excluded": score_candidates_excluded,
         "style_markup_stripped_cells": style_markup_stripped_cells,
+        "style_markup_stripped_markdown_cells": style_markup_stripped_markdown_cells,
+        "style_markup_stripped_code_strings": style_markup_stripped_code_strings,
         "dataset_paths": dataset_paths,
         "parse_status": "partial" if has_syntax_error else "ok",
     }
@@ -1266,6 +1287,7 @@ def recanonicalize_score_observations(
                 metric_canonical=metric_canonical,
                 value=observation.value,
                 raw_text=observation.raw_text,
+                percent_already_normalized=_percent_value_is_normalized(observation),
             )
             if metric_canonical is None:
                 metric_canonical_source = "none"
@@ -1380,6 +1402,17 @@ def diagnose_scores(notebooks: list[NotebookFacts]) -> ScoreDiagnostics:
         for observation in observations
         if not observation.plausible
     )
+    implausible_labels = Counter(
+        observation.metric_raw or "<none>"
+        for observation in observations
+        if not observation.plausible
+    )
+    implausible_top_labels = dict(
+        sorted(
+            implausible_labels.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:IMPLAUSIBLE_TOP_LABELS]
+    )
     return ScoreDiagnostics(
         notebooks_total=len(notebooks),
         notebooks_with_score_observations=sum(
@@ -1408,6 +1441,12 @@ def diagnose_scores(notebooks: list[NotebookFacts]) -> ScoreDiagnostics:
         ),
         style_markup_stripped_cells=sum(
             notebook.style_markup_stripped_cells for notebook in notebooks
+        ),
+        style_markup_stripped_markdown_cells=sum(
+            notebook.style_markup_stripped_markdown_cells for notebook in notebooks
+        ),
+        style_markup_stripped_code_strings=sum(
+            notebook.style_markup_stripped_code_strings for notebook in notebooks
         ),
         title_or_ref_observations=sum(
             observation.source in {"title", "ref"}
@@ -1446,6 +1485,7 @@ def diagnose_scores(notebooks: list[NotebookFacts]) -> ScoreDiagnostics:
             for notebook in notebooks
         ),
         implausible_observations=dict(sorted(implausible_observations.items())),
+        implausible_top_labels=implausible_top_labels,
     )
 
 
@@ -1489,9 +1529,18 @@ def _score_value(raw_value: str) -> float | None:
         value = float(raw_value.rstrip("%"))
     except ValueError:
         return None
-    if raw_value.endswith("%"):
-        value /= 100
     return value if math.isfinite(value) else None
+
+
+def _percent_value_is_normalized(observation: ScoreObservation) -> bool:
+    raw_value = observation.value_raw.rstrip()
+    if not raw_value.endswith("%"):
+        return False
+    try:
+        expected = float(raw_value[:-1]) / 100
+    except ValueError:
+        return False
+    return math.isclose(observation.value, expected, rel_tol=1e-12, abs_tol=1e-12)
 
 
 def _score_plausibility(
@@ -1500,7 +1549,10 @@ def _score_plausibility(
     metric_canonical: str | None,
     value: float,
     raw_text: str,
+    percent_already_normalized: bool = False,
 ) -> tuple[bool, str | None, str | None, float]:
+    if not percent_already_normalized and 0 < value <= 100 and "%" in raw_text:
+        value /= 100
     if metric_raw and (
         len(metric_raw) > MAX_METRIC_LABEL_CHARS
         or len(metric_raw.split()) > MAX_METRIC_LABEL_TOKENS
@@ -1517,8 +1569,6 @@ def _score_plausibility(
         return True, None, metric_canonical, value
 
     lower, upper = value_range
-    if value > upper and 0 < value <= 100 and "%" in raw_text:
-        value /= 100
     if value < lower or value > upper:
         return False, "value_out_of_range", None, value
     if lower == 0.0 and value < 1e-3:
@@ -1643,6 +1693,8 @@ def _empty_result() -> dict[str, Any]:
         "score_candidates_seen": 0,
         "score_candidates_excluded": 0,
         "style_markup_stripped_cells": 0,
+        "style_markup_stripped_markdown_cells": 0,
+        "style_markup_stripped_code_strings": 0,
         "dataset_paths": [],
         "parse_status": "failed",
     }

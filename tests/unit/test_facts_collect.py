@@ -64,6 +64,8 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
         lambda path, **kwargs: {
             **_observations(),
             "style_markup_stripped_cells": 1,
+            "style_markup_stripped_markdown_cells": 1,
+            "style_markup_stripped_code_strings": 0,
         },
     )
     monkeypatch.setattr(collect, "ast_fingerprint", lambda path: "a" * 64)
@@ -151,6 +153,8 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
     assert facts.cv_lb_diagnostics.notebooks_total == 2
     assert facts.cv_lb_diagnostics.notebooks_with_both == 2
     assert facts.score_diagnostics.style_markup_stripped_cells == 2
+    assert facts.score_diagnostics.style_markup_stripped_markdown_cells == 2
+    assert facts.score_diagnostics.style_markup_stripped_code_strings == 0
     assert [pair.notebook_ref for pair in facts.implausible_gap_pairs] == [
         "author/one"
     ]

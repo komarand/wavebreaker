@@ -384,6 +384,57 @@ def test_bounded_metric_percent_is_converted_and_remains_plausible() -> None:
     assert observations[0].plausible is True
 
 
+def test_integer_percent_is_converted_before_integer_plausibility_check() -> None:
+    observations, _, _ = extract_score_observations(
+        "ROC AUC: 95%",
+        locator="cell_0",
+        source="markdown",
+    )
+
+    assert observations[0].value == pytest.approx(0.95)
+    assert observations[0].plausible is True
+
+
+def test_percent_normalization_is_idempotent_during_recanonicalization() -> None:
+    observations, _, _ = extract_score_observations(
+        "ROC AUC: 95%",
+        locator="cell_0",
+        source="markdown",
+    )
+    notebook = NotebookFacts(
+        ref="author/percent",
+        title="Percent",
+        ast_fingerprint="c" * 64,
+        lineage_cluster_id="lc_c",
+        splitters=[],
+        models=[],
+        metrics=[],
+        feature_ops=[],
+        declared_cv=[],
+        score_observations=observations,
+        parse_status="ok",
+    )
+
+    updated = recanonicalize_score_observations(
+        [notebook],
+        competition_metric_name="ROC AUC",
+    )
+
+    assert updated[0].score_observations[0].value == pytest.approx(0.95)
+
+
+def test_integer_without_percent_remains_implausible() -> None:
+    observations, _, _ = extract_score_observations(
+        "ROC AUC: 95",
+        locator="cell_0",
+        source="markdown",
+    )
+
+    assert observations[0].value == pytest.approx(95)
+    assert observations[0].plausible is False
+    assert observations[0].implausible_reason == "value_is_integer"
+
+
 def test_style_markup_is_removed_before_score_extraction(tmp_path: Path) -> None:
     notebook_path = _write_notebook(
         tmp_path,
@@ -401,6 +452,51 @@ def test_style_markup_is_removed_before_score_extraction(tmp_path: Path) -> None
     assert observation.metric_raw == "CV"
     assert observation.metric_canonical == "mse"
     assert observation.metric_canonical_source == "competition_hint"
+
+
+def test_style_markup_is_removed_from_code_strings(tmp_path: Path) -> None:
+    notebook_path = _write_notebook(
+        tmp_path,
+        [
+            _code_cell(
+                "display(HTML('<style>.x{font-size:14px}</style>'))\n"
+                "summary = 'CV 0.124'"
+            )
+        ],
+    )
+
+    result = extract_observations(
+        notebook_path,
+        metric_hints=["Mean Squared Error"],
+    )
+
+    assert result["style_markup_stripped_cells"] == 1
+    assert result["style_markup_stripped_markdown_cells"] == 0
+    assert result["style_markup_stripped_code_strings"] == 1
+    assert [item.metric_raw for item in result["score_observations"]] == ["CV"]
+
+
+def test_standalone_css_declaration_in_code_string_is_removed(tmp_path: Path) -> None:
+    notebook_path = _write_notebook(
+        tmp_path,
+        [_code_cell("css = '.cls { padding: 4px; }'")],
+    )
+
+    result = extract_observations(notebook_path)
+
+    assert result["style_markup_stripped_code_strings"] == 1
+    assert result["score_observations"] == []
+
+
+def test_standalone_css_stripping_preserves_literal_line_count() -> None:
+    source = ".cls {\n  padding: 4px;\n}\nCV 0.124"
+
+    stripped = strip_style_markup(source)
+
+    assert stripped.count("\n") == source.count("\n")
+    assert len(stripped) == len(source)
+    assert "padding" not in stripped
+    assert "CV 0.124" in stripped
 
 
 def test_inline_style_attribute_does_not_create_score_observation(tmp_path: Path) -> None:
@@ -781,6 +877,8 @@ def test_score_diagnostics_keep_raw_and_canonical_counts() -> None:
         score_candidates_seen=candidates_seen,
         score_candidates_excluded=candidates_excluded,
         style_markup_stripped_cells=2,
+        style_markup_stripped_markdown_cells=1,
+        style_markup_stripped_code_strings=1,
         parse_status="ok",
     )
 
@@ -793,9 +891,68 @@ def test_score_diagnostics_keep_raw_and_canonical_counts() -> None:
     assert diagnostics.canonical_by_alias == 1
     assert diagnostics.canonical_by_competition_hint == 0
     assert diagnostics.style_markup_stripped_cells == 2
+    assert diagnostics.style_markup_stripped_markdown_cells == 1
+    assert diagnostics.style_markup_stripped_code_strings == 1
     assert diagnostics.candidates_seen == 3
     assert diagnostics.candidates_excluded == 1
     assert diagnostics.implausible_observations == {"excluded_label": 1}
+
+
+def test_implausible_top_labels_are_bounded_and_deterministically_sorted() -> None:
+    observations = [
+        ScoreObservation(
+            value=1.0,
+            value_raw="1",
+            metric_raw=label,
+            locator=f"cell_{label_index}_{occurrence}",
+            raw_text=f"{label}: 1",
+            source="markdown",
+            plausible=False,
+            implausible_reason="excluded_label",
+        )
+        for label_index in range(20)
+        for occurrence in range(20 - label_index)
+        for label in [f"label-{label_index:02d}"]
+    ]
+    observations.extend(
+        ScoreObservation(
+            value=1.0,
+            value_raw="1",
+            metric_raw=None,
+            locator=f"title_{index}",
+            raw_text="1",
+            source="title",
+            plausible=False,
+            implausible_reason="value_is_integer",
+        )
+        for index in range(25)
+    )
+    notebook = NotebookFacts(
+        ref="author/notebook",
+        title="Notebook",
+        ast_fingerprint="b" * 64,
+        lineage_cluster_id="lc_b",
+        splitters=[],
+        models=[],
+        metrics=[],
+        feature_ops=[],
+        declared_cv=[],
+        score_observations=observations,
+        parse_status="ok",
+    )
+
+    diagnostics = diagnose_scores([notebook])
+
+    assert len(diagnostics.implausible_top_labels) == 15
+    assert list(diagnostics.implausible_top_labels.items())[:3] == [
+        ("<none>", 25),
+        ("label-00", 20),
+        ("label-01", 19),
+    ]
+    assert list(diagnostics.implausible_top_labels.items()) == sorted(
+        diagnostics.implausible_top_labels.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
 
 
 def test_ast_parse_suppresses_only_syntax_warning(tmp_path: Path) -> None:
@@ -834,6 +991,8 @@ def test_notebook_with_no_parseable_code_returns_empty_failed_result(tmp_path: P
         "score_candidates_seen": 0,
         "score_candidates_excluded": 0,
         "style_markup_stripped_cells": 0,
+        "style_markup_stripped_markdown_cells": 0,
+        "style_markup_stripped_code_strings": 0,
         "dataset_paths": [],
         "parse_status": "failed",
     }

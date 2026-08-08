@@ -38,7 +38,21 @@ _VERIFICATION_ORDER = {
     "rejected": 2,
     "not_found": 3,
 }
+_MATCH_STRENGTH_ORDER = {
+    "metric_and_family": 0,
+    "family": 1,
+    "metric_only": 2,
+    None: 3,
+}
+_SLUG_YEAR = re.compile(r"^(19|20)\d{2}$")
 _MetadataFetcher = Callable[..., CompetitionMetadata]
+
+
+def slug_family(slug: str) -> str:
+    tokens = slug.casefold().split("-")
+    while tokens and _SLUG_YEAR.fullmatch(tokens[-1]):
+        tokens.pop()
+    return "-".join(tokens) if tokens else slug.casefold()
 
 
 def collect_mentions(
@@ -109,6 +123,9 @@ def verify_candidate(
         metric_self,
         metric_candidate,
     )
+    same_slug_family = slug_family(self_metadata.competition_id) == slug_family(
+        candidate.slug
+    )
     same_code_competition = _same_optional(
         self_metadata.is_code_competition,
         candidate_metadata.is_code_competition,
@@ -119,11 +136,13 @@ def verify_candidate(
     )
     feature_values = {
         "same_metric": same_metric,
+        "same_slug_family": same_slug_family,
         "same_code_competition": same_code_competition,
         "same_category": same_category,
     }
     evidence = SimilarityEvidence(
         same_metric=same_metric,
+        same_slug_family=same_slug_family,
         same_submission_shape=None,
         same_code_competition=same_code_competition,
         same_category=same_category,
@@ -131,7 +150,7 @@ def verify_candidate(
         metric_self=metric_self,
         metric_candidate=metric_candidate,
     )
-    if same_metric is True:
+    if same_metric is True or same_slug_family is True:
         verification = "verified"
         rejection_reason = None
     else:
@@ -142,11 +161,13 @@ def verify_candidate(
             metric_self,
             metric_candidate,
         )
+    match_strength = _match_strength(same_metric, same_slug_family)
     return candidate.model_copy(
         update={
             "title": candidate_metadata.title,
             "verification": verification,
             "evidence": evidence,
+            "match_strength": match_strength,
             "rejection_reason": rejection_reason,
         }
     )
@@ -213,6 +234,7 @@ def build_similar_candidates(
         key=lambda item: (
             not item.confirmed,
             _VERIFICATION_ORDER[item.verification],
+            _MATCH_STRENGTH_ORDER[item.match_strength],
             -item.mention_topic_count,
             item.slug,
         ),
@@ -236,6 +258,19 @@ def build_similar_candidates(
         metadata_lookups=metadata_lookups,
     )
     return candidates, diagnostics
+
+
+def _match_strength(
+    same_metric: bool | None,
+    same_slug_family: bool | None,
+) -> str | None:
+    if same_metric is True and same_slug_family is True:
+        return "metric_and_family"
+    if same_slug_family is True:
+        return "family"
+    if same_metric is True:
+        return "metric_only"
+    return None
 
 
 def _discussion_texts(discussion: DiscussionFacts) -> Iterable[str]:

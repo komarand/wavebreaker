@@ -98,10 +98,10 @@ def test_wave_facts_writes_offline_checkpoint_and_cluster_summary(
     assert "external links: 0" in output
     assert "failed topics: 0" in output
     assert "public notebook scores: 2" in output
-    assert "cv observations: 2" in output
+    assert "notebooks with declared CV text: 2" in output
     assert "comparable cv/lb pairs: 2" in output
     assert "discussion status: collected" in output
-    assert "notebooks with CV: 2" in output
+    assert "notebooks with CV-side score observations: 2" in output
     assert "notebooks with LB: 2" in output
     assert "cv/lb pairs: 2" in output
     assert "  API LB: 2" in output
