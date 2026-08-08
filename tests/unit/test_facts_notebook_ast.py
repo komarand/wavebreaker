@@ -357,7 +357,7 @@ def test_optimizer_tolerance_is_retained_as_implausible_observation(
     assert observations[0].implausible_reason == "excluded_label"
 
 
-def test_bounded_metric_without_percent_rejects_out_of_range_value() -> None:
+def test_integer_bounded_metric_value_uses_integer_reason() -> None:
     observations, _, _ = extract_score_observations(
         "ROC AUC: 100.0",
         locator="cell_0",
@@ -366,8 +366,8 @@ def test_bounded_metric_without_percent_rejects_out_of_range_value() -> None:
 
     assert len(observations) == 1
     assert observations[0].plausible is False
-    assert observations[0].implausible_reason == "value_out_of_range"
-    assert observations[0].metric_canonical is None
+    assert observations[0].implausible_reason == "value_is_integer"
+    assert observations[0].metric_canonical == "roc_auc"
 
 
 def test_bounded_metric_percent_is_converted_and_remains_plausible() -> None:
@@ -405,6 +405,43 @@ def test_unbounded_rmse_value_remains_plausible() -> None:
     assert len(observations) == 1
     assert observations[0].metric_canonical == "rmse"
     assert observations[0].plausible is True
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_value"),
+    [
+        ("VALIDATION_SPLITS: 5", 5.0),
+        ("MSE: 2", 2.0),
+        ("MSE: 2021", 2021.0),
+    ],
+)
+def test_integer_score_candidates_at_least_one_are_implausible(
+    text: str,
+    expected_value: float,
+) -> None:
+    observations, _, _ = extract_score_observations(
+        text,
+        locator="cell_0",
+        source="markdown",
+    )
+
+    assert len(observations) == 1
+    assert observations[0].value == expected_value
+    assert observations[0].plausible is False
+    assert observations[0].implausible_reason == "value_is_integer"
+
+
+@pytest.mark.parametrize("value", [0.0, 0.15479, 0.999])
+def test_values_below_one_are_not_rejected_as_integers(value: float) -> None:
+    observations, _, _ = extract_score_observations(
+        f"MSE: {value}",
+        locator="cell_0",
+        source="markdown",
+    )
+
+    assert len(observations) == 1
+    assert observations[0].plausible is True
+    assert observations[0].implausible_reason is None
 
 
 @pytest.mark.parametrize(

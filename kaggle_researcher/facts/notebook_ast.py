@@ -1372,6 +1372,8 @@ def _score_plausibility(
         return False, "label_too_long", metric_canonical, value
     if _is_excluded_score_label(metric_raw):
         return False, "excluded_label", metric_canonical, value
+    if value >= 1 and value.is_integer():
+        return False, "value_is_integer", metric_canonical, value
 
     range_key = _METRIC_RANGE_ALIASES.get(metric_canonical or "", metric_canonical)
     value_range = METRIC_VALUE_RANGE.get(range_key or "")
