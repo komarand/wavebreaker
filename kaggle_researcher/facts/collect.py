@@ -486,6 +486,10 @@ async def _collect_one_notebook(
                 0,
             )
             + context_excluded,
+            style_markup_stripped_cells=observations.get(
+                "style_markup_stripped_cells",
+                0,
+            ),
             dataset_paths=observations.get("dataset_paths", []),
             parse_status=observations["parse_status"],
         )

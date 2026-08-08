@@ -334,6 +334,33 @@ def test_uncanonicalized_metric_within_notebook_is_assumed_match() -> None:
     assert pair.metric_match == "assumed"
 
 
+def test_competition_hint_pair_is_assumed_and_mse_is_lower_better() -> None:
+    notebook = _notebook("author/hinted", [], None, "lc")
+    notebook.score_observations = [
+        _score(
+            "cv",
+            0.124,
+            "cv",
+            "mse",
+            metric_raw="CV",
+            metric_canonical_source="competition_hint",
+        ),
+        _score(
+            "lb",
+            0.15479,
+            "lb",
+            "mse",
+            metric_raw="LB",
+            metric_canonical_source="competition_hint",
+        ),
+    ]
+
+    pair = build_cv_lb_pairs([notebook], "Mean Squared Error")[0]
+
+    assert pair.metric_match == "assumed"
+    assert pair.optimization_direction == "lower_is_better"
+
+
 def test_matching_normalized_raw_metric_creates_pair() -> None:
     notebook = _notebook("author/raw", [], None, "lc")
     notebook.score_observations = [
@@ -684,6 +711,7 @@ def _score(
     metric_canonical: str | None,
     *,
     metric_raw: str | None = None,
+    metric_canonical_source: str = "none",
     source: str = "markdown",
     signals: list[str] | None = None,
     value_raw: str | None = None,
@@ -695,6 +723,7 @@ def _score(
         value_raw=value_raw or str(value),
         metric_raw=metric_raw or metric_canonical,
         metric_canonical=metric_canonical,
+        metric_canonical_source=metric_canonical_source,
         locator=source,
         raw_text=f"{metric_raw or metric_canonical or 'score'}: {value}",
         source=source,

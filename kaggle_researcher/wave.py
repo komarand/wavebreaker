@@ -385,7 +385,12 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
         "notebooks with score observations: "
         f"{score_diagnostics.notebooks_with_score_observations}"
     )
-    print("canonical score metrics: " f"{score_diagnostics.observations_with_canonical_metric}")
+    print(
+        "canonical score metrics: "
+        f"{score_diagnostics.observations_with_canonical_metric} "
+        f"(alias {score_diagnostics.canonical_by_alias}, competition hint "
+        f"{score_diagnostics.canonical_by_competition_hint})"
+    )
     print(
         "uncanonicalized score metrics: "
         f"{score_diagnostics.observations_without_canonical_metric}"

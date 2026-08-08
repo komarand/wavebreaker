@@ -16,6 +16,7 @@ from typing import Any, Literal
 from kaggle_researcher.facts.models import (
     CodeObservation,
     DeclaredCvObservation,
+    MetricCanonicalSource,
     NotebookFacts,
     ScoreDiagnostics,
     ScoreObservation,
@@ -158,26 +159,34 @@ EXCLUDED_SCORE_LABELS = frozenset(
         "epsilon",
         "fold",
         "factor",
+        "flex",
         "frac",
         "frac_per_id",
         "fraction",
         "ftol",
+        "gap",
         "gtol",
+        "height",
         "image_size",
         "img_size",
         "input_size",
         "k",
         "k1",
         "k2",
+        "k_factor",
         "lambda",
         "learning_rate",
         "lr",
         "margin",
+        "margin_left",
+        "margin_top",
         "max_epochs",
         "min_delta",
         "n_splits",
         "num_folds",
         "num_workers",
+        "opacity",
+        "padding",
         "patience",
         "random_state",
         "rel_tol",
@@ -185,6 +194,7 @@ EXCLUDED_SCORE_LABELS = frozenset(
         "resolution",
         "scale",
         "seed",
+        "seed_value",
         "split",
         "steps",
         "test_split",
@@ -195,11 +205,48 @@ EXCLUDED_SCORE_LABELS = frozenset(
         "train_split",
         "val_split",
         "version",
+        "width",
         "warmup_steps",
         "weight_decay",
         "workers",
         "xtol",
+        "border_radius",
+        "border_width",
+        "elo_k",
+        "font_size",
+        "font_weight",
+        "fontsize",
+        "letter_spacing",
+        "line_height",
+        "z_index",
     }
+)
+CONTEXT_ONLY_METRIC_LABELS = frozenset(
+    {
+        "cv",
+        "fold",
+        "lb",
+        "leaderboard",
+        "local",
+        "oof",
+        "private",
+        "public",
+        "score",
+        "val",
+        "validation",
+    }
+)
+_STYLE_OR_SCRIPT_BLOCK = re.compile(
+    r"<(style|script)\b[^>]*>.*?</\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_STYLE_ATTRIBUTE = re.compile(
+    r"\bstyle\s*=\s*(?P<quote>['\"]).*?(?P=quote)",
+    re.IGNORECASE | re.DOTALL,
+)
+_CSS_FENCED_BLOCK = re.compile(
+    r"```[ \t]*css[^\r\n]*(?:\r\n|\r|\n).*?```",
+    re.IGNORECASE | re.DOTALL,
 )
 KAGGLE_INPUT_PATH = re.compile(
     r"/kaggle/input/(?P<slug>[A-Za-z0-9][A-Za-z0-9_-]{1,80})(?:/|\b)"
@@ -227,6 +274,8 @@ CANONICAL_METRIC_ALIASES: dict[str, str] = {
     "acc": "accuracy",
     "accuracyscore": "accuracy",
     "auc": "roc_auc",
+    "brier": "mse",
+    "brierscore": "mse",
     "f1": "f1",
     "f1score": "f1",
     "identitybalancedmap": "mAP",
@@ -235,6 +284,7 @@ CANONICAL_METRIC_ALIASES: dict[str, str] = {
     "map": "mAP",
     "meanabsoluteerror": "mae",
     "meanaverageprecision": "mAP",
+    "meansquarederror": "mse",
     "mse": "mse",
     "rank1": "rank-1",
     "rmse": "rmse",
@@ -288,6 +338,21 @@ _METRIC_RANGE_ALIASES = {
 _ResolvedDictLiteral = tuple[dict[str, str], int]
 
 
+def strip_style_markup(text: str) -> str:
+    stripped = text
+    for pattern in (
+        _STYLE_OR_SCRIPT_BLOCK,
+        _CSS_FENCED_BLOCK,
+        _STYLE_ATTRIBUTE,
+    ):
+        stripped = pattern.sub(_blank_markup, stripped)
+    return stripped
+
+
+def _blank_markup(match: re.Match[str]) -> str:
+    return "".join(character if character in "\r\n" else " " for character in match.group(0))
+
+
 def extract_observations(
     notebook_path: Path,
     *,
@@ -312,6 +377,7 @@ def extract_observations(
     score_observations: list[ScoreObservation] = []
     score_candidates_seen = 0
     score_candidates_excluded = 0
+    style_markup_stripped_cells = 0
     dataset_paths: list[str] = []
     seen_dataset_paths: set[str] = set()
     seen_cv: set[str] = set()
@@ -330,8 +396,11 @@ def extract_observations(
                 paths=dataset_paths,
                 seen=seen_dataset_paths,
             )
+            score_source = strip_style_markup(source)
+            if score_source != source:
+                style_markup_stripped_cells += 1
             added, candidates_seen, candidates_excluded = extract_score_observations(
-                source,
+                score_source,
                 locator=f"cell_{cell_index}",
                 source="markdown",
                 metric_hints=metric_hints,
@@ -401,6 +470,7 @@ def extract_observations(
     if parsed_code_cells == 0:
         result = _empty_result()
         result["dataset_paths"] = dataset_paths
+        result["style_markup_stripped_cells"] = style_markup_stripped_cells
         return result
 
     return {
@@ -410,6 +480,7 @@ def extract_observations(
         "score_observations": score_observations,
         "score_candidates_seen": score_candidates_seen,
         "score_candidates_excluded": score_candidates_excluded,
+        "style_markup_stripped_cells": style_markup_stripped_cells,
         "dataset_paths": dataset_paths,
         "parse_status": "partial" if has_syntax_error else "ok",
     }
@@ -764,7 +835,7 @@ def extract_score_observations(
                 candidates_excluded += 1
                 continue
             raw_text = " ".join(match.group(0).strip().split())
-            metric_canonical = canonicalize_metric_label(
+            metric_canonical, metric_canonical_source = _canonicalize_metric_label_with_source(
                 metric_raw,
                 metric_hints=metric_hints,
             )
@@ -774,12 +845,15 @@ def extract_score_observations(
                 value=value,
                 raw_text=raw_text,
             )
+            if metric_canonical is None:
+                metric_canonical_source = "none"
             observations.append(
                 ScoreObservation(
                     value=value,
                     value_raw=value_raw,
                     metric_raw=metric_raw,
                     metric_canonical=metric_canonical,
+                    metric_canonical_source=metric_canonical_source,
                     locator=locator,
                     raw_text=raw_text,
                     source=source,
@@ -871,7 +945,7 @@ def _code_score_observations(
         value, value_raw = numeric
         raw_text = ast.get_source_segment(source_text, context_node)
         compact_text = " ".join((raw_text or f"{metric_raw}={value_raw}").split())
-        metric_canonical = canonicalize_metric_label(
+        metric_canonical, metric_canonical_source = _canonicalize_metric_label_with_source(
             metric_raw,
             metric_hints=metric_hints,
         )
@@ -886,12 +960,15 @@ def _code_score_observations(
             value=value,
             raw_text=compact_text,
         )
+        if metric_canonical is None:
+            metric_canonical_source = "none"
         observations.append(
             ScoreObservation(
                 value=value,
                 value_raw=value_raw,
                 metric_raw=metric_raw,
                 metric_canonical=metric_canonical,
+                metric_canonical_source=metric_canonical_source,
                 locator=locator,
                 raw_text=compact_text[:160],
                 source="code",
@@ -941,16 +1018,40 @@ def canonicalize_metric_label(
     *,
     metric_hints: Iterable[str] = (),
 ) -> str | None:
+    return _canonicalize_metric_label_with_source(
+        metric_raw,
+        metric_hints=metric_hints,
+    )[0]
+
+
+def _canonicalize_metric_label_with_source(
+    metric_raw: str | None,
+    *,
+    metric_hints: Iterable[str] = (),
+) -> tuple[str | None, MetricCanonicalSource]:
     if not metric_raw:
-        return None
+        return None, "none"
     alias = _canonical_metric_alias(metric_raw)
     if alias is not None:
-        return alias
+        return alias, "alias"
     match_key = _metric_match_key(metric_raw)
-    for metric_hint in _normalized_metric_hints(metric_hints):
+    normalized_hints = _normalized_metric_hints(metric_hints)
+    canonical_hints = {
+        canonical_hint
+        for metric_hint in normalized_hints
+        if (canonical_hint := _canonical_metric_alias(metric_hint)) is not None
+    }
+    if _is_context_only_metric_label(metric_raw) and len(canonical_hints) == 1:
+        return next(iter(canonical_hints)), "competition_hint"
+    for metric_hint in normalized_hints:
         if match_key and match_key == _metric_match_key(metric_hint):
-            return _canonical_metric_alias(metric_hint) or metric_hint
-    return None
+            return _canonical_metric_alias(metric_hint) or metric_hint, "competition_hint"
+    return None, "none"
+
+
+def _is_context_only_metric_label(metric_raw: str) -> bool:
+    tokens = re.findall(r"[a-z]+", metric_raw.casefold())
+    return bool(tokens) and all(token in CONTEXT_ONLY_METRIC_LABELS for token in tokens)
 
 
 def _canonical_metric_alias(metric_raw: str) -> str | None:
@@ -1073,7 +1174,18 @@ def metric_optimization_direction(
     canonical = canonicalize_metric_label(metric_name) or (
         metric_name.strip().lower() if metric_name else None
     )
-    if canonical in {"log_loss", "logloss", "mae", "mse", "rmse", "mape"}:
+    if canonical in {
+        "crps",
+        "log_loss",
+        "logloss",
+        "mae",
+        "mape",
+        "mse",
+        "pinball",
+        "rmse",
+        "rmsle",
+        "smape",
+    }:
         return "minimize"
     if canonical in {
         "accuracy",
@@ -1123,19 +1235,27 @@ def recanonicalize_score_observations(
         score_observations: list[ScoreObservation] = []
         for observation in notebook.score_observations:
             source_kind = observation.source_kind or observation.source
-            metric_canonical = (
-                canonicalize_metric_label(
+            metric_canonical, metric_canonical_source = (
+                _canonicalize_metric_label_with_source(
+                    observation.metric_raw,
+                    metric_hints=(competition_metric_name,),
+                )
+            )
+            if metric_canonical is None and observation.metric_canonical is not None:
+                metric_canonical = observation.metric_canonical
+                metric_canonical_source = observation.metric_canonical_source
+            if metric_canonical is None:
+                metric_canonical = canonicalize_metric_label(
                     observation.metric_raw,
                     metric_hints=metric_hints,
                 )
-                or observation.metric_canonical
-            )
             if (
                 metric_canonical is None
                 and competition_metric_canonical is not None
                 and _is_generic_metric_label(observation.metric_raw, source_kind)
             ):
                 metric_canonical = competition_metric_canonical
+                metric_canonical_source = "competition_hint"
             (
                 plausible,
                 implausible_reason,
@@ -1147,6 +1267,8 @@ def recanonicalize_score_observations(
                 value=observation.value,
                 raw_text=observation.raw_text,
             )
+            if metric_canonical is None:
+                metric_canonical_source = "none"
             split, split_signals = classify_score_split(
                 source_kind=source_kind,
                 context_text=observation.context_text or observation.raw_text,
@@ -1157,6 +1279,7 @@ def recanonicalize_score_observations(
             updated = observation.model_copy(
                 update={
                     "metric_canonical": metric_canonical,
+                    "metric_canonical_source": metric_canonical_source,
                     "value": normalized_value,
                     "split": split,
                     "split_signals": split_signals,
@@ -1272,6 +1395,19 @@ def diagnose_scores(notebooks: list[NotebookFacts]) -> ScoreDiagnostics:
         ),
         observations_without_canonical_metric=sum(
             observation.metric_canonical is None for observation in plausible_observations
+        ),
+        canonical_by_alias=sum(
+            observation.metric_canonical is not None
+            and observation.metric_canonical_source == "alias"
+            for observation in plausible_observations
+        ),
+        canonical_by_competition_hint=sum(
+            observation.metric_canonical is not None
+            and observation.metric_canonical_source == "competition_hint"
+            for observation in plausible_observations
+        ),
+        style_markup_stripped_cells=sum(
+            notebook.style_markup_stripped_cells for notebook in notebooks
         ),
         title_or_ref_observations=sum(
             observation.source in {"title", "ref"}
@@ -1506,6 +1642,7 @@ def _empty_result() -> dict[str, Any]:
         "score_observations": [],
         "score_candidates_seen": 0,
         "score_candidates_excluded": 0,
+        "style_markup_stripped_cells": 0,
         "dataset_paths": [],
         "parse_status": "failed",
     }

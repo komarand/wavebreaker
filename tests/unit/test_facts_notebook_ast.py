@@ -19,6 +19,7 @@ from kaggle_researcher.facts.notebook_ast import (
     extract_observations,
     extract_score_observations,
     recanonicalize_score_observations,
+    strip_style_markup,
 )
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "facts"
@@ -383,6 +384,135 @@ def test_bounded_metric_percent_is_converted_and_remains_plausible() -> None:
     assert observations[0].plausible is True
 
 
+def test_style_markup_is_removed_before_score_extraction(tmp_path: Path) -> None:
+    notebook_path = _write_notebook(
+        tmp_path,
+        [
+            _markdown_cell("<style>.score { font-size: 14px; }</style>\nCV: 0.124"),
+            _code_cell("value = 1"),
+        ],
+    )
+
+    result = extract_observations(notebook_path, metric_hints=["Mean Squared Error"])
+
+    assert result["style_markup_stripped_cells"] == 1
+    assert len(result["score_observations"]) == 1
+    observation = result["score_observations"][0]
+    assert observation.metric_raw == "CV"
+    assert observation.metric_canonical == "mse"
+    assert observation.metric_canonical_source == "competition_hint"
+
+
+def test_inline_style_attribute_does_not_create_score_observation(tmp_path: Path) -> None:
+    notebook_path = _write_notebook(
+        tmp_path,
+        [
+            _markdown_cell('<div style="font-size: 14px; opacity: 0.95">text</div>'),
+            _code_cell("value = 1"),
+        ],
+    )
+
+    result = extract_observations(notebook_path)
+
+    assert result["style_markup_stripped_cells"] == 1
+    assert result["score_observations"] == []
+
+
+def test_strip_style_markup_preserves_length_and_newlines() -> None:
+    source = (
+        "before\n<style>\n.x { width: 95px; }\n</style>\n"
+        '<div style="height: 42px">body</div>\n'
+        "```css\n.card { opacity: 0.7; }\n```\nafter"
+    )
+
+    stripped = strip_style_markup(source)
+
+    assert len(stripped) == len(source)
+    assert stripped.count("\n") == source.count("\n")
+    assert "width: 95" not in stripped
+    assert "height: 42" not in stripped
+    assert "opacity: 0.7" not in stripped
+    assert "before" in stripped
+    assert "after" in stripped
+
+
+def test_dataset_path_in_styled_markup_uses_original_markdown(tmp_path: Path) -> None:
+    notebook_path = _write_notebook(
+        tmp_path,
+        [
+            _markdown_cell(
+                '<div style="width: 95px" data-path="/kaggle/input/external-data/train.csv">x</div>'
+            ),
+            _code_cell("value = 1"),
+        ],
+    )
+
+    result = extract_observations(notebook_path, competition_id="current-comp")
+
+    assert result["dataset_paths"] == ["external-data"]
+    assert result["score_observations"] == []
+
+
+def test_context_metric_label_uses_competition_hint() -> None:
+    observations, _, _ = extract_score_observations(
+        "CV: 0.124",
+        locator="cell_0",
+        source="markdown",
+        metric_hints=["Mean Squared Error"],
+    )
+
+    assert observations[0].metric_canonical == "mse"
+    assert observations[0].metric_canonical_source == "competition_hint"
+
+
+def test_direct_metric_alias_wins_over_competition_hint() -> None:
+    observations, _, _ = extract_score_observations(
+        "val_mse: 0.124",
+        locator="cell_0",
+        source="markdown",
+        metric_hints=["Mean Squared Error"],
+    )
+
+    assert observations[0].metric_canonical == "mse"
+    assert observations[0].metric_canonical_source == "alias"
+
+
+def test_brier_alias_is_mse_independently_of_competition_hint() -> None:
+    observations, _, _ = extract_score_observations(
+        "Brier: 0.124",
+        locator="cell_0",
+        source="markdown",
+        metric_hints=["Mean Squared Error"],
+    )
+
+    assert observations[0].metric_canonical == "mse"
+    assert observations[0].metric_canonical_source == "alias"
+
+
+def test_excluded_label_is_not_canonicalized_from_competition_hint() -> None:
+    observations, _, _ = extract_score_observations(
+        "learning_rate: 0.01",
+        locator="cell_0",
+        source="markdown",
+        metric_hints=["Mean Squared Error"],
+    )
+
+    assert observations[0].metric_canonical is None
+    assert observations[0].metric_canonical_source == "none"
+    assert observations[0].implausible_reason == "excluded_label"
+
+
+def test_context_metric_label_without_hint_remains_uncanonicalized() -> None:
+    observations, _, _ = extract_score_observations(
+        "CV: 0.124",
+        locator="cell_0",
+        source="markdown",
+    )
+
+    assert observations[0].metric_canonical is None
+    assert observations[0].metric_canonical_source == "none"
+
+
 def test_long_metric_label_is_retained_as_implausible_observation() -> None:
     observations, _, _ = extract_score_observations(
         "Fold-safe target encoding of exact values: 0.001",
@@ -650,6 +780,7 @@ def test_score_diagnostics_keep_raw_and_canonical_counts() -> None:
         score_observations=observations,
         score_candidates_seen=candidates_seen,
         score_candidates_excluded=candidates_excluded,
+        style_markup_stripped_cells=2,
         parse_status="ok",
     )
 
@@ -659,6 +790,9 @@ def test_score_diagnostics_keep_raw_and_canonical_counts() -> None:
     assert diagnostics.observations_total == 2
     assert diagnostics.observations_with_canonical_metric == 1
     assert diagnostics.observations_without_canonical_metric == 1
+    assert diagnostics.canonical_by_alias == 1
+    assert diagnostics.canonical_by_competition_hint == 0
+    assert diagnostics.style_markup_stripped_cells == 2
     assert diagnostics.candidates_seen == 3
     assert diagnostics.candidates_excluded == 1
     assert diagnostics.implausible_observations == {"excluded_label": 1}
@@ -699,6 +833,7 @@ def test_notebook_with_no_parseable_code_returns_empty_failed_result(tmp_path: P
         "score_observations": [],
         "score_candidates_seen": 0,
         "score_candidates_excluded": 0,
+        "style_markup_stripped_cells": 0,
         "dataset_paths": [],
         "parse_status": "failed",
     }

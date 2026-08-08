@@ -8,6 +8,10 @@ from pydantic import BaseModel, Field, model_validator
 MIN_LEADERBOARD_MATCH_FRACTION = 0.60
 ScoreSplit = Literal["cv", "lb", "unknown"]
 OptimizationDirection = Literal["maximize", "minimize"]
+MetricCanonicalSource = Literal["alias", "competition_hint", "none"]
+CvLbOptimizationDirection = Literal[
+    "maximize", "minimize", "higher_is_better", "lower_is_better"
+]
 
 
 class CodeObservation(BaseModel):
@@ -31,6 +35,7 @@ class ScoreObservation(BaseModel):
     value_raw: str
     metric_raw: str | None = None
     metric_canonical: str | None = None
+    metric_canonical_source: MetricCanonicalSource = "none"
     locator: str
     raw_text: str
     source: Literal["markdown", "code", "code_string", "title", "ref"]
@@ -105,6 +110,7 @@ class NotebookFacts(BaseModel):
     score_observations: list[ScoreObservation] = Field(default_factory=list)
     score_candidates_seen: int = 0
     score_candidates_excluded: int = 0
+    style_markup_stripped_cells: int = 0
     dataset_paths: list[str] = Field(default_factory=list)
 
     parse_status: Literal["ok", "partial", "failed"]
@@ -296,7 +302,7 @@ class CvLbPair(BaseModel):
     metric_raw: str | None = None
     metric_canonical: str | None = None
     metric_match: Literal["exact", "assumed"] = "exact"
-    optimization_direction: OptimizationDirection | None = None
+    optimization_direction: CvLbOptimizationDirection | None = None
     cv_score: float | None = None
     lb_score: float | None = None
     cv_observation_ids: list[str] = Field(default_factory=list)
@@ -350,6 +356,9 @@ class ScoreDiagnostics(BaseModel):
     observations_with_raw_metric: int = 0
     observations_with_canonical_metric: int = 0
     observations_without_canonical_metric: int = 0
+    canonical_by_alias: int = 0
+    canonical_by_competition_hint: int = 0
+    style_markup_stripped_cells: int = 0
     title_or_ref_observations: int = 0
     candidates_seen: int = 0
     candidates_excluded: int = 0

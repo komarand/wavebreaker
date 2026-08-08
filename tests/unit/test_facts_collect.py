@@ -58,7 +58,14 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
         lambda slug, limit: calls.append("list_notebooks") or records,
     )
     monkeypatch.setattr(collect, "pull_notebook", _fake_pull)
-    monkeypatch.setattr(collect, "extract_observations", lambda path, **kwargs: _observations())
+    monkeypatch.setattr(
+        collect,
+        "extract_observations",
+        lambda path, **kwargs: {
+            **_observations(),
+            "style_markup_stripped_cells": 1,
+        },
+    )
     monkeypatch.setattr(collect, "ast_fingerprint", lambda path: "a" * 64)
     real_assign = collect.assign_lineage_clusters
 
@@ -143,6 +150,7 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
     assert facts.discussion_collection_status == "collected"
     assert facts.cv_lb_diagnostics.notebooks_total == 2
     assert facts.cv_lb_diagnostics.notebooks_with_both == 2
+    assert facts.score_diagnostics.style_markup_stripped_cells == 2
     assert [pair.notebook_ref for pair in facts.implausible_gap_pairs] == [
         "author/one"
     ]

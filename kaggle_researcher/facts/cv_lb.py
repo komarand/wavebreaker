@@ -10,6 +10,7 @@ from kaggle_researcher.facts.models import (
     CvLbDiagnostics,
     CvLbPair,
     LeaderboardMatch,
+    MetricCanonicalSource,
     NotebookFacts,
     OptimizationDirection,
     PublicLeaderboard,
@@ -54,6 +55,7 @@ _METRIC_CONTEXT_TOKENS = frozenset(
 class _Representative:
     value: float
     metric_canonical: str | None
+    metric_canonical_source: MetricCanonicalSource
     metric_raw: str | None
     direction: OptimizationDirection | None
     observation_ids: tuple[str, ...]
@@ -462,7 +464,7 @@ def _pair_notebook(
             metric_raw=cv_side.metric_raw or lb_side.metric_raw,
             metric_canonical=metric_canonical,
             metric_match=metric_match,
-            optimization_direction=direction,
+            optimization_direction=_cv_lb_optimization_direction(direction),
             cv_score=cv_side.value,
             lb_score=lb_side.value,
             cv_observation_ids=list(cv_side.observation_ids),
@@ -552,6 +554,17 @@ def _represent_observations(
         ),
         None,
     )
+    canonical_sources = {
+        observation.metric_canonical_source
+        for observation in ordered
+        if observation.metric_canonical is not None
+    }
+    if "alias" in canonical_sources:
+        metric_canonical_source: MetricCanonicalSource = "alias"
+    elif canonical_sources == {"competition_hint"}:
+        metric_canonical_source = "competition_hint"
+    else:
+        metric_canonical_source = "none"
     metric_raw = next(
         iter(sorted({observation.metric_raw for observation in ordered if observation.metric_raw})),
         None,
@@ -588,6 +601,7 @@ def _represent_observations(
     return _Representative(
         value=selected_value,
         metric_canonical=metric_canonical,
+        metric_canonical_source=metric_canonical_source,
         metric_raw=metric_raw,
         direction=direction,
         observation_ids=tuple(
@@ -622,6 +636,7 @@ def _legacy_cv_representative(
     return _Representative(
         value=value,
         metric_canonical=canonicalize_metric_label(metric),
+        metric_canonical_source="none",
         metric_raw=metric,
         direction=metric_optimization_direction(metric or competition_metric_name),
         observation_ids=(),
@@ -641,6 +656,7 @@ def _api_lb_representative(
     return _Representative(
         value=public_score,
         metric_canonical=canonicalize_metric_label(competition_metric_name),
+        metric_canonical_source="none",
         metric_raw=competition_metric_name,
         direction=metric_optimization_direction(competition_metric_name),
         observation_ids=(),
@@ -665,7 +681,14 @@ def _match_groups(
         key=str,
     )
     if exact_keys:
-        return [(cv_groups[key], lb_groups[key], "exact") for key in exact_keys], None
+        return [
+            (
+                cv_groups[key],
+                lb_groups[key],
+                _metric_match_status(cv_groups[key], lb_groups[key]),
+            )
+            for key in exact_keys
+        ], None
 
     if len(cv_groups) == 1 and len(lb_groups) == 1:
         cv_side = next(iter(cv_groups.values()))
@@ -673,11 +696,23 @@ def _match_groups(
         if cv_side.metric_canonical is None or lb_side.metric_canonical is None:
             return [(cv_side, lb_side, "assumed")], None
         if cv_side.metric_canonical == lb_side.metric_canonical:
-            return [(cv_side, lb_side, "exact")], None
+            return [(cv_side, lb_side, _metric_match_status(cv_side, lb_side))], None
         return [], "metric_mismatch"
     if len(cv_groups) > 1 or len(lb_groups) > 1:
         return [], "ambiguous_metric"
     return [], "metric_mismatch"
+
+
+def _metric_match_status(
+    cv_side: _Representative,
+    lb_side: _Representative,
+) -> Literal["exact", "assumed"]:
+    if (
+        cv_side.metric_canonical_source == "competition_hint"
+        and lb_side.metric_canonical_source == "competition_hint"
+    ):
+        return "assumed"
+    return "exact"
 
 
 def _scales_are_compatible(
@@ -732,6 +767,16 @@ def _resolve_direction(
     if len(directions) > 1:
         return None
     return metric_optimization_direction(metric_name)
+
+
+def _cv_lb_optimization_direction(
+    direction: OptimizationDirection | None,
+) -> Literal["higher_is_better", "lower_is_better"] | None:
+    if direction == "maximize":
+        return "higher_is_better"
+    if direction == "minimize":
+        return "lower_is_better"
+    return None
 
 
 def _observation_metric_key(
