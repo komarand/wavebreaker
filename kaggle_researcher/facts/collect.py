@@ -14,6 +14,7 @@ from kaggle_researcher.config import (
     get_max_similar_verifications,
     get_notebook_concurrency,
 )
+from kaggle_researcher.facts.code_aggregates import compute_code_aggregates
 from kaggle_researcher.facts.competition import fetch_competition_metadata
 from kaggle_researcher.facts.competition_leaderboard import (
     compute_leaderboard_shape,
@@ -49,6 +50,7 @@ from kaggle_researcher.facts.notebook_ast import (
     diagnose_scores,
     extract_observations,
     extract_score_observations,
+    metric_optimization_direction,
     recanonicalize_score_observations,
 )
 from kaggle_researcher.facts.notebooks import (
@@ -126,6 +128,10 @@ def collect_facts(
         notebooks = assign_lineage_clusters(notebooks)
     except Exception as exc:
         collection_errors.append(_stage_error("notebook lineage clustering", exc))
+    code_aggregates = compute_code_aggregates(
+        notebooks,
+        optimization_direction=metric_optimization_direction(metadata.metric_name),
+    )
     dataset_references = aggregate_dataset_references(notebooks)
 
     try:
@@ -260,6 +266,7 @@ def collect_facts(
         metadata=metadata,
         files=files,
         notebooks=notebooks,
+        code_aggregates=code_aggregates,
         public_leaderboard=public_leaderboard,
         leaderboard_matches=list(leaderboard_matches.values()),
         dataset_references=dataset_references,

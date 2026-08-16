@@ -328,6 +328,17 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
         f"{match_confidences['exact']} exact, {match_confidences['partial']} partial"
     )
     print(f"lineage clusters: {len(clusters)}")
+    if facts.code_aggregates is not None:
+        model_counts = ", ".join(
+            f"{item.name} {item.cluster_count}"
+            for item in facts.code_aggregates.models
+        )
+        print(f"models by lineage cluster: {model_counts or 'none'}")
+        combinations = ", ".join(
+            f"{'+'.join(item.names)} {item.cluster_count} clusters"
+            for item in facts.code_aggregates.model_combinations
+        )
+        print(f"model combinations: {combinations or 'none'}")
     if facts.dataset_references:
         top_references = ", ".join(
             f"{item.slug} {item.cluster_count} clusters"

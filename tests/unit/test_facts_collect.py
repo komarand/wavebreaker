@@ -137,6 +137,9 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
     ]
     assert len(facts.notebooks) == 2
     assert len({item.lineage_cluster_id for item in facts.notebooks}) == 1
+    assert facts.code_aggregates is not None
+    assert facts.code_aggregates.total_clusters == 1
+    assert facts.code_aggregates.total_notebooks == 2
     assert [item.source_type for item in facts.discussions] == [
         "discussion",
         "winner_writeup",

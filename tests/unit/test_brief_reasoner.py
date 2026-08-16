@@ -64,7 +64,7 @@ async def test_happy_path_calls_pro_model_exactly_once(
     assert client.calls[0]["model"] == "test-pro-model"
     assert client.calls[0]["system_prompt"] == BRIEF_SYSTEM_PROMPT
     assert "<PACKED_BRIEF_CONTEXT>" in client.calls[0]["user_prompt"]
-    assert '<AVAILABLE_SOURCE_IDS>\n["facts"]' in client.calls[0]["user_prompt"]
+    assert '<AVAILABLE_SOURCE_IDS>\n["facts","cv_lb"]' in client.calls[0]["user_prompt"]
     assert BRIEF_PROMPT_VERSION not in client.calls[0]["system_prompt"]
     assert BRIEF_PROMPT_VERSION not in client.calls[0]["user_prompt"]
 

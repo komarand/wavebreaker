@@ -23,6 +23,30 @@ class CodeObservation(BaseModel):
     locator: str
 
 
+class CodeFamilyUsage(BaseModel):
+    name: str
+    cluster_count: int
+    notebook_count: int
+    cluster_share: float
+    typical_kwargs: dict[str, str] = Field(default_factory=dict)
+    best_public_score: float | None = None
+
+
+class ModelCombination(BaseModel):
+    names: list[str]
+    cluster_count: int
+
+
+class CodeAggregates(BaseModel):
+    total_clusters: int
+    total_notebooks: int
+    models: list[CodeFamilyUsage]
+    splitters: list[CodeFamilyUsage]
+    metrics: list[CodeFamilyUsage]
+    feature_ops: list[CodeFamilyUsage]
+    model_combinations: list[ModelCombination]
+
+
 class DeclaredCvObservation(BaseModel):
     value: float
     metric_name: str | None = None
@@ -395,6 +419,7 @@ class CompetitionFacts(BaseModel):
     metadata: CompetitionMetadata
     files: FileManifest
     notebooks: list[NotebookFacts]
+    code_aggregates: CodeAggregates | None = None
     public_leaderboard: PublicLeaderboard = Field(
         default_factory=lambda: PublicLeaderboard(
             status="unavailable",

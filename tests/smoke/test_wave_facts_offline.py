@@ -90,6 +90,8 @@ def test_wave_facts_writes_offline_checkpoint_and_cluster_summary(
     assert "public leaderboard: collected (0 entries)" in output
     assert "leaderboard matches: 0 exact, 0 partial" in output
     assert "lineage clusters: 1" in output
+    assert "models by lineage cluster: LGBMClassifier 1" in output
+    assert "model combinations: none" in output
     assert "'StratifiedGroupKFold': 1" in output
     assert "discussions: 2" in output
     assert "topics: 1" in output
@@ -105,6 +107,9 @@ def test_wave_facts_writes_offline_checkpoint_and_cluster_summary(
     assert "notebooks with LB: 2" in output
     assert "cv/lb pairs: 2" in output
     assert "  API LB: 2" in output
+    assert payload["code_aggregates"]["models"][0]["name"] == "LGBMClassifier"
+    assert payload["code_aggregates"]["models"][0]["cluster_count"] == 1
+    assert payload["code_aggregates"]["models"][0]["notebook_count"] == 2
 
 
 def test_wave_facts_writes_checkpoint_after_stage_three_failure(

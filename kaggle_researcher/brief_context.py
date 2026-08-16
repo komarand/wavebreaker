@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import statistics
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,7 +15,6 @@ from kaggle_researcher.facts.models import (
     DatasetReference,
     DiscussionFacts,
     NotebookFacts,
-    ScoreObservation,
 )
 
 FACTS_SOURCE_ID = "facts"
@@ -24,8 +22,6 @@ CV_LB_SOURCE_ID = "cv_lb"
 NOTEBOOK_AST_SOURCE_ID = "notebook_ast"
 TRUSTED_SOURCE_IDS = frozenset({FACTS_SOURCE_ID, CV_LB_SOURCE_ID, NOTEBOOK_AST_SOURCE_ID})
 TRUSTED_CATEGORIES = frozenset({"official", "cv_lb", "notebook_ast"})
-SCORE_EXAMPLES_PER_CLUSTER = 3
-RAW_TEXT_EXAMPLE_LIMIT = 160
 DATASET_REFS_IN_CONTEXT = 15
 SIMILAR_CANDIDATES_IN_CONTEXT = 10
 _CONTEXT_SEPARATOR = "\n\n"
@@ -203,9 +199,7 @@ def pack_brief_context(
 
 
 def _ordered_context_units(facts: CompetitionFacts) -> list[_ContextUnit]:
-    units = [_official_facts_unit(facts)]
-    if facts.cv_lb_pairs or facts.similar_competitions:
-        units.append(_cv_lb_unit(facts))
+    units = [_official_facts_unit(facts), _cv_lb_unit(facts)]
     if facts.dataset_references:
         units.append(_dataset_references_unit(facts.dataset_references))
     units.extend(_notebook_ast_units(facts.notebooks))
@@ -248,6 +242,11 @@ def _ordered_context_units(facts: CompetitionFacts) -> list[_ContextUnit]:
 def _official_facts_unit(facts: CompetitionFacts) -> _ContextUnit:
     payload = {
         "collection_errors": facts.collection_errors,
+        "code_aggregates": (
+            facts.code_aggregates.model_dump(mode="json")
+            if facts.code_aggregates is not None
+            else None
+        ),
         "collected_at": facts.collected_at.isoformat(),
         "competition_id": facts.competition_id,
         "files": facts.files.model_dump(mode="json"),
@@ -258,7 +257,6 @@ def _official_facts_unit(facts: CompetitionFacts) -> _ContextUnit:
             else None
         ),
         "schema_version": facts.schema_version,
-        "score_diagnostics": facts.score_diagnostics.model_dump(mode="json"),
         "similar_candidates": [
             item.model_dump(mode="json")
             for item in facts.similar_candidates[:SIMILAR_CANDIDATES_IN_CONTEXT]
@@ -328,7 +326,6 @@ def _notebook_ast_units(notebooks: list[NotebookFacts]) -> list[_ContextUnit]:
             "parse_status_counts": dict(
                 sorted(Counter(item.parse_status for item in members).items())
             ),
-            "score_observations": _score_observation_summary(members),
             "source_ids": list(notebook_source_ids),
             "splitters": _aggregate_observations(members, "splitters"),
         }
@@ -345,66 +342,6 @@ def _notebook_ast_units(notebooks: list[NotebookFacts]) -> list[_ContextUnit]:
             )
         )
     return units
-
-
-def _score_observation_summary(notebooks: list[NotebookFacts]) -> dict[str, Any]:
-    observations = [
-        (notebook.ref, observation)
-        for notebook in notebooks
-        for observation in notebook.score_observations
-        if observation.plausible
-    ]
-    by_split: dict[str, list[tuple[str, ScoreObservation]]] = {
-        split: [item for item in observations if item[1].split == split]
-        for split in ("cv", "lb", "unknown")
-    }
-    summary: dict[str, Any] = {}
-    for split in ("cv", "lb"):
-        values = [observation.value for _, observation in by_split[split]]
-        if values:
-            summary[split] = {
-                "count": len(values),
-                "median": round(statistics.median(values), 6),
-                "min": round(min(values), 6),
-                "max": round(max(values), 6),
-            }
-    summary["unknown"] = {"count": len(by_split["unknown"])}
-
-    ordered_examples = sorted(
-        observations,
-        key=lambda item: (
-            {"cv": 0, "lb": 1, "unknown": 2}[item[1].split],
-            item[0],
-            item[1].locator,
-            item[1].value,
-        ),
-    )[:SCORE_EXAMPLES_PER_CLUSTER]
-    summary["examples"] = [
-        _score_observation_example(notebook_ref, observation)
-        for notebook_ref, observation in ordered_examples
-    ]
-    return summary
-
-
-def _score_observation_example(
-    notebook_ref: str,
-    observation: ScoreObservation,
-) -> dict[str, Any]:
-    return {
-        "notebook_ref": notebook_ref,
-        "split": observation.split,
-        "value": observation.value,
-        "metric_raw": observation.metric_raw,
-        "metric_canonical": observation.metric_canonical,
-        "locator": observation.locator,
-        "raw_text": _truncate_example_text(observation.raw_text),
-    }
-
-
-def _truncate_example_text(value: str) -> str:
-    if len(value) <= RAW_TEXT_EXAMPLE_LIMIT:
-        return value
-    return f"{value[:RAW_TEXT_EXAMPLE_LIMIT]}…"
 
 
 def _aggregate_observations(

@@ -9,6 +9,8 @@ import pytest
 from kaggle_researcher import brief_context
 from kaggle_researcher.brief_context import estimated_tokens, pack_brief_context
 from kaggle_researcher.facts.models import (
+    CodeAggregates,
+    CodeFamilyUsage,
     CodeObservation,
     CompetitionFacts,
     CompetitionMetadata,
@@ -21,6 +23,7 @@ from kaggle_researcher.facts.models import (
     LeaderboardShape,
     NotebookFacts,
     PublicLeaderboard,
+    ScoreDiagnostics,
     ScoreObservation,
     SimilarCompetition,
     SimilarSearchDiagnostics,
@@ -33,20 +36,69 @@ def test_minimal_facts_pack_without_failure_and_report_missing_blocks() -> None:
 
     assert packed.competition_id == "current-comp"
     assert '<TRUSTED_OFFICIAL_FACTS source_id="facts">' in packed.text
-    assert packed.stats.included_source_ids == ["facts"]
+    assert "<TRUSTED_CV_LB" in packed.text
+    assert packed.stats.included_source_ids == ["facts", "cv_lb"]
     assert any("No notebook AST" in item for item in packed.stats.limitations)
     assert any("No winner writeups" in item for item in packed.stats.limitations)
 
 
-def test_official_metadata_is_included_at_its_reasonable_minimum_budget() -> None:
+def test_official_metadata_and_cv_lb_fit_a_reasonable_minimum_budget() -> None:
     facts = _facts()
-    official = brief_context._ordered_context_units(facts)[0].text
+    trusted = brief_context._ordered_context_units(facts)[:2]
+    trusted_text = brief_context._join_context([unit.text for unit in trusted])
 
-    packed = pack_brief_context(facts, estimated_tokens(official))
+    packed = pack_brief_context(facts, estimated_tokens(trusted_text))
 
-    assert packed.text == official
+    assert packed.text == trusted_text
     assert '"metric_name":"roc_auc"' in packed.text
+    assert '"reliability":"insufficient"' in packed.text
     assert packed.stats.estimated_tokens_used <= packed.stats.token_budget
+
+
+def test_code_aggregates_are_included_in_trusted_official_context() -> None:
+    facts = _facts()
+    facts.code_aggregates = CodeAggregates(
+        total_clusters=3,
+        total_notebooks=5,
+        models=[
+            CodeFamilyUsage(
+                name="LGBMClassifier",
+                cluster_count=2,
+                notebook_count=4,
+                cluster_share=0.6667,
+                typical_kwargs={"n_estimators": "300"},
+                best_public_score=0.81,
+            )
+        ],
+        splitters=[],
+        metrics=[],
+        feature_ops=[],
+        model_combinations=[],
+    )
+
+    packed = pack_brief_context(facts, 20_000)
+
+    assert '"code_aggregates"' in packed.text
+    assert '"name":"LGBMClassifier"' in packed.text
+    assert '"cluster_count":2' in packed.text
+    assert '"notebook_count":4' in packed.text
+
+
+def test_score_diagnostics_stay_in_facts_but_not_context_and_cv_lb_remains() -> None:
+    facts = _facts(notebooks=[_notebook("author/notebook")])
+    facts.score_diagnostics = ScoreDiagnostics(
+        observations_total=2,
+        implausible_observations={"excluded_label": 7},
+    )
+    before = facts.score_diagnostics.model_dump(mode="json")
+
+    packed = pack_brief_context(facts, 20_000)
+
+    assert facts.score_diagnostics.model_dump(mode="json") == before
+    assert '"score_diagnostics"' not in packed.text
+    assert '"score_observations"' not in packed.text
+    assert "<TRUSTED_CV_LB" in packed.text
+    assert '"cv_lb_pairs"' in packed.text
 
 
 def test_official_context_contains_shape_but_not_raw_leaderboard_entries() -> None:
@@ -144,7 +196,7 @@ def test_ast_cluster_block_precedes_discussion_text() -> None:
     assert packed.text.index("<TRUSTED_NOTEBOOK_AST") < packed.text.index("discussion body")
 
 
-def test_score_observations_are_passed_to_existing_reasoning_context() -> None:
+def test_raw_score_observations_are_not_passed_to_reasoning_context() -> None:
     notebook = _notebook("author/notebook")
     notebook.score_observations = [
         ScoreObservation(
@@ -160,8 +212,8 @@ def test_score_observations_are_passed_to_existing_reasoning_context() -> None:
 
     packed = pack_brief_context(_facts(notebooks=[notebook]), 20_000)
 
-    assert '"metric_raw":"custom wildlife score"' in packed.text
-    assert '"raw_text":"custom wildlife score: 0.8123"' in packed.text
+    assert '"score_observations"' not in packed.text
+    assert "custom wildlife score" not in packed.text
 
 
 def test_implausible_score_observations_are_not_sent_to_model_context() -> None:
@@ -183,14 +235,11 @@ def test_implausible_score_observations_are_not_sent_to_model_context() -> None:
     packed = pack_brief_context(_facts(notebooks=[notebook]), 20_000)
     ast_payload = _ast_payloads(packed.text)[0]
 
-    assert ast_payload["score_observations"] == {
-        "unknown": {"count": 0},
-        "examples": [],
-    }
+    assert "score_observations" not in ast_payload
     assert "ROC AUC: 100.0" not in packed.text
 
 
-def test_ast_score_observations_are_summarized_with_three_small_examples() -> None:
+def test_many_ast_score_observations_do_not_reach_context() -> None:
     notebook = _notebook("author/notebook")
     notebook.score_observations = [
         _score_observation(
@@ -203,53 +252,20 @@ def test_ast_score_observations_are_summarized_with_three_small_examples() -> No
 
     packed = pack_brief_context(_facts(notebooks=[notebook]), 20_000)
     ast_payload = _ast_payloads(packed.text)[0]
-    summary = ast_payload["score_observations"]
-
-    assert summary["cv"] == {
-        "count": 14,
-        "median": 0.0065,
-        "min": 0.0,
-        "max": 0.013,
-    }
-    assert summary["lb"]["count"] == 13
-    assert summary["unknown"] == {"count": 13}
-    assert len(summary["examples"]) == brief_context.SCORE_EXAMPLES_PER_CLUSTER
-    assert all(example["split"] == "cv" for example in summary["examples"])
-    assert all(
-        set(example)
-        == {
-            "notebook_ref",
-            "split",
-            "value",
-            "metric_raw",
-            "metric_canonical",
-            "locator",
-            "raw_text",
-        }
-        for example in summary["examples"]
-    )
-    assert all(
-        example["raw_text"] == "x" * brief_context.RAW_TEXT_EXAMPLE_LIMIT + "…"
-        for example in summary["examples"]
-    )
-    ast_json = json.dumps(ast_payload, ensure_ascii=False)
-    assert "observation_id" not in ast_json
-    assert "provenance" not in ast_json
+    assert "score_observations" not in ast_payload
+    assert "identity-balanced mAP" not in packed.text
+    assert "x" * 160 not in packed.text
 
 
-def test_absent_score_splits_are_not_emitted_as_zero_filled_summaries() -> None:
+def test_score_observation_key_is_absent_for_unknown_only_scores() -> None:
     notebook = _notebook("author/notebook")
     notebook.score_observations = [_score_observation(0, split="unknown")]
 
     packed = pack_brief_context(_facts(notebooks=[notebook]), 20_000)
-    summary = _ast_payloads(packed.text)[0]["score_observations"]
-
-    assert "cv" not in summary
-    assert "lb" not in summary
-    assert summary["unknown"] == {"count": 1}
+    assert "score_observations" not in _ast_payloads(packed.text)[0]
 
 
-def test_score_summary_example_selection_is_byte_deterministic() -> None:
+def test_context_without_score_observations_is_byte_deterministic() -> None:
     notebook = _notebook("author/notebook")
     notebook.score_observations = [
         _score_observation(index, split=("lb" if index % 2 else "cv"))
