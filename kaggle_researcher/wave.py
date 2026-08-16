@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from kaggle_researcher import journal
 from kaggle_researcher.brief import generate_brief
+from kaggle_researcher.brief_context import ContextPackingStats, pack_brief_context
 from kaggle_researcher.brief_schemas import CompetitionBrief
 from kaggle_researcher.brief_validate import validate_brief
 from kaggle_researcher.config import (
@@ -131,8 +132,10 @@ def _run_brief(args: argparse.Namespace) -> None:
     facts_path = output_dir / "facts.json"
     _write_model_json(facts_path, facts)
 
+    context_stats: ContextPackingStats | None = None
     try:
         settings = load_config()
+        context_stats = pack_brief_context(facts, settings.max_context_tokens).stats
         generated_brief = asyncio.run(generate_brief(facts, settings))
     except Exception as exc:
         markdown = _facts_only_brief(facts, exc)
@@ -145,8 +148,11 @@ def _run_brief(args: argparse.Namespace) -> None:
             markdown_path=markdown_path,
             docx_path=docx_path,
         )
+        if context_stats is not None:
+            _print_context_stats(context_stats)
         return
 
+    assert context_stats is not None
     brief = validate_brief(generated_brief, facts)
     brief_path = output_dir / "brief.json"
     markdown_path = output_dir / "brief.md"
@@ -160,6 +166,7 @@ def _run_brief(args: argparse.Namespace) -> None:
         markdown_path=markdown_path,
         docx_path=docx_path,
     )
+    _print_context_stats(context_stats)
     _print_claim_stats(brief)
 
 
@@ -229,6 +236,15 @@ def _print_brief_paths(
     print(f"brief markdown: {markdown_path}")
     if docx_path is not None:
         print(f"brief docx: {docx_path}")
+
+
+def _print_context_stats(stats: ContextPackingStats) -> None:
+    print(
+        f"context: {stats.discussions_included} of "
+        f"{stats.discussions_available} discussions included, "
+        f"{stats.truncated_documents} truncated, "
+        f"budget {stats.token_budget} tokens"
+    )
 
 
 def _print_claim_stats(brief: CompetitionBrief) -> None:

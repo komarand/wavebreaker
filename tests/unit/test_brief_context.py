@@ -464,6 +464,118 @@ def test_ordinary_discussions_sort_by_votes_freshness_then_topic_id() -> None:
     assert positions == sorted(positions)
 
 
+def test_host_and_two_messages_outscore_fifty_votes_within_a_bucket() -> None:
+    host = _discussion("topic-host", author_is_host=True, comment_count=2)
+    popular = _discussion("topic-popular", votes=50)
+
+    assert brief_context._discussion_sort_key(host) < (
+        brief_context._discussion_sort_key(popular)
+    )
+
+
+def test_message_and_decimal_signals_outscore_a_short_generic_topic() -> None:
+    decimals = " ".join(f"0.{index:02d}" for index in range(10, 20))
+    detailed = _discussion(
+        "topic-detailed",
+        comment_count=27,
+        text=f"Measured values: {decimals}",
+    )
+    generic = _discussion("topic-generic", comment_count=1)
+
+    assert brief_context._discussion_signal_score(detailed) > (
+        brief_context._discussion_signal_score(generic)
+    )
+
+
+def test_repeated_decimal_literal_counts_only_once() -> None:
+    repeated = _discussion("topic-repeated", text=" ".join(["0.124"] * 20))
+    single = _discussion("topic-single", text="0.124")
+
+    assert brief_context._discussion_signal_score(repeated) == (
+        brief_context._discussion_signal_score(single)
+    )
+
+
+def test_winner_writeup_bucket_precedes_higher_scoring_discussion() -> None:
+    facts = _facts(
+        discussions=[
+            _discussion(
+                "topic-detailed",
+                author_is_host=True,
+                votes=40,
+                comment_count=30,
+                text="0.11 0.22 0.33 0.44 0.55",
+            ),
+            _discussion(
+                "topic-writeup",
+                competition_id="past-comp",
+                source_type="winner_writeup",
+            ),
+        ]
+    )
+
+    packed = pack_brief_context(facts, 20_000)
+
+    assert packed.text.index('source_id="topic-writeup"') < packed.text.index(
+        'source_id="topic-detailed"'
+    )
+
+
+def test_long_discussion_is_truncated_and_reports_exact_character_counts() -> None:
+    source_text = "x" * 20_000
+    packed = pack_brief_context(
+        _facts(discussions=[_discussion("topic-long", text=source_text)]),
+        20_000,
+    )
+    dropped = len(source_text) - (brief_context.MAX_DISCUSSION_CHARS - 1)
+    note = brief_context.DISCUSSION_TRUNCATION_NOTE.format(
+        dropped=dropped,
+        total=len(source_text),
+    )
+
+    assert note in packed.text
+    assert "x" * (brief_context.MAX_DISCUSSION_CHARS + 1) not in packed.text
+    assert packed.stats.truncated_documents == 1
+    assert packed.stats.truncated_characters == dropped
+    assert (
+        "0 discussion/writeup documents were omitted whole and 1 were truncated "
+        "because of context limits."
+    ) in packed.stats.limitations
+    truncated, _ = brief_context._discussion_text_for_context(source_text)
+    assert len(truncated) <= brief_context.MAX_DISCUSSION_CHARS + len(note)
+
+
+def test_discussion_truncation_prefers_the_last_complete_paragraph() -> None:
+    first_paragraph = "a" * 6_000
+    source_text = f"{first_paragraph}\n\n{'b' * 8_000}"
+
+    truncated, dropped = brief_context._discussion_text_for_context(source_text)
+
+    assert truncated.startswith(first_paragraph)
+    assert "b" not in truncated
+    assert dropped == len(source_text) - len(first_paragraph)
+
+
+def test_short_discussion_text_is_not_changed() -> None:
+    source_text = "Short paragraph.\n\nSecond paragraph."
+
+    assert brief_context._discussion_text_for_context(source_text) == (
+        source_text,
+        0,
+    )
+
+
+def test_trusted_official_block_is_never_document_truncated() -> None:
+    facts = _facts()
+    long_title = "T" * (brief_context.MAX_DISCUSSION_CHARS + 1_000)
+    facts.metadata.title = long_title
+
+    packed = pack_brief_context(facts, 20_000)
+
+    assert long_title in packed.text
+    assert packed.stats.truncated_documents == 0
+
+
 def test_small_budget_omits_low_priority_discussion_and_accounts_for_it() -> None:
     facts = _facts(
         discussions=[
@@ -482,6 +594,9 @@ def test_small_budget_omits_low_priority_discussion_and_accounts_for_it() -> Non
     assert packed.stats.omitted_source_reasons == {"topic-low": "context_budget"}
     assert packed.stats.omitted_by_reason == {"context_budget": 1}
     assert packed.stats.truncation_applied is True
+    assert packed.stats.discussions_available == 2
+    assert packed.stats.discussions_included == 1
+    assert packed.stats.truncated_documents == 0
     assert packed.stats.omitted_current_discussions == 1
     assert any("omitted whole" in item for item in packed.stats.limitations)
     assert "x" * 600 not in packed.text
@@ -496,6 +611,9 @@ def test_sufficient_budget_does_not_add_context_note() -> None:
 
     assert "CONTEXT_NOTE:" not in packed.text
     assert packed.stats.truncation_applied is False
+    assert packed.stats.discussions_available == 1
+    assert packed.stats.discussions_included == 1
+    assert packed.stats.truncated_documents == 0
 
 
 def test_context_note_reports_all_omitted_optional_document_categories() -> None:
@@ -904,6 +1022,7 @@ def _discussion(
     text: str = "Source body.",
     is_writeup_candidate: bool = False,
     writeup_signals: list[str] | None = None,
+    comment_count: int | None = None,
 ) -> DiscussionFacts:
     return DiscussionFacts(
         topic_id=topic_id,
@@ -917,6 +1036,7 @@ def _discussion(
         text=text,
         is_writeup_candidate=is_writeup_candidate,
         writeup_signals=writeup_signals or [],
+        comment_count=comment_count,
     )
 
 

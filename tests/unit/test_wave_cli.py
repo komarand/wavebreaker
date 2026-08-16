@@ -150,7 +150,7 @@ def test_b5_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.pdf_cache_dir == "./data/pdfs"
     assert settings.max_discussions == 200
     assert settings.writeups_per_competition == 10
-    assert settings.max_context_tokens == 120_000
+    assert settings.max_context_tokens == 200_000
     assert settings.max_sample_sub_bytes == 50_000_000
     assert settings.meta_kaggle_dir is None
     assert settings.run_budget_tokens is None

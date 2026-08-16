@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -24,6 +25,15 @@ TRUSTED_SOURCE_IDS = frozenset({FACTS_SOURCE_ID, CV_LB_SOURCE_ID, NOTEBOOK_AST_S
 TRUSTED_CATEGORIES = frozenset({"official", "cv_lb", "notebook_ast"})
 DATASET_REFS_IN_CONTEXT = 15
 SIMILAR_CANDIDATES_IN_CONTEXT = 10
+MAX_DISCUSSION_CHARS = 12_000
+DISCUSSION_TRUNCATION_NOTE = "[truncated: {dropped} of {total} characters]"
+SIGNAL_WEIGHT_HOST = 4.0
+SIGNAL_WEIGHT_WRITEUP = 6.0
+SIGNAL_WEIGHT_PER_MESSAGE = 0.35
+SIGNAL_WEIGHT_PER_NUMBER = 0.20
+SIGNAL_WEIGHT_PER_LINK = 0.30
+SIGNAL_WEIGHT_VOTES = 0.10
+DECIMAL_LITERAL = re.compile(r"(?<![\w.])\d*\.\d{2,}(?![\w.])")
 _CONTEXT_SEPARATOR = "\n\n"
 _TRUSTED_CATEGORY_ORDER = ("official", "cv_lb", "notebook_ast")
 
@@ -44,6 +54,10 @@ class ContextPackingStats(BaseModel):
     omitted_by_reason: dict[str, int]
     omitted_source_reasons: dict[str, str] = Field(default_factory=dict)
     truncation_applied: bool
+    truncated_documents: int
+    truncated_characters: int
+    discussions_available: int
+    discussions_included: int
     included_current_discussions: int
     omitted_current_discussions: int
     included_writeups: int
@@ -65,6 +79,7 @@ class _ContextUnit:
     source_ids: tuple[str, ...]
     category: Literal["official", "notebook_ast", "cv_lb", "writeup", "discussion"]
     current_discussion: bool = False
+    truncated_characters: int = 0
 
 
 def estimated_tokens(text: str) -> int:
@@ -158,12 +173,22 @@ def pack_brief_context(
     omitted_current_discussions = sum(unit.current_discussion for unit in omitted_units)
     included_writeups = sum(unit.category == "writeup" for unit in included_units)
     omitted_writeups = sum(unit.category == "writeup" for unit in omitted_units)
+    included_discussion_units = [
+        unit
+        for unit in included_units
+        if unit.category in {"discussion", "writeup"}
+    ]
+    truncated_documents = sum(
+        unit.truncated_characters > 0 for unit in included_discussion_units
+    )
+    truncated_characters = sum(
+        unit.truncated_characters for unit in included_discussion_units
+    )
 
     limitations = _packing_limitations(
         facts=facts,
         omitted_units=omitted_units,
-        omitted_current_discussions=omitted_current_discussions,
-        omitted_writeups=omitted_writeups,
+        truncated_documents=truncated_documents,
     )
     stats = ContextPackingStats(
         token_budget=max_context_tokens,
@@ -176,7 +201,11 @@ def pack_brief_context(
         omitted_source_ids=omitted_source_ids,
         omitted_by_reason=omitted_by_reason,
         omitted_source_reasons=omitted_source_reasons,
-        truncation_applied=bool(omitted_units),
+        truncation_applied=bool(omitted_units or truncated_documents),
+        truncated_documents=truncated_documents,
+        truncated_characters=truncated_characters,
+        discussions_available=len(facts.discussions),
+        discussions_included=len(included_discussion_units),
         included_current_discussions=included_current_discussions,
         omitted_current_discussions=omitted_current_discussions,
         included_writeups=included_writeups,
@@ -402,6 +431,7 @@ def _untrusted_unit(
         else "similar"
     )
     writeup_signals = ",".join(discussion.writeup_signals)
+    body, truncated_characters = _discussion_text_for_context(discussion.text)
     header = (
         "<UNTRUSTED_SOURCE\n"
         f'  source_id="{escape(discussion.topic_id, quote=True)}"\n'
@@ -414,7 +444,7 @@ def _untrusted_unit(
         ">"
     )
     return _ContextUnit(
-        text=f"{header}\n{discussion.text}\n</UNTRUSTED_SOURCE>",
+        text=f"{header}\n{body}\n</UNTRUSTED_SOURCE>",
         source_ids=(discussion.topic_id,),
         category=("writeup" if is_writeup else "discussion"),
         current_discussion=(
@@ -422,7 +452,23 @@ def _untrusted_unit(
             and discussion.source_type == "discussion"
             and discussion.competition_id == current_competition_id
         ),
+        truncated_characters=truncated_characters,
     )
+
+
+def _discussion_text_for_context(text: str) -> tuple[str, int]:
+    total = len(text)
+    if total <= MAX_DISCUSSION_CHARS:
+        return text, 0
+
+    body_limit = MAX_DISCUSSION_CHARS - 1
+    boundary = text.rfind("\n\n", 0, body_limit + 1)
+    if boundary < 0:
+        boundary = text.rfind("\n", 0, body_limit + 1)
+    kept = text[: boundary if boundary >= 0 else body_limit]
+    dropped = total - len(kept)
+    note = DISCUSSION_TRUNCATION_NOTE.format(dropped=dropped, total=total)
+    return f"{kept}\n{note}", dropped
 
 
 def _is_winner_writeup(item: DiscussionFacts) -> bool:
@@ -448,6 +494,7 @@ def _writeup_sort_key(
 
 def _discussion_sort_key(item: DiscussionFacts) -> tuple[Any, ...]:
     return (
+        -_discussion_signal_score(item),
         -item.votes,
         -_datetime_timestamp(item.created_at),
         item.topic_id,
@@ -518,12 +565,32 @@ def _similar_writeup_counts(facts: CompetitionFacts) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _discussion_signal_score(item: DiscussionFacts) -> float:
+    combined_text = "\n".join(
+        [item.text, *(message.content_text for message in item.messages)]
+    )
+    decimal_count = min(len(set(DECIMAL_LITERAL.findall(combined_text))), 25)
+    link_count = min(sum(len(message.links) for message in item.messages), 10)
+    observed_message_count = (
+        item.comment_count if item.comment_count is not None else len(item.messages)
+    )
+    message_count = min(max(observed_message_count, 0), 30)
+    votes = min(max(item.votes, 0), 40)
+    return (
+        SIGNAL_WEIGHT_HOST * bool(item.author_is_host)
+        + SIGNAL_WEIGHT_WRITEUP * _is_winner_writeup(item)
+        + SIGNAL_WEIGHT_PER_MESSAGE * message_count
+        + SIGNAL_WEIGHT_PER_NUMBER * decimal_count
+        + SIGNAL_WEIGHT_PER_LINK * link_count
+        + SIGNAL_WEIGHT_VOTES * votes
+    )
+
+
 def _packing_limitations(
     *,
     facts: CompetitionFacts,
     omitted_units: list[_ContextUnit],
-    omitted_current_discussions: int,
-    omitted_writeups: int,
+    truncated_documents: int,
 ) -> list[str]:
     limitations: list[str] = []
     if facts.files.sample_submission_source == "unavailable":
@@ -564,23 +631,13 @@ def _packing_limitations(
         limitations.append("No winner writeups were collected.")
     if not current_discussion_count:
         limitations.append("No current-competition discussions were collected.")
-    if omitted_writeups:
-        limitations.append(
-            f"{omitted_writeups} winner writeups were omitted whole because of the "
-            "context budget."
-        )
-    if omitted_current_discussions:
-        limitations.append(
-            f"{omitted_current_discussions} current-competition discussions were "
-            "omitted whole because of the context budget."
-        )
-    omitted_other_discussions = sum(
-        unit.category == "discussion" and not unit.current_discussion for unit in omitted_units
+    omitted_documents = sum(
+        unit.category in {"discussion", "writeup"} for unit in omitted_units
     )
-    if omitted_other_discussions:
+    if omitted_documents or truncated_documents:
         limitations.append(
-            f"{omitted_other_discussions} other discussions were omitted whole because "
-            "of the context budget."
+            f"{omitted_documents} discussion/writeup documents were omitted whole and "
+            f"{truncated_documents} were truncated because of context limits."
         )
 
     return limitations

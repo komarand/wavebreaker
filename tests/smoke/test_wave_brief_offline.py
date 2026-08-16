@@ -123,6 +123,7 @@ def test_wave_brief_runs_offline_pipeline_and_writes_all_artifacts(
     output = capsys.readouterr().out
     assert f"brief json: {tmp_path / 'brief.json'}" in output
     assert f"brief docx: {tmp_path / 'brief.docx'}" in output
+    assert "context: 0 of 0 discussions included, 0 truncated, budget 10000 tokens" in output
     assert "claims: 1 (fact 1, claim 0, inference 0)" in output
     assert "grounding rate: 1.0 across 1 sources" in output
 

@@ -37,7 +37,7 @@ class Settings:
     pdf_cache_dir: str = "./data/pdfs"
     max_discussions: int = 200
     writeups_per_competition: int = DEFAULT_WRITEUPS_PER_COMPETITION
-    max_context_tokens: int = 120_000
+    max_context_tokens: int = 200_000
     max_sample_sub_bytes: int = DEFAULT_MAX_SAMPLE_SUB_BYTES
     max_similar_verifications: int = DEFAULT_MAX_SIMILAR_VERIFICATIONS
     meta_kaggle_dir: str | None = None
@@ -74,7 +74,7 @@ def load_config() -> Settings:
         pdf_cache_dir=os.getenv("PDF_CACHE_DIR", "./data/pdfs"),
         max_discussions=_get_positive_int_env("MAX_DISCUSSIONS", 200),
         writeups_per_competition=get_writeups_per_competition(),
-        max_context_tokens=_get_positive_int_env("MAX_CONTEXT_TOKENS", 120_000),
+        max_context_tokens=_get_positive_int_env("MAX_CONTEXT_TOKENS", 200_000),
         max_sample_sub_bytes=_get_positive_int_env(
             "MAX_SAMPLE_SUB_BYTES",
             DEFAULT_MAX_SAMPLE_SUB_BYTES,
