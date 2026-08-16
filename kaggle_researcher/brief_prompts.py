@@ -7,7 +7,7 @@ import json
 from kaggle_researcher.brief_context import CV_LB_SOURCE_ID, NOTEBOOK_AST_SOURCE_ID
 from kaggle_researcher.brief_schemas import CompetitionBrief
 
-BRIEF_PROMPT_VERSION = "2026-08-08.1"
+BRIEF_PROMPT_VERSION = "2026-08-17.1"
 
 _COMPETITION_BRIEF_SCHEMA = json.dumps(
     CompetitionBrief.model_json_schema(),
@@ -36,6 +36,8 @@ Grounding rules:
   statement without a source.
 - Prevalence is not performance. Many notebooks using an approach shows what the crowd does, not
   that the approach works; state this distinction whenever it applies.
+- kwargs_distribution describes what public notebooks contain, not what scored well. Do not
+  present these values as recommended settings unless a source states the result they produced.
 - Notebooks are grouped by lineage cluster. Forks of one baseline are one source, and cluster
   counts are supplied in the context.
 - Respect user_constraints. If a constraint is null, mark feasibility unknown rather than

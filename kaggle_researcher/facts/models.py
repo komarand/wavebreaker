@@ -23,12 +23,25 @@ class CodeObservation(BaseModel):
     locator: str
 
 
+class KwargDistribution(BaseModel):
+    key: str
+    cluster_count: int
+    median: str
+    minimum: str | None = None
+    maximum: str | None = None
+    distinct_values: int
+    is_integer: bool
+
+
 class CodeFamilyUsage(BaseModel):
     name: str
     cluster_count: int
     notebook_count: int
     cluster_share: float
-    typical_kwargs: dict[str, str] = Field(default_factory=dict)
+    kwargs_distribution: list[KwargDistribution] = Field(default_factory=list)
+    kwargs_basis: Literal["cluster_median_of_public_notebooks"] = (
+        "cluster_median_of_public_notebooks"
+    )
     best_public_score: float | None = None
 
 

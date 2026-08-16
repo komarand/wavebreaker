@@ -22,7 +22,11 @@ from kaggle_researcher.config import (
 )
 from kaggle_researcher.facts.collect import collect_facts
 from kaggle_researcher.facts.cv_lb import summarize_cv_lb
-from kaggle_researcher.facts.models import CompetitionFacts, UserConstraints
+from kaggle_researcher.facts.models import (
+    CodeAggregates,
+    CompetitionFacts,
+    UserConstraints,
+)
 from kaggle_researcher.render import render_brief, render_facts_section
 from kaggle_researcher.report.docx_generator import generate_report
 
@@ -247,6 +251,20 @@ def _print_context_stats(stats: ContextPackingStats) -> None:
     )
 
 
+def _print_model_kwargs_distributions(aggregates: CodeAggregates) -> None:
+    for family in aggregates.models[:3]:
+        for index, distribution in enumerate(family.kwargs_distribution):
+            label = family.name if index == 0 else ""
+            if distribution.minimum is not None and distribution.maximum is not None:
+                suffix = (
+                    f" ({distribution.minimum}–{distribution.maximum}, "
+                    f"{distribution.cluster_count} clusters)"
+                )
+            else:
+                suffix = f" ({distribution.cluster_count} clusters)"
+            print(f"{label:<20}{distribution.key} {distribution.median}{suffix}")
+
+
 def _print_claim_stats(brief: CompetitionBrief) -> None:
     stats = brief.claim_stats
     if stats is None:
@@ -350,6 +368,7 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
             for item in facts.code_aggregates.models
         )
         print(f"models by lineage cluster: {model_counts or 'none'}")
+        _print_model_kwargs_distributions(facts.code_aggregates)
         combinations = ", ".join(
             f"{'+'.join(item.names)} {item.cluster_count} clusters"
             for item in facts.code_aggregates.model_combinations

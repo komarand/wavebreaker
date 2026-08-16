@@ -18,6 +18,7 @@ from kaggle_researcher.facts.models import (
     DatasetReference,
     DiscussionFacts,
     FileManifest,
+    KwargDistribution,
     LeaderboardStability,
     LeaderboardEntry,
     LeaderboardShape,
@@ -66,7 +67,17 @@ def test_code_aggregates_are_included_in_trusted_official_context() -> None:
                 cluster_count=2,
                 notebook_count=4,
                 cluster_share=0.6667,
-                typical_kwargs={"n_estimators": "300"},
+                kwargs_distribution=[
+                    KwargDistribution(
+                        key="n_estimators",
+                        cluster_count=2,
+                        median="300",
+                        minimum="100",
+                        maximum="500",
+                        distinct_values=2,
+                        is_integer=True,
+                    )
+                ],
                 best_public_score=0.81,
             )
         ],
@@ -82,6 +93,9 @@ def test_code_aggregates_are_included_in_trusted_official_context() -> None:
     assert '"name":"LGBMClassifier"' in packed.text
     assert '"cluster_count":2' in packed.text
     assert '"notebook_count":4' in packed.text
+    assert '"kwargs_basis":"cluster_median_of_public_notebooks"' in packed.text
+    assert '"kwargs_distribution"' in packed.text
+    assert '"typical_kwargs"' not in packed.text
 
 
 def test_score_diagnostics_stay_in_facts_but_not_context_and_cv_lb_remains() -> None:

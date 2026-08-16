@@ -3,23 +3,25 @@ from __future__ import annotations
 import math
 import statistics
 from collections import Counter
+from decimal import Decimal
 from typing import Literal
 
 from kaggle_researcher.facts.models import (
     CodeAggregates,
     CodeFamilyUsage,
     CodeObservation,
+    KwargDistribution,
     ModelCombination,
     NotebookFacts,
     OptimizationDirection,
 )
 
 CODE_AGGREGATE_LIMIT = 25
-TYPICAL_KWARGS_LIMIT = 6
+KWARGS_DISTRIBUTION_LIMIT = 6
 MODEL_COMBINATION_LIMIT = 10
 
 _CodeField = Literal["models", "splitters", "metrics", "feature_ops"]
-_ParsedKwarg = float | bool
+_ParsedKwarg = float | bool | str
 
 
 def compute_code_aggregates(
@@ -96,10 +98,10 @@ def _family_usage(
                 cluster_count=len(clusters_by_name[name]),
                 notebook_count=len(notebooks_by_name[name]),
                 cluster_share=round(len(clusters_by_name[name]) / total_clusters, 4),
-                typical_kwargs=(
-                    _typical_kwargs(kwargs_by_name.get(name, {}))
+                kwargs_distribution=(
+                    _kwargs_distribution(kwargs_by_name.get(name, {}))
                     if field_name == "models"
-                    else {}
+                    else []
                 ),
                 best_public_score=(
                     min(scores)
@@ -113,10 +115,10 @@ def _family_usage(
     return usages
 
 
-def _typical_kwargs(
+def _kwargs_distribution(
     values_by_key: dict[str, dict[str, list[_ParsedKwarg]]],
-) -> dict[str, str]:
-    candidates: list[tuple[str, int, _ParsedKwarg]] = []
+) -> list[KwargDistribution]:
+    candidates: list[KwargDistribution] = []
     for key, values_by_cluster in values_by_key.items():
         cluster_values = [
             representative
@@ -125,45 +127,101 @@ def _typical_kwargs(
         ]
         if len(cluster_values) < 2:
             continue
-        representative = _representative_value(cluster_values)
-        if representative is not None:
-            candidates.append((key, len(cluster_values), representative))
+        candidates.append(_distribution_for_key(key, cluster_values))
 
-    candidates.sort(key=lambda item: (-item[1], item[0]))
-    return {
-        key: _format_kwarg(value)
-        for key, _, value in candidates[:TYPICAL_KWARGS_LIMIT]
-    }
+    candidates.sort(key=lambda item: (-item.cluster_count, item.key))
+    return candidates[:KWARGS_DISTRIBUTION_LIMIT]
+
+
+def _distribution_for_key(
+    key: str,
+    cluster_values: list[_ParsedKwarg],
+) -> KwargDistribution:
+    distinct_values = len({_kwarg_identity(value) for value in cluster_values})
+    if all(_is_numeric(value) for value in cluster_values):
+        numeric_values = [float(value) for value in cluster_values]
+        is_integer = all(value.is_integer() for value in numeric_values)
+        median = (
+            float(statistics.median_low(numeric_values))
+            if is_integer
+            else float(statistics.median(numeric_values))
+        )
+        return KwargDistribution(
+            key=key,
+            cluster_count=len(cluster_values),
+            median=_format_number(median, force_integer=is_integer),
+            minimum=_format_number(min(numeric_values), force_integer=is_integer),
+            maximum=_format_number(max(numeric_values), force_integer=is_integer),
+            distinct_values=distinct_values,
+            is_integer=is_integer,
+        )
+
+    representative = _mode(cluster_values)
+    return KwargDistribution(
+        key=key,
+        cluster_count=len(cluster_values),
+        median=_format_kwarg(representative),
+        distinct_values=distinct_values,
+        is_integer=False,
+    )
 
 
 def _representative_value(values: list[_ParsedKwarg]) -> _ParsedKwarg | None:
     if not values:
         return None
-    if all(isinstance(value, bool) for value in values):
-        counts = Counter(values)
-        return sorted(counts, key=lambda value: (-counts[value], str(value)))[0]
-    if all(isinstance(value, float) for value in values):
-        return statistics.median(values)
-    return None
+    if all(_is_numeric(value) for value in values):
+        numeric_values = [float(value) for value in values]
+        if all(value.is_integer() for value in numeric_values):
+            return float(statistics.median_low(numeric_values))
+        return float(statistics.median(numeric_values))
+    return _mode(values)
 
 
 def _parse_kwarg(raw_value: str) -> _ParsedKwarg | None:
-    normalized = raw_value.strip().casefold()
+    stripped = raw_value.strip()
+    normalized = stripped.casefold()
     if normalized == "true":
         return True
     if normalized == "false":
         return False
     try:
-        value = float(raw_value)
+        value = float(stripped)
     except (TypeError, ValueError):
-        return None
+        return stripped if stripped and stripped != "<expr>" else None
     return value if math.isfinite(value) else None
 
 
 def _format_kwarg(value: _ParsedKwarg) -> str:
     if isinstance(value, bool):
         return str(value)
-    return format(value, ".12g")
+    if isinstance(value, float):
+        return _format_number(value, force_integer=value.is_integer())
+    return value
+
+
+def _format_number(value: float, *, force_integer: bool) -> str:
+    if force_integer:
+        return str(int(value))
+    if value == 0:
+        return "0"
+    formatted = format(Decimal(format(value, ".12g")), "f")
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+    return formatted
+
+
+def _is_numeric(value: _ParsedKwarg) -> bool:
+    return isinstance(value, float)
+
+
+def _kwarg_identity(value: _ParsedKwarg) -> tuple[str, str]:
+    return type(value).__name__, _format_kwarg(value)
+
+
+def _mode(values: list[_ParsedKwarg]) -> _ParsedKwarg:
+    counts = Counter(_kwarg_identity(value) for value in values)
+    winner = min(counts, key=lambda identity: (-counts[identity], identity))
+    return next(value for value in values if _kwarg_identity(value) == winner)
 
 
 def _model_combinations(notebooks: list[NotebookFacts]) -> list[ModelCombination]:
