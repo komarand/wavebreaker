@@ -11,6 +11,12 @@ from kaggle_researcher.facts.models import CompetitionFacts, LeaderboardStabilit
 from kaggle_researcher.research_scout_schemas import EdaTask, ResearchHypothesis
 
 NO_SUPPORTED_FINDINGS = "No supported findings."
+EVIDENCE_STRENGTH_LABELS = {
+    "measured_with_protocol": "measured",
+    "reported_score": "reported",
+    "prevalence": "prevalence",
+    "inference": "inference",
+}
 
 
 def render_facts_section(facts: CompetitionFacts) -> str:
@@ -110,7 +116,8 @@ def _render_claim_section(heading: str, claims: list[Claim]) -> str:
         return "\n".join(lines)
     for claim in claims:
         lines.append(
-            f"- **{claim.claim_id}** ({claim.kind}): {claim.text} "
+            f"- **{claim.claim_id}** ({claim.kind}) "
+            f"[{EVIDENCE_STRENGTH_LABELS[claim.evidence_strength]}]: {claim.text} "
             f"{_bracketed_ids(claim.source_ids)}"
         )
     return "\n".join(lines)
@@ -156,6 +163,8 @@ def _render_hypothesis(hypothesis: ResearchHypothesis) -> list[str]:
         f"confidence={hypothesis.confidence}): {hypothesis.claim} "
         f"{_bracketed_ids(hypothesis.supporting_source_ids)}",
         f"  - Почему важно: {hypothesis.why_it_matters}",
+        f"  - Критерий успеха: {hypothesis.success_condition}",
+        f"  - Критерий провала: {hypothesis.failure_condition}",
     ]
     if hypothesis.how_to_verify:
         lines.append(f"  - Как проверить: {_format_sequence(hypothesis.how_to_verify)}")

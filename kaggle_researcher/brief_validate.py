@@ -8,6 +8,7 @@ from kaggle_researcher.brief_context import CV_LB_SOURCE_ID, TRUSTED_SOURCE_IDS
 from kaggle_researcher.brief_schemas import Claim, ClaimStats, CompetitionBrief
 from kaggle_researcher.facts.cv_lb import summarize_cv_lb
 from kaggle_researcher.facts.models import CompetitionFacts
+from kaggle_researcher.research_scout_schemas import ResearchHypothesis
 
 CLAIM_SECTIONS = (
     "validation",
@@ -15,6 +16,37 @@ CLAIM_SECTIONS = (
     "leakage_risks",
     "what_works",
     "time_wasters",
+)
+EVIDENCE_STRENGTHS = (
+    "measured_with_protocol",
+    "reported_score",
+    "prevalence",
+    "inference",
+)
+OBJECTIVE_WORDS = frozenset(
+    {
+        "medal",
+        "medals",
+        "gold",
+        "silver",
+        "bronze",
+        "top-10",
+        "top 10",
+        "win",
+        "winning",
+    }
+)
+ACCEPTANCE_NUMBER_LITERAL = re.compile(
+    r"(?<![\w.])[-+]?(?:\d+(?:\.\d+)?|\.\d+)(?![\w.])"
+)
+_OBJECTIVE_PATTERN = re.compile(
+    r"(?<!\w)(?:"
+    + "|".join(
+        re.escape(word)
+        for word in sorted(OBJECTIVE_WORDS, key=lambda value: (-len(value), value))
+    )
+    + r")(?!\w)",
+    re.IGNORECASE,
 )
 _NUMBER_PATTERN = re.compile(
     r"(?<![\w.])[-+]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)" r"(?:[eE][-+]?\d+)?(?!\w)"
@@ -61,6 +93,11 @@ def validate_brief(
                 continue
 
             validated_claim = claim.model_copy(update={"source_ids": retained_source_ids})
+            validated_claim, evidence_limitation = _claim_with_consistent_evidence(
+                validated_claim
+            )
+            if evidence_limitation is not None:
+                limitations.append(evidence_limitation)
             if validated_claim.kind == "fact" and set(retained_source_ids) <= discussion_source_ids:
                 validated_claim = validated_claim.model_copy(update={"kind": "claim"})
                 limitations.append(
@@ -87,10 +124,25 @@ def validate_brief(
             validated_claims.append(validated_claim)
         validated_sections[section_name] = validated_claims
 
+    validated_hypotheses, hypotheses_dropped_unverifiable = _verifiable_hypotheses(
+        brief.hypotheses,
+        unknowns=unknowns,
+        limitations=limitations,
+    )
+
     thesis_support = [
         claim_id for claim_id in brief.thesis_support if claim_id not in removed_claim_ids
     ]
     thesis = brief.thesis
+    if (
+        facts.user_constraints.objective is None
+        and thesis.strip()
+        and _OBJECTIVE_PATTERN.search(thesis)
+    ):
+        limitations.append(
+            "Thesis names a competition objective that user_constraints.objective "
+            "does not specify."
+        )
     validated_claims_by_id = {
         claim.claim_id: claim
         for section_name in CLAIM_SECTIONS
@@ -139,15 +191,29 @@ def validate_brief(
         {
             "thesis": thesis,
             "thesis_support": thesis_support,
+            "hypotheses": validated_hypotheses,
             "unknowns": unknowns,
             "limitations": limitations,
         }
     )
     validated = CompetitionBrief.model_validate(payload)
-    return validated.model_copy(update={"claim_stats": _claim_stats(validated)})
+    return validated.model_copy(
+        update={
+            "claim_stats": _claim_stats(
+                validated,
+                hypotheses_total=len(brief.hypotheses),
+                hypotheses_dropped_unverifiable=hypotheses_dropped_unverifiable,
+            )
+        }
+    )
 
 
-def _claim_stats(brief: CompetitionBrief) -> ClaimStats:
+def _claim_stats(
+    brief: CompetitionBrief,
+    *,
+    hypotheses_total: int,
+    hypotheses_dropped_unverifiable: int,
+) -> ClaimStats:
     claims = [
         claim
         for section_name in CLAIM_SECTIONS
@@ -156,6 +222,10 @@ def _claim_stats(brief: CompetitionBrief) -> ClaimStats:
     kind_counts = {
         kind: sum(claim.kind == kind for claim in claims)
         for kind in ("fact", "claim", "inference")
+    }
+    evidence_counts = {
+        strength: sum(claim.evidence_strength == strength for claim in claims)
+        for strength in EVIDENCE_STRENGTHS
     }
     grounded = sum(bool(claim.source_ids) for claim in claims)
     total = len(claims)
@@ -174,7 +244,65 @@ def _claim_stats(brief: CompetitionBrief) -> ClaimStats:
                 for source_id in claim.source_ids
             }
         ),
+        by_evidence_strength=evidence_counts,
+        hypotheses_total=hypotheses_total,
+        hypotheses_dropped_unverifiable=hypotheses_dropped_unverifiable,
     )
+
+
+def _claim_with_consistent_evidence(claim: Claim) -> tuple[Claim, str | None]:
+    fact_mismatch = claim.kind == "fact" and claim.evidence_strength not in {
+        "measured_with_protocol",
+        "prevalence",
+    }
+    inference_mismatch = (
+        claim.kind == "inference" and claim.evidence_strength != "inference"
+    )
+    if not fact_mismatch and not inference_mismatch:
+        return claim, None
+    return (
+        claim.model_copy(update={"kind": "claim"}),
+        f"Claim {claim.claim_id} was downgraded to claim because kind={claim.kind!r} "
+        f"is inconsistent with evidence_strength={claim.evidence_strength!r}.",
+    )
+
+
+def _verifiable_hypotheses(
+    hypotheses: list[ResearchHypothesis],
+    *,
+    unknowns: list[str],
+    limitations: list[str],
+) -> tuple[list[ResearchHypothesis], int]:
+    retained: list[ResearchHypothesis] = []
+    dropped = 0
+    for hypothesis in hypotheses:
+        missing_fields = [
+            field_name
+            for field_name in ("success_condition", "failure_condition")
+            if not (getattr(hypothesis, field_name) or "").strip()
+        ]
+        if missing_fields:
+            dropped += 1
+            unknowns.append(f"unverifiable hypothesis: {hypothesis.claim}")
+            limitations.append(
+                f"Hypothesis {hypothesis.id} was moved to unknowns because "
+                f"{', '.join(missing_fields)} is missing."
+            )
+            continue
+
+        acceptance_text = (
+            f"{hypothesis.success_condition}\n{hypothesis.failure_condition}"
+        )
+        if not ACCEPTANCE_NUMBER_LITERAL.search(acceptance_text):
+            dropped += 1
+            unknowns.append(f"unverifiable hypothesis: {hypothesis.claim}")
+            limitations.append(
+                f"Hypothesis {hypothesis.id} was moved to unknowns because of "
+                "non-quantitative acceptance criteria."
+            )
+            continue
+        retained.append(hypothesis)
+    return retained, dropped
 
 
 def _valid_source_ids(facts: CompetitionFacts) -> set[str]:

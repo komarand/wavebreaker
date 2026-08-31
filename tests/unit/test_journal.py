@@ -111,6 +111,7 @@ def test_current_brief_schema_uses_first_validation_claim_as_recommendation() ->
                     "text": "Use GroupKFold by customer_id.",
                     "source_ids": ["facts"],
                     "kind": "claim",
+                    "evidence_strength": "reported_score",
                 }
             ]
         },

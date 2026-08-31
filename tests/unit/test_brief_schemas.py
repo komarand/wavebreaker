@@ -29,6 +29,9 @@ def test_claim_accepts_all_declared_kinds(kind: str) -> None:
         text="Supported statement.",
         source_ids=[],
         kind=kind,
+        evidence_strength=(
+            "inference" if kind == "inference" else "measured_with_protocol"
+        ),
     )
 
     assert claim.kind == kind
@@ -42,6 +45,17 @@ def test_claim_rejects_unknown_kind() -> None:
             text="Unsupported kind.",
             source_ids=["facts"],
             kind="opinion",
+            evidence_strength="reported_score",
+        )
+
+
+def test_claim_requires_explicit_evidence_strength() -> None:
+    with pytest.raises(ValidationError, match="evidence_strength"):
+        Claim(
+            claim_id="claim_missing_strength",
+            text="A source-backed statement.",
+            source_ids=["facts"],
+            kind="claim",
         )
 
 
@@ -53,6 +67,7 @@ def test_claim_rejects_unstable_or_blank_identifier(claim_id: str) -> None:
             text="Statement.",
             source_ids=["facts"],
             kind="fact",
+            evidence_strength="measured_with_protocol",
         )
 
 
@@ -69,6 +84,14 @@ def test_competition_brief_round_trips_through_json() -> None:
             ungrounded=0,
             grounding_rate=1.0,
             distinct_sources=3,
+            by_evidence_strength={
+                "measured_with_protocol": 1,
+                "reported_score": 0,
+                "prevalence": 1,
+                "inference": 1,
+            },
+            hypotheses_total=1,
+            hypotheses_dropped_unverifiable=0,
         ),
         thesis="Validation design should drive the initial strategy.",
         thesis_support=["claim_validation", "claim_entities"],
@@ -78,6 +101,7 @@ def test_competition_brief_round_trips_through_json() -> None:
                 text="Grouped validation appears in the strongest notebook lineage.",
                 source_ids=["author/notebook"],
                 kind="fact",
+                evidence_strength="measured_with_protocol",
             )
         ],
         metric_notes=[
@@ -86,6 +110,7 @@ def test_competition_brief_round_trips_through_json() -> None:
                 text="Metric behavior should be verified on real predictions.",
                 source_ids=["facts"],
                 kind="inference",
+                evidence_strength="inference",
             )
         ],
         leakage_risks=[],
@@ -95,6 +120,7 @@ def test_competition_brief_round_trips_through_json() -> None:
                 text="Entity aggregates are repeatedly discussed.",
                 source_ids=["topic-101"],
                 kind="claim",
+                evidence_strength="prevalence",
             )
         ],
         time_wasters=[],
@@ -251,6 +277,7 @@ def _claim(claim_id: str, source_ids: list[str]) -> Claim:
         text="Grounded statement.",
         source_ids=source_ids,
         kind="fact",
+        evidence_strength="measured_with_protocol",
     )
 
 

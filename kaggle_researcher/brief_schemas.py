@@ -12,6 +12,12 @@ class Claim(BaseModel):
     text: str
     source_ids: list[str]
     kind: Literal["fact", "claim", "inference"]
+    evidence_strength: Literal[
+        "measured_with_protocol",
+        "reported_score",
+        "prevalence",
+        "inference",
+    ]
 
 
 class ClaimStats(BaseModel):
@@ -23,6 +29,9 @@ class ClaimStats(BaseModel):
     ungrounded: int
     grounding_rate: float
     distinct_sources: int
+    by_evidence_strength: dict[str, int]
+    hypotheses_total: int
+    hypotheses_dropped_unverifiable: int
 
 
 class CompetitionBrief(BaseModel):

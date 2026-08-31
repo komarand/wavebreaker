@@ -58,7 +58,6 @@ def build_parser() -> argparse.ArgumentParser:
     brief_parser.add_argument(
         "--objective",
         choices=OBJECTIVES,
-        default="medal",
         help="Primary competition objective.",
     )
     brief_parser.add_argument(
@@ -276,6 +275,13 @@ def _print_claim_stats(brief: CompetitionBrief) -> None:
     print(
         f"grounding rate: {stats.grounding_rate} across "
         f"{stats.distinct_sources} sources"
+    )
+    print(
+        "evidence: "
+        f"measured {stats.by_evidence_strength.get('measured_with_protocol', 0)}, "
+        f"reported {stats.by_evidence_strength.get('reported_score', 0)}, "
+        f"prevalence {stats.by_evidence_strength.get('prevalence', 0)}, "
+        f"inference {stats.by_evidence_strength.get('inference', 0)}"
     )
 
 

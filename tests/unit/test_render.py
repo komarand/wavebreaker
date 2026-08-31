@@ -96,13 +96,13 @@ def test_every_claim_renders_source_ids_as_a_bracketed_list() -> None:
     markdown = render.render_brief(_brief(), _facts())
 
     assert (
-        "**claim_validation** (fact): Grouped validation appears in notebook evidence. "
+        "**claim_validation** (fact) [measured]: Grouped validation appears in notebook evidence. "
         "[facts, author/fork-1]"
     ) in markdown
-    assert "**claim_metric** (inference): Verify metric behavior. [facts]" in markdown
-    assert "**claim_leakage** (claim): Audit entity overlap. [topic-101]" in markdown
-    assert "**claim_works** (claim): A common approach is discussed. [topic-101]" in markdown
-    assert "**claim_waste** (inference): Avoid unsupported tuning. [facts]" in markdown
+    assert "**claim_metric** (inference) [inference]: Verify metric behavior. [facts]" in markdown
+    assert "**claim_leakage** (claim) [reported]: Audit entity overlap. [topic-101]" in markdown
+    assert "**claim_works** (claim) [prevalence]: A common approach is discussed. [topic-101]" in markdown
+    assert "**claim_waste** (inference) [inference]: Avoid unsupported tuning. [facts]" in markdown
 
 
 def test_empty_sections_have_an_explicit_no_supported_findings_line() -> None:
@@ -137,6 +137,8 @@ def test_hypotheses_and_eda_tasks_render_in_data_checks_section() -> None:
     assert "### Гипотезы" in section
     assert "**val_001** (P0, validation, confidence=medium)" in section
     assert "[facts]" in section
+    assert "Критерий успеха: OOF improves by at least 0.003 on 3 seeds." in section
+    assert "Критерий провала: OOF improves by less than 0.003 on 3 seeds." in section
     assert "### EDA-задачи" in section
     assert "**eda_val_001** (P0, validation_analyzer)" in section
     assert "[val_001]" in section
@@ -193,20 +195,44 @@ def _brief(**overrides) -> CompetitionBrief:
                 "Grouped validation appears in notebook evidence.",
                 ["facts", "author/fork-1"],
                 "fact",
+                "measured_with_protocol",
             )
         ],
-        "metric_notes": [_claim("claim_metric", "Verify metric behavior.", ["facts"], "inference")],
-        "leakage_risks": [_claim("claim_leakage", "Audit entity overlap.", ["topic-101"], "claim")],
+        "metric_notes": [
+            _claim(
+                "claim_metric",
+                "Verify metric behavior.",
+                ["facts"],
+                "inference",
+                "inference",
+            )
+        ],
+        "leakage_risks": [
+            _claim(
+                "claim_leakage",
+                "Audit entity overlap.",
+                ["topic-101"],
+                "claim",
+                "reported_score",
+            )
+        ],
         "what_works": [
             _claim(
                 "claim_works",
                 "A common approach is discussed.",
                 ["topic-101"],
                 "claim",
+                "prevalence",
             )
         ],
         "time_wasters": [
-            _claim("claim_waste", "Avoid unsupported tuning.", ["facts"], "inference")
+            _claim(
+                "claim_waste",
+                "Avoid unsupported tuning.",
+                ["facts"],
+                "inference",
+                "inference",
+            )
         ],
         "hypotheses": [_hypothesis()],
         "eda_tasks": [_eda_task()],
@@ -223,12 +249,14 @@ def _claim(
     text: str,
     source_ids: list[str],
     kind: str,
+    evidence_strength: str,
 ) -> Claim:
     return Claim(
         claim_id=claim_id,
         text=text,
         source_ids=source_ids,
         kind=kind,
+        evidence_strength=evidence_strength,
     )
 
 
@@ -372,6 +400,8 @@ def _hypothesis() -> ResearchHypothesis:
         provenance=["heuristic", "not_verified_on_data"],
         supporting_source_ids=["facts"],
         confidence="medium",
+        success_condition="OOF improves by at least 0.003 on 3 seeds.",
+        failure_condition="OOF improves by less than 0.003 on 3 seeds.",
     )
 
 

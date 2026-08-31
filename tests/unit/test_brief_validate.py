@@ -210,7 +210,7 @@ def test_claim_stats_describe_only_final_validated_claims() -> None:
         ],
         leakage_risks=[
             _claim("claim_leakage", ["author/notebook"]).model_copy(
-                update={"kind": "inference"}
+                update={"kind": "inference", "evidence_strength": "inference"}
             )
         ],
         what_works=[invalid],
@@ -229,6 +229,14 @@ def test_claim_stats_describe_only_final_validated_claims() -> None:
         "ungrounded": 0,
         "grounding_rate": 1.0,
         "distinct_sources": 3,
+        "by_evidence_strength": {
+            "measured_with_protocol": 3,
+            "reported_score": 0,
+            "prevalence": 0,
+            "inference": 1,
+        },
+        "hypotheses_total": 0,
+        "hypotheses_dropped_unverifiable": 0,
     }
     assert validated.what_works == []
     assert "unsupported: Grounded claim text." in validated.unknowns
@@ -250,6 +258,7 @@ def test_empty_validated_brief_has_zero_grounding_rate() -> None:
     assert validated.claim_stats.ungrounded == 0
     assert validated.claim_stats.grounding_rate == 0.0
     assert validated.claim_stats.distinct_sources == 0
+    assert sum(validated.claim_stats.by_evidence_strength.values()) == 0
     assert validated.limitations == original.limitations
 
 
@@ -445,6 +454,154 @@ def test_hypotheses_and_eda_tasks_remain_pydantic_valid_and_unchanged() -> None:
     assert isinstance(validated.eda_tasks[0], EdaTask)
 
 
+def test_reported_score_fact_is_downgraded_without_rewriting_text() -> None:
+    claim = _claim(
+        "claim_reported",
+        ["facts"],
+        text="A notebook reports LB 0.805.",
+        evidence_strength="reported_score",
+    )
+
+    validated = brief_validate.validate_brief(
+        _brief(validation=[claim], thesis_support=[claim.claim_id]),
+        _facts(),
+    )
+
+    result = validated.validation[0]
+    assert result.kind == "claim"
+    assert result.text == claim.text
+    assert result.evidence_strength == "reported_score"
+    assert any(
+        "claim_reported" in item and "evidence_strength='reported_score'" in item
+        for item in validated.limitations
+    )
+
+
+def test_inference_with_prevalence_evidence_is_downgraded() -> None:
+    claim = _claim(
+        "claim_mismatch",
+        ["facts"],
+        evidence_strength="prevalence",
+    ).model_copy(update={"kind": "inference"})
+
+    validated = brief_validate.validate_brief(
+        _brief(validation=[claim], thesis_support=[claim.claim_id]),
+        _facts(),
+    )
+
+    assert validated.validation[0].kind == "claim"
+    assert validated.validation[0].evidence_strength == "prevalence"
+
+
+def test_claim_stats_evidence_strength_counts_sum_to_total() -> None:
+    claims = [
+        _claim("claim_measured", ["facts"]),
+        _claim(
+            "claim_reported",
+            ["facts"],
+            evidence_strength="reported_score",
+        ).model_copy(update={"kind": "claim"}),
+        _claim(
+            "claim_prevalence",
+            ["facts"],
+            evidence_strength="prevalence",
+        ),
+        _claim(
+            "claim_inference",
+            ["facts"],
+            evidence_strength="inference",
+        ).model_copy(update={"kind": "inference"}),
+    ]
+
+    validated = brief_validate.validate_brief(
+        _brief(validation=claims, thesis_support=["claim_measured"]),
+        _facts(),
+    )
+
+    assert validated.claim_stats is not None
+    assert sum(validated.claim_stats.by_evidence_strength.values()) == (
+        validated.claim_stats.total
+    )
+
+
+def test_hypothesis_missing_success_condition_moves_to_unknowns() -> None:
+    hypothesis = _hypothesis().model_copy(update={"success_condition": " "})
+
+    validated = brief_validate.validate_brief(
+        _brief(hypotheses=[hypothesis]),
+        _facts(),
+    )
+
+    assert validated.hypotheses == []
+    assert f"unverifiable hypothesis: {hypothesis.claim}" in validated.unknowns
+    assert any(
+        hypothesis.id in item and "success_condition" in item
+        for item in validated.limitations
+    )
+    assert validated.claim_stats is not None
+    assert validated.claim_stats.hypotheses_total == 1
+    assert validated.claim_stats.hypotheses_dropped_unverifiable == 1
+
+
+def test_nonquantitative_hypothesis_moves_to_unknowns() -> None:
+    hypothesis = _hypothesis().model_copy(
+        update={
+            "success_condition": "Improves CV.",
+            "failure_condition": "Does not improve CV.",
+        }
+    )
+
+    validated = brief_validate.validate_brief(
+        _brief(hypotheses=[hypothesis]),
+        _facts(),
+    )
+
+    assert validated.hypotheses == []
+    assert f"unverifiable hypothesis: {hypothesis.claim}" in validated.unknowns
+    assert any("non-quantitative acceptance criteria" in item for item in validated.limitations)
+
+
+def test_quantitative_hypothesis_is_retained() -> None:
+    hypothesis = _hypothesis()
+
+    validated = brief_validate.validate_brief(
+        _brief(hypotheses=[hypothesis]),
+        _facts(),
+    )
+
+    assert validated.hypotheses == [hypothesis]
+    assert validated.claim_stats is not None
+    assert validated.claim_stats.hypotheses_total == 1
+    assert validated.claim_stats.hypotheses_dropped_unverifiable == 0
+
+
+def test_unspecified_objective_is_recorded_without_rejecting_thesis() -> None:
+    facts = _facts()
+    original = _brief(thesis="Pursue a medal with robust validation.")
+
+    validated = brief_validate.validate_brief(original, facts)
+
+    assert validated.thesis == original.thesis
+    assert (
+        "Thesis names a competition objective that user_constraints.objective does not specify."
+        in validated.limitations
+    )
+
+
+def test_explicit_objective_does_not_create_unspecified_objective_limitation() -> None:
+    facts = _facts()
+    facts.user_constraints = UserConstraints(objective="medal")
+    validated = brief_validate.validate_brief(
+        _brief(thesis="Pursue a medal with robust validation."),
+        facts,
+    )
+
+    assert not any(
+        "objective that user_constraints.objective does not specify" in item
+        for item in validated.limitations
+    )
+
+
 def test_validator_contains_no_content_rewriting_helpers() -> None:
     source = inspect.getsource(brief_validate)
 
@@ -492,12 +649,14 @@ def _claim(
     source_ids: list[str],
     *,
     text: str = "Grounded claim text.",
+    evidence_strength: str = "measured_with_protocol",
 ) -> Claim:
     return Claim(
         claim_id=claim_id,
         text=text,
         source_ids=source_ids,
         kind="fact",
+        evidence_strength=evidence_strength,
     )
 
 
@@ -577,6 +736,8 @@ def _hypothesis() -> ResearchHypothesis:
         provenance=["heuristic", "not_verified_on_data"],
         supporting_source_ids=["facts"],
         confidence="medium",
+        success_condition="OOF improves by at least 0.003 on 3 seeds.",
+        failure_condition="OOF improves by less than 0.003 on 3 seeds.",
     )
 
 

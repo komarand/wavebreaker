@@ -67,6 +67,11 @@ async def test_happy_path_calls_pro_model_exactly_once(
         client.calls[0]["system_prompt"]
     )
     assert "not what scored well" in client.calls[0]["system_prompt"]
+    assert "Every claim must declare evidence_strength" in client.calls[0]["system_prompt"]
+    assert "Every hypothesis must set success_condition and failure_condition" in (
+        client.calls[0]["system_prompt"]
+    )
+    assert "Do not assume a competition objective" in client.calls[0]["system_prompt"]
     assert "<PACKED_BRIEF_CONTEXT>" in client.calls[0]["user_prompt"]
     assert '<AVAILABLE_SOURCE_IDS>\n["facts","cv_lb"]' in client.calls[0]["user_prompt"]
     assert BRIEF_PROMPT_VERSION not in client.calls[0]["system_prompt"]
@@ -210,6 +215,7 @@ def _valid_payload() -> dict[str, Any]:
                 "text": "The competition metric is roc_auc.",
                 "source_ids": ["facts"],
                 "kind": "fact",
+                "evidence_strength": "measured_with_protocol",
             }
         ],
         "metric_notes": [],

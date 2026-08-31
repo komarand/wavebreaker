@@ -133,6 +133,12 @@ def test_brief_docx_flag_is_parsed() -> None:
     assert args.docx is True
 
 
+def test_brief_parser_does_not_assume_an_objective() -> None:
+    args = build_parser().parse_args(["brief", "example"])
+
+    assert args.objective is None
+
+
 def test_b5_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEEPSEEK_API_KEY", "secret-key")
     for name in B5_CONFIG_ENV_VARS:

@@ -35,7 +35,7 @@ def test_optional_fact_fields_default_to_none() -> None:
     assert constraints.vram_gb is None
     assert constraints.hours_per_week is None
     assert constraints.cloud_budget_usd is None
-    assert constraints.objective == "medal"
+    assert constraints.objective is None
 
 
 def test_notebook_votes_default_to_zero() -> None:

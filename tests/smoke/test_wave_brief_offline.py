@@ -99,7 +99,7 @@ def test_wave_brief_runs_offline_pipeline_and_writes_all_artifacts(
     )
     assert facts_payload["user_constraints"]["vram_gb"] == 12
     assert brief_payload["metric_notes"] == []
-    assert brief_payload["prompt_version"] == "2026-08-17.1"
+    assert brief_payload["prompt_version"] == "2026-09-01.1"
     assert brief_payload["claim_stats"] == {
         "fact": 1,
         "claim": 0,
@@ -109,6 +109,14 @@ def test_wave_brief_runs_offline_pipeline_and_writes_all_artifacts(
         "ungrounded": 0,
         "grounding_rate": 1.0,
         "distinct_sources": 1,
+        "by_evidence_strength": {
+            "measured_with_protocol": 1,
+            "reported_score": 0,
+            "prevalence": 0,
+            "inference": 0,
+        },
+        "hypotheses_total": 0,
+        "hypotheses_dropped_unverifiable": 0,
     }
     assert "unsupported: Fabricated metric claim." in brief_payload["unknowns"]
     assert "## 1. Соревнование в цифрах" in markdown
@@ -126,6 +134,7 @@ def test_wave_brief_runs_offline_pipeline_and_writes_all_artifacts(
     assert "context: 0 of 0 discussions included, 0 truncated, budget 10000 tokens" in output
     assert "claims: 1 (fact 1, claim 0, inference 0)" in output
     assert "grounding rate: 1.0 across 1 sources" in output
+    assert "evidence: measured 1, reported 0, prevalence 0, inference 0" in output
 
 
 def test_facts_from_skips_collection_and_checkpoints_before_model_call(
@@ -262,6 +271,7 @@ def _brief_payload() -> dict[str, Any]:
                 "text": "The competition metric is roc_auc.",
                 "source_ids": ["facts"],
                 "kind": "fact",
+                "evidence_strength": "measured_with_protocol",
             }
         ],
         "metric_notes": [
@@ -270,6 +280,7 @@ def _brief_payload() -> dict[str, Any]:
                 "text": "Fabricated metric claim.",
                 "source_ids": ["fabricated-source"],
                 "kind": "claim",
+                "evidence_strength": "reported_score",
             }
         ],
         "leakage_risks": [],

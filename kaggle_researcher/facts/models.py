@@ -421,7 +421,7 @@ class UserConstraints(BaseModel):
     vram_gb: float | None = None
     hours_per_week: float | None = None
     cloud_budget_usd: float | None = None
-    objective: Literal["medal", "top_percent", "learn", "fast_baseline"] = "medal"
+    objective: Literal["medal", "top_percent", "learn", "fast_baseline"] | None = None
 
 
 class CompetitionFacts(BaseModel):
