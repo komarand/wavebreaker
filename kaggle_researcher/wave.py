@@ -278,6 +278,7 @@ def _print_claim_stats(brief: CompetitionBrief) -> None:
     )
     print(
         "evidence: "
+        f"official {stats.by_evidence_strength.get('official', 0)}, "
         f"measured {stats.by_evidence_strength.get('measured_with_protocol', 0)}, "
         f"reported {stats.by_evidence_strength.get('reported_score', 0)}, "
         f"prevalence {stats.by_evidence_strength.get('prevalence', 0)}, "

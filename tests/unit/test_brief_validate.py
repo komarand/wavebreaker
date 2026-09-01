@@ -230,6 +230,7 @@ def test_claim_stats_describe_only_final_validated_claims() -> None:
         "grounding_rate": 1.0,
         "distinct_sources": 3,
         "by_evidence_strength": {
+            "official": 0,
             "measured_with_protocol": 3,
             "reported_score": 0,
             "prevalence": 0,
@@ -477,6 +478,26 @@ def test_reported_score_fact_is_downgraded_without_rewriting_text() -> None:
     )
 
 
+def test_official_fact_is_not_downgraded() -> None:
+    claim = _claim(
+        "claim_official_metric",
+        ["facts"],
+        text="The official evaluation metric is ROC AUC.",
+        evidence_strength="official",
+    )
+
+    validated = brief_validate.validate_brief(
+        _brief(validation=[claim], thesis_support=[claim.claim_id]),
+        _facts(),
+    )
+
+    result = validated.validation[0]
+    assert result.kind == "fact"
+    assert result.text == claim.text
+    assert result.evidence_strength == "official"
+    assert not any("claim_official_metric" in item for item in validated.limitations)
+
+
 def test_inference_with_prevalence_evidence_is_downgraded() -> None:
     claim = _claim(
         "claim_mismatch",
@@ -573,6 +594,56 @@ def test_quantitative_hypothesis_is_retained() -> None:
     assert validated.claim_stats is not None
     assert validated.claim_stats.hypotheses_total == 1
     assert validated.claim_stats.hypotheses_dropped_unverifiable == 0
+
+
+def test_quantitative_diagnostic_hypothesis_without_success_or_failure_is_retained() -> None:
+    hypothesis = _hypothesis().model_copy(
+        update={
+            "hypothesis_type": "diagnostic",
+            "success_condition": None,
+            "failure_condition": None,
+            "trigger_condition": "Investigate group dependence when the paired gap is at least 0.01 pp.",
+        }
+    )
+
+    validated = brief_validate.validate_brief(
+        _brief(hypotheses=[hypothesis]),
+        _facts(),
+    )
+
+    assert validated.hypotheses == [hypothesis]
+    assert validated.claim_stats is not None
+    assert validated.claim_stats.hypotheses_dropped_unverifiable == 0
+
+
+@pytest.mark.parametrize(
+    ("trigger_condition", "expected_reason"),
+    [
+        (None, "trigger_condition is missing"),
+        ("Investigate when the gap is material.", "non-quantitative trigger condition"),
+    ],
+)
+def test_diagnostic_hypothesis_requires_quantitative_trigger(
+    trigger_condition: str | None,
+    expected_reason: str,
+) -> None:
+    hypothesis = _hypothesis().model_copy(
+        update={
+            "hypothesis_type": "diagnostic",
+            "success_condition": None,
+            "failure_condition": None,
+            "trigger_condition": trigger_condition,
+        }
+    )
+
+    validated = brief_validate.validate_brief(
+        _brief(hypotheses=[hypothesis]),
+        _facts(),
+    )
+
+    assert validated.hypotheses == []
+    assert f"unverifiable hypothesis: {hypothesis.claim}" in validated.unknowns
+    assert any(expected_reason in item for item in validated.limitations)
 
 
 def test_unspecified_objective_is_recorded_without_rejecting_thesis() -> None:

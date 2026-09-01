@@ -13,6 +13,7 @@ class Claim(BaseModel):
     source_ids: list[str]
     kind: Literal["fact", "claim", "inference"]
     evidence_strength: Literal[
+        "official",
         "measured_with_protocol",
         "reported_score",
         "prevalence",

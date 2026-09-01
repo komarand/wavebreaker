@@ -18,6 +18,7 @@ CLAIM_SECTIONS = (
     "time_wasters",
 )
 EVIDENCE_STRENGTHS = (
+    "official",
     "measured_with_protocol",
     "reported_score",
     "prevalence",
@@ -252,6 +253,7 @@ def _claim_stats(
 
 def _claim_with_consistent_evidence(claim: Claim) -> tuple[Claim, str | None]:
     fact_mismatch = claim.kind == "fact" and claim.evidence_strength not in {
+        "official",
         "measured_with_protocol",
         "prevalence",
     }
@@ -276,6 +278,27 @@ def _verifiable_hypotheses(
     retained: list[ResearchHypothesis] = []
     dropped = 0
     for hypothesis in hypotheses:
+        if hypothesis.hypothesis_type == "diagnostic":
+            trigger_condition = (hypothesis.trigger_condition or "").strip()
+            if not trigger_condition:
+                dropped += 1
+                unknowns.append(f"unverifiable hypothesis: {hypothesis.claim}")
+                limitations.append(
+                    f"Hypothesis {hypothesis.id} was moved to unknowns because "
+                    "trigger_condition is missing."
+                )
+                continue
+            if not ACCEPTANCE_NUMBER_LITERAL.search(trigger_condition):
+                dropped += 1
+                unknowns.append(f"unverifiable hypothesis: {hypothesis.claim}")
+                limitations.append(
+                    f"Hypothesis {hypothesis.id} was moved to unknowns because of "
+                    "a non-quantitative trigger condition."
+                )
+                continue
+            retained.append(hypothesis)
+            continue
+
         missing_fields = [
             field_name
             for field_name in ("success_condition", "failure_condition")

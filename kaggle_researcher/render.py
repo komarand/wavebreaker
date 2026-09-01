@@ -12,6 +12,7 @@ from kaggle_researcher.research_scout_schemas import EdaTask, ResearchHypothesis
 
 NO_SUPPORTED_FINDINGS = "No supported findings."
 EVIDENCE_STRENGTH_LABELS = {
+    "official": "official",
     "measured_with_protocol": "measured",
     "reported_score": "reported",
     "prevalence": "prevalence",
@@ -166,12 +167,20 @@ def _render_data_checks(
 def _render_hypothesis(hypothesis: ResearchHypothesis) -> list[str]:
     lines = [
         f"- **{hypothesis.id}** ({hypothesis.priority}, {hypothesis.category}, "
+        f"{hypothesis.hypothesis_type}, "
         f"confidence={hypothesis.confidence}): {hypothesis.claim} "
         f"{_bracketed_ids(hypothesis.supporting_source_ids)}",
         f"  - Почему важно: {hypothesis.why_it_matters}",
-        f"  - Критерий успеха: {hypothesis.success_condition}",
-        f"  - Критерий провала: {hypothesis.failure_condition}",
     ]
+    if hypothesis.hypothesis_type == "diagnostic":
+        lines.append(f"  - Условие срабатывания: {hypothesis.trigger_condition}")
+    else:
+        lines.extend(
+            [
+                f"  - Критерий успеха: {hypothesis.success_condition}",
+                f"  - Критерий провала: {hypothesis.failure_condition}",
+            ]
+        )
     if hypothesis.how_to_verify:
         lines.append(f"  - Как проверить: {_format_sequence(hypothesis.how_to_verify)}")
     return lines

@@ -138,13 +138,34 @@ def test_hypotheses_and_eda_tasks_render_in_data_checks_section() -> None:
     ]
 
     assert "### Гипотезы" in section
-    assert "**val_001** (P0, validation, confidence=medium)" in section
+    assert "**val_001** (P0, validation, optimization, confidence=medium)" in section
     assert "[facts]" in section
     assert "Критерий успеха: OOF improves by at least 0.003 on 3 seeds." in section
     assert "Критерий провала: OOF improves by less than 0.003 on 3 seeds." in section
     assert "### EDA-задачи" in section
     assert "**eda_val_001** (P0, validation_analyzer)" in section
     assert "[val_001]" in section
+
+
+def test_diagnostic_hypothesis_renders_type_and_trigger_only() -> None:
+    hypothesis = _hypothesis().model_copy(
+        update={
+            "hypothesis_type": "diagnostic",
+            "success_condition": None,
+            "failure_condition": None,
+            "trigger_condition": "Investigate when grouped CV is lower by at least 0.01.",
+        }
+    )
+
+    markdown = render.render_brief(_brief(hypotheses=[hypothesis]), _facts())
+    section = markdown.split("## 9. Что проверить на данных", 1)[1].split(
+        "## 10. Неизвестное", 1
+    )[0]
+
+    assert "**val_001** (P0, validation, diagnostic, confidence=medium)" in section
+    assert "Условие срабатывания: Investigate when grouped CV is lower by at least 0.01." in section
+    assert "Критерий успеха" not in section
+    assert "Критерий провала" not in section
 
 
 def test_sources_appendix_lists_facts_notebooks_and_discussions() -> None:

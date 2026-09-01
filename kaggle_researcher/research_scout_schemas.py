@@ -87,6 +87,7 @@ class ResearchHypothesis(BaseModel):
     id: str
     category: HypothesisCategory
     priority: Priority
+    hypothesis_type: Literal["optimization", "diagnostic"] = "optimization"
     claim: str
     why_it_matters: str
     how_to_verify: list[str] = Field(default_factory=list)
@@ -94,6 +95,7 @@ class ResearchHypothesis(BaseModel):
     expected_evidence_keys: list[str] = Field(default_factory=list)
     failure_condition: str | None = None
     success_condition: str | None = None
+    trigger_condition: str | None = None
     provenance: list[ProvenanceLabel] = Field(default_factory=list)
     supporting_source_ids: list[str] = Field(default_factory=list)
     confidence: Literal["low", "medium", "high"] = "medium"

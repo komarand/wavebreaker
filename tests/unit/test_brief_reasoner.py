@@ -68,7 +68,7 @@ async def test_happy_path_calls_pro_model_exactly_once(
     )
     assert "not what scored well" in client.calls[0]["system_prompt"]
     assert "Every claim must declare evidence_strength" in client.calls[0]["system_prompt"]
-    assert "Every hypothesis must set success_condition and failure_condition" in (
+    assert "Every optimization hypothesis must set" in (
         client.calls[0]["system_prompt"]
     )
     assert "Do not assume a competition objective" in client.calls[0]["system_prompt"]
@@ -158,6 +158,18 @@ def test_system_prompt_contains_all_grounding_and_feasibility_rules() -> None:
         'source_id="cv_lb"',
         'source_id="notebook_ast"',
         "individual notebook refs",
+        "Experiment design rules:",
+        'hypothesis_type="diagnostic"',
+        "One hypothesis changes one thing",
+        "constructed inside every CV training fold",
+        "Grouped and ungrouped cross-validation answer different questions",
+        "GroupKFold is deterministic given the groups",
+        "dataset_shape.train_rows",
+        "mean paired delta across seeds",
+        "same acceptance threshold to both",
+        "may reference a hypothesis only when it tests that hypothesis",
+        "fold-train versus fold-validation",
+        'evidence_strength="official"',
     )
 
     assert all(phrase in BRIEF_SYSTEM_PROMPT for phrase in required_phrases)

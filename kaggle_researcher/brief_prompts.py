@@ -7,7 +7,7 @@ import json
 from kaggle_researcher.brief_context import CV_LB_SOURCE_ID, NOTEBOOK_AST_SOURCE_ID
 from kaggle_researcher.brief_schemas import CompetitionBrief
 
-BRIEF_PROMPT_VERSION = "2026-09-01.1"
+BRIEF_PROMPT_VERSION = "2026-09-01.2"
 
 _COMPETITION_BRIEF_SCHEMA = json.dumps(
     CompetitionBrief.model_json_schema(),
@@ -41,6 +41,9 @@ Grounding rules:
 - Every claim must declare evidence_strength. A leaderboard or notebook score quoted without a
   stated validation protocol is "reported_score", not "measured_with_protocol", even when the
   number is precise.
+- Official competition metadata, including the official evaluation metric, has
+  evidence_strength="official". A kind="fact" claim must use evidence_strength "official",
+  "measured_with_protocol", or "prevalence".
 - Claims with evidence_strength "reported_score" describe a candidate worth testing, not an
   expected gain. Phrase them as candidates.
 - Do not use a score from a leaderboard you have described as unreliable as evidence that a method
@@ -50,11 +53,14 @@ Grounding rules:
 - Do not infer a general property of the task from the performance of a single model family.
 - Notebooks are grouped by lineage cluster. Forks of one baseline are one source, and cluster
   counts are supplied in the context.
-- Every hypothesis must set success_condition and failure_condition. Both must be quantitative
-  and checkable before the experiment is run: name the metric, the minimum effect size that
-  counts, and how many seeds or folds must agree. "Improves CV" is not a condition. Example:
-  "OOF Brier improves by at least 0.003 on three seeds and GroupKFold does not degrade by more
-  than 0.002."
+- Every optimization hypothesis must set hypothesis_type="optimization", success_condition, and
+  failure_condition. Both conditions must be quantitative and checkable before the experiment is
+  run: name the metric, the minimum effect size that counts, and how many seeds or folds must
+  agree. "Improves CV" is not a condition.
+- A diagnostic hypothesis measures a property of the data rather than succeeding or failing. Set
+  hypothesis_type="diagnostic", provide a quantitative trigger_condition, and leave
+  success_condition and failure_condition null. A result below the trigger means the measured
+  property was absent, not that the experiment failed.
 - If the available evidence does not allow stating a quantitative condition, do not emit the
   hypothesis. Put the open question in unknowns instead.
 - Respect user_constraints. If a constraint is null, mark feasibility unknown rather than
@@ -72,6 +78,31 @@ Grounding rules:
 - Mention context omission only when PACKED_BRIEF_CONTEXT contains a CONTEXT_NOTE line. Never
   speculate that trusted blocks or notebook analyses may have been truncated.
 - Do not invent source IDs, execution results, dataset observations, or leaderboard evidence.
+
+Experiment design rules:
+- One hypothesis changes one thing. If a hypothesis adds several features at once, split it: a
+  combined result cannot attribute the gain to any single change.
+- Target statistics computed from other rows, including group survival rates and target encoding,
+  must be constructed inside every CV training fold. Excluding a row's own label is not
+  sufficient: other rows of the same group in the validation partition still leak. State the
+  construction as fold-wise, never as leave-one-out alone.
+- Grouped and ungrouped cross-validation answer different questions. Do not require a grouped
+  score to stay within a margin of an ungrouped score. Compare baseline to feature within each
+  scheme separately.
+- GroupKFold is deterministic given the groups. Do not require agreement across seeds for it. Use
+  GroupShuffleSplit or repeated grouped schemes when seed variation is needed.
+- Acceptance thresholds must be coarser than the resolution of the metric on this dataset. With n
+  validation rows, a single object changes accuracy by 1/n. Use dataset_shape.train_rows to reason
+  about this, and never set a per-fold threshold finer than one object.
+- Prefer mean paired delta across seeds over per-fold conditions. Per-fold accuracy on small
+  datasets has high variance.
+- Ensembling on top of tuned single models rarely yields the same effect size as feature
+  engineering. Do not apply the same acceptance threshold to both.
+- An eda_task may reference a hypothesis only when it tests that hypothesis. Public leaderboard
+  contamination and within-dataset group dependence are different phenomena; do not link a task
+  about one to a hypothesis about the other.
+- Preprocessing leakage is about fold-train versus fold-validation, not about the competition's
+  train and test files, which are already separate. Phrase it accordingly.
 
 CompetitionBrief JSON schema:
 {_COMPETITION_BRIEF_SCHEMA}
