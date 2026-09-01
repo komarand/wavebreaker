@@ -37,6 +37,14 @@ _COMPETITION_REQUEST_POLICY = GLOBAL_KAGGLE_POLICY
 COMPETITION_PATH = re.compile(
     r"^/(?:c|competitions)/(?P<slug>[a-z0-9][a-z0-9-]{1,80})(?:/|$)"
 )
+PLACEMENT_PATTERN = re.compile(
+    r"\btop\s*(?P<top_percent>\d{1,3})\s*%"
+    r"|(?<!\w)#\s*(?P<hash_rank>\d+)\b"
+    r"|\brank\s*(?P<named_rank>\d+)\b"
+    r"|\b(?P<ordinal_rank>\d+)(?:st|nd|rd|th)(?:\s+place)?\b"
+    r"|\bwinn(?:er|ing)(?:\s+solution)?\b",
+    re.IGNORECASE,
+)
 DiscussionStatus = Literal[
     "collected",
     "partial",
@@ -92,6 +100,19 @@ def fetch_winner_writeups(
             for discussion in candidates
         )
     return writeups
+
+
+def extract_placement(title: str) -> tuple[str | None, int | None]:
+    match = PLACEMENT_PATTERN.search(title)
+    if match is None:
+        return "unspecified", None
+    if match.group("top_percent") is not None:
+        return "top_percent", int(match.group("top_percent"))
+    for group_name in ("hash_rank", "named_rank", "ordinal_rank"):
+        value = match.group(group_name)
+        if value is not None:
+            return "rank", int(value)
+    return "rank", 1
 
 
 def _collect_competition_topics(*, slug: str, limit: int) -> DiscussionCollection:
@@ -270,6 +291,7 @@ def _competition_topic_fact(topic: Any, slug: str) -> DiscussionFacts:
         url = f"https://www.kaggle.com/competitions/{slug}/discussion/{topic_id}"
         url_constructed = True
     is_candidate, signals = _writeup_candidate(title)
+    placement_kind, placement_value = extract_placement(title)
     return DiscussionFacts(
         topic_id=topic_id,
         title=title,
@@ -290,6 +312,8 @@ def _competition_topic_fact(topic: Any, slug: str) -> DiscussionFacts:
         comment_count=_integer(_value(topic, "comment_count", "commentCount")),
         is_writeup_candidate=is_candidate,
         writeup_signals=signals,
+        placement_kind=placement_kind,
+        placement_value=placement_value,
         collection_status="empty",
     )
 

@@ -235,13 +235,13 @@ def _ordered_context_units(facts: CompetitionFacts) -> list[_ContextUnit]:
 
     discussions = sorted(facts.discussions, key=_discussion_sort_key)
     writeups = sorted(
-        (item for item in discussions if _is_winner_writeup(item)),
+        (item for item in discussions if _is_solution_writeup(item)),
         key=lambda item: _writeup_sort_key(item, facts.competition_id),
     )
     current_host = [
         item
         for item in discussions
-        if not _is_winner_writeup(item)
+        if not _is_solution_writeup(item)
         and item.source_type == "discussion"
         and item.competition_id == facts.competition_id
         and item.author_is_host
@@ -249,7 +249,7 @@ def _ordered_context_units(facts: CompetitionFacts) -> list[_ContextUnit]:
     current_other = [
         item
         for item in discussions
-        if not _is_winner_writeup(item)
+        if not _is_solution_writeup(item)
         and item.source_type == "discussion"
         and item.competition_id == facts.competition_id
         and not item.author_is_host
@@ -257,7 +257,7 @@ def _ordered_context_units(facts: CompetitionFacts) -> list[_ContextUnit]:
     other = [
         item
         for item in discussions
-        if not _is_winner_writeup(item)
+        if not _is_solution_writeup(item)
         and item.source_type == "discussion"
         and item.competition_id != facts.competition_id
     ]
@@ -428,20 +428,23 @@ def _untrusted_unit(
     discussion: DiscussionFacts,
     current_competition_id: str,
 ) -> _ContextUnit:
-    is_writeup = _is_winner_writeup(discussion)
-    evidence_class = "winner_writeup" if is_writeup else "discussion"
+    is_writeup = _is_solution_writeup(discussion)
+    evidence_class = "solution_writeup" if is_writeup else "discussion"
+    source_type = "solution_writeup" if is_writeup else discussion.source_type
     competition_relation = (
         "current"
         if discussion.competition_id == current_competition_id
         else "similar"
     )
     writeup_signals = ",".join(discussion.writeup_signals)
+    placement = _placement_label(discussion)
     body, truncated_characters = _discussion_text_for_context(discussion.text)
     header = (
         "<UNTRUSTED_SOURCE\n"
         f'  source_id="{escape(discussion.topic_id, quote=True)}"\n'
-        f'  source_type="{discussion.source_type}"\n'
+        f'  source_type="{source_type}"\n'
         f'  evidence_class="{evidence_class}"\n'
+        f'  placement="{placement}"\n'
         f'  writeup_signals="{escape(writeup_signals, quote=True)}"\n'
         f'  competition_relation="{competition_relation}"\n'
         f'  author="{escape(discussion.author or "", quote=True)}"\n'
@@ -476,18 +479,33 @@ def _discussion_text_for_context(text: str) -> tuple[str, int]:
     return f"{kept}\n{note}", dropped
 
 
-def _is_winner_writeup(item: DiscussionFacts) -> bool:
+def _is_solution_writeup(item: DiscussionFacts) -> bool:
     return item.source_type == "winner_writeup" or bool(
         getattr(item, "is_writeup_candidate", False)
     )
+
+
+def _placement_label(item: DiscussionFacts) -> str:
+    if item.placement_kind in {"rank", "top_percent"} and item.placement_value is not None:
+        return f"{item.placement_kind}:{item.placement_value}"
+    return "unspecified"
+
+
+def _placement_sort_key(item: DiscussionFacts) -> tuple[int, int]:
+    if item.placement_kind == "rank" and item.placement_value is not None:
+        return 0, item.placement_value
+    if item.placement_kind == "top_percent" and item.placement_value is not None:
+        return 1, item.placement_value
+    return 2, 0
 
 
 def _writeup_sort_key(
     item: DiscussionFacts,
     current_competition_id: str,
 ) -> tuple[Any, ...]:
-    # Completed similar competitions provide verified placement evidence before current writeups.
+    # Placement quality precedes the existing competition, signal, vote, and freshness keys.
     return (
+        *_placement_sort_key(item),
         item.competition_id == current_competition_id,
         -len(item.writeup_signals),
         -item.votes,
@@ -565,7 +583,7 @@ def _ordered_unique(values: Any) -> list[str]:
 
 def _similar_writeup_counts(facts: CompetitionFacts) -> dict[str, int]:
     counts = Counter(
-        item.competition_id for item in facts.discussions if _is_winner_writeup(item)
+        item.competition_id for item in facts.discussions if _is_solution_writeup(item)
     )
     return dict(sorted(counts.items()))
 
@@ -583,7 +601,7 @@ def _discussion_signal_score(item: DiscussionFacts) -> float:
     votes = min(max(item.votes, 0), 40)
     return (
         SIGNAL_WEIGHT_HOST * bool(item.author_is_host)
-        + SIGNAL_WEIGHT_WRITEUP * _is_winner_writeup(item)
+        + SIGNAL_WEIGHT_WRITEUP * _is_solution_writeup(item)
         + SIGNAL_WEIGHT_PER_MESSAGE * message_count
         + SIGNAL_WEIGHT_PER_NUMBER * decimal_count
         + SIGNAL_WEIGHT_PER_LINK * link_count
@@ -625,15 +643,15 @@ def _packing_limitations(
     if not facts.similar_competitions:
         limitations.append("No similar-competition leaderboard stability records were available.")
 
-    writeup_count = sum(_is_winner_writeup(item) for item in facts.discussions)
+    writeup_count = sum(_is_solution_writeup(item) for item in facts.discussions)
     current_discussion_count = sum(
-        not _is_winner_writeup(item)
+        not _is_solution_writeup(item)
         and item.source_type == "discussion"
         and item.competition_id == facts.competition_id
         for item in facts.discussions
     )
     if not writeup_count:
-        limitations.append("No winner writeups were collected.")
+        limitations.append("No solution writeups were collected.")
     if not current_discussion_count:
         limitations.append("No current-competition discussions were collected.")
     omitted_documents = sum(

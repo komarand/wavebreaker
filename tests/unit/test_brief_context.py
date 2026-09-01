@@ -41,7 +41,7 @@ def test_minimal_facts_pack_without_failure_and_report_missing_blocks() -> None:
     assert "<TRUSTED_CV_LB" in packed.text
     assert packed.stats.included_source_ids == ["facts", "cv_lb"]
     assert any("No notebook AST" in item for item in packed.stats.limitations)
-    assert any("No winner writeups" in item for item in packed.stats.limitations)
+    assert any("No solution writeups" in item for item in packed.stats.limitations)
 
 
 def test_official_metadata_and_cv_lb_fit_a_reasonable_minimum_budget() -> None:
@@ -357,7 +357,7 @@ def test_writeup_precedes_ordinary_current_discussion() -> None:
                 competition_id="past-comp",
                 source_type="winner_writeup",
                 votes=0,
-                text="winner",
+                text="solution",
             ),
         ]
     )
@@ -394,8 +394,9 @@ def test_similar_writeup_candidate_is_prioritized_labelled_and_not_duplicated() 
         ">",
         1,
     )[0]
-    assert 'source_type="discussion"' in candidate_header
-    assert 'evidence_class="winner_writeup"' in candidate_header
+    assert 'source_type="solution_writeup"' in candidate_header
+    assert 'evidence_class="solution_writeup"' in candidate_header
+    assert 'placement="unspecified"' in candidate_header
     assert 'writeup_signals="solution,place,placement"' in candidate_header
     assert 'competition_relation="similar"' in candidate_header
     assert packed.stats.similar_writeup_counts == {"past-comp": 1}
@@ -409,6 +410,7 @@ def test_current_discussion_header_has_discussion_evidence_class() -> None:
 
     header = packed.text.split('source_id="topic-current"', 1)[1].split(">", 1)[0]
     assert 'evidence_class="discussion"' in header
+    assert 'placement="unspecified"' in header
     assert 'writeup_signals=""' in header
     assert 'competition_relation="current"' in header
     assert "<UNTRUSTED_SOURCE" in packed.text
@@ -463,6 +465,55 @@ def test_writeup_signal_count_precedes_votes_within_writeup_bucket() -> None:
     assert packed.text.index('source_id="quiet-three-signals"') < packed.text.index(
         'source_id="popular-one-signal"'
     )
+
+
+def test_first_place_solution_sorts_above_top_five_percent() -> None:
+    facts = _facts(
+        discussions=[
+            _discussion(
+                "top-five-percent",
+                competition_id="past-a",
+                source_type="winner_writeup",
+                votes=100,
+                placement_kind="top_percent",
+                placement_value=5,
+            ),
+            _discussion(
+                "first-place",
+                competition_id="past-b",
+                source_type="winner_writeup",
+                votes=0,
+                placement_kind="rank",
+                placement_value=1,
+            ),
+        ]
+    )
+
+    packed = pack_brief_context(facts, 20_000)
+
+    assert packed.text.index('source_id="first-place"') < packed.text.index(
+        'source_id="top-five-percent"'
+    )
+    assert 'placement="rank:1"' in packed.text
+    assert 'placement="top_percent:5"' in packed.text
+
+
+def test_top_percent_solution_context_never_labels_it_as_winner() -> None:
+    discussion = _discussion(
+        "top-five-percent",
+        competition_id="past-comp",
+        source_type="winner_writeup",
+        text="Top five percent solution details.",
+        placement_kind="top_percent",
+        placement_value=5,
+    )
+
+    unit = brief_context._untrusted_unit(discussion, "current-comp")
+
+    assert 'evidence_class="solution_writeup"' in unit.text
+    assert 'source_type="solution_writeup"' in unit.text
+    assert 'placement="top_percent:5"' in unit.text
+    assert "winner" not in unit.text.casefold()
 
 
 def test_host_discussion_precedes_non_host_discussion() -> None:
@@ -1060,6 +1111,8 @@ def _discussion(
     is_writeup_candidate: bool = False,
     writeup_signals: list[str] | None = None,
     comment_count: int | None = None,
+    placement_kind: str | None = None,
+    placement_value: int | None = None,
 ) -> DiscussionFacts:
     return DiscussionFacts(
         topic_id=topic_id,
@@ -1073,6 +1126,8 @@ def _discussion(
         text=text,
         is_writeup_candidate=is_writeup_candidate,
         writeup_signals=writeup_signals or [],
+        placement_kind=placement_kind,
+        placement_value=placement_value,
         comment_count=comment_count,
     )
 

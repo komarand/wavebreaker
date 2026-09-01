@@ -387,6 +387,41 @@ def test_writeup_candidate_classification(title: str, candidate: bool) -> None:
     assert bool(signals) is candidate
 
 
+@pytest.mark.parametrize(
+    ("title", "placement_kind", "placement_value"),
+    [
+        ("Top 5% Solution (0.80143)", "top_percent", 5),
+        ("Top 10 % writeup", "top_percent", 10),
+        ("1st Place Solution", "rank", 1),
+        ("2nd place solution", "rank", 2),
+        ("3rd Place", "rank", 3),
+        ("12th place", "rank", 12),
+        ("#1 solution", "rank", 1),
+        ("Rank 4 solution", "rank", 4),
+        ("winner", "rank", 1),
+        ("Winning solution", "rank", 1),
+        ("Solution notes", "unspecified", None),
+    ],
+)
+def test_extract_placement(
+    title: str,
+    placement_kind: str,
+    placement_value: int | None,
+) -> None:
+    assert discussions.extract_placement(title) == (placement_kind, placement_value)
+
+
+def test_solution_without_placement_remains_candidate_with_unspecified_placement() -> None:
+    fact = discussions._competition_topic_fact(
+        _topic(1, "Feature engineering solution"),
+        "example",
+    )
+
+    assert fact.is_writeup_candidate is True
+    assert fact.placement_kind == "unspecified"
+    assert fact.placement_value is None
+
+
 def test_winner_writeups_filter_regular_competition_topics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -417,6 +452,8 @@ def test_winner_writeups_filter_regular_competition_topics(
     assert facts[0].source_type == "winner_writeup"
     assert facts[0].is_writeup_candidate is True
     assert facts[0].writeup_signals == ["solution", "place", "placement"]
+    assert facts[0].placement_kind == "rank"
+    assert facts[0].placement_value == 1
 
 
 def test_zero_writeup_limit_does_not_collect_discussions(

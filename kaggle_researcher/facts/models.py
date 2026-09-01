@@ -224,6 +224,8 @@ class DiscussionFacts(BaseModel):
     comment_count: int | None = None
     is_writeup_candidate: bool = False
     writeup_signals: list[str] = Field(default_factory=list)
+    placement_kind: Literal["rank", "top_percent", "unspecified"] | None = None
+    placement_value: int | None = None
     messages: list[DiscussionMessageFacts] = Field(default_factory=list)
     collection_status: Literal["collected", "empty", "rate_limited", "forbidden", "failed"] = (
         "collected"

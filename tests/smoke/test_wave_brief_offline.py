@@ -99,7 +99,7 @@ def test_wave_brief_runs_offline_pipeline_and_writes_all_artifacts(
     )
     assert facts_payload["user_constraints"]["vram_gb"] == 12
     assert brief_payload["metric_notes"] == []
-    assert brief_payload["prompt_version"] == "2026-09-01.2"
+    assert brief_payload["prompt_version"] == "2026-09-01.3"
     assert brief_payload["claim_stats"] == {
         "fact": 1,
         "claim": 0,

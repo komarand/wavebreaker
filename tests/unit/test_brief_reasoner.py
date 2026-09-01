@@ -170,6 +170,9 @@ def test_system_prompt_contains_all_grounding_and_feasibility_rules() -> None:
         "may reference a hypothesis only when it tests that hypothesis",
         "fold-train versus fold-validation",
         'evidence_strength="official"',
+        'evidence_class="solution_writeup"',
+        "A top-5% writeup is not",
+        "reported placement",
     )
 
     assert all(phrase in BRIEF_SYSTEM_PROMPT for phrase in required_phrases)
