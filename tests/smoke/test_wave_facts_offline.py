@@ -147,7 +147,7 @@ def _patch_offline_stages(monkeypatch: pytest.MonkeyPatch) -> None:
         "fetch_file_manifest",
         lambda slug, limit: FileManifest(
             files=[],
-            train_test_size_ratio=1.5,
+            train_test_bytes_ratio=1.5,
             sample_submission_columns=["id", "target"],
             sample_submission_source="api",
             limitations=[],

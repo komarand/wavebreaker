@@ -111,7 +111,7 @@ class FileInfo(BaseModel):
 
 class FileManifest(BaseModel):
     files: list[FileInfo]
-    train_test_size_ratio: float | None = None
+    train_test_bytes_ratio: float | None = None
     sample_submission_columns: list[str]
     sample_submission_source: Literal["api", "full_download", "unavailable"]
     sample_submission_status: Literal[
@@ -124,6 +124,33 @@ class FileManifest(BaseModel):
         "download_failed",
         "header_unreadable",
     ] = "file_not_found"
+    limitations: list[str]
+
+
+class ColumnShape(BaseModel):
+    name: str
+    inferred_type: Literal["integer", "float", "string", "boolean", "unknown"]
+    distinct_in_sample: int
+    null_share_in_sample: float | None
+    sample_values: list[str]
+
+
+class TargetShape(BaseModel):
+    column: str
+    distinct_in_sample: int
+    class_counts_in_sample: dict[str, int] | None
+    is_binary_in_sample: bool | None
+
+
+class DatasetShape(BaseModel):
+    status: Literal["read", "partial", "unavailable"]
+    train_rows: int | None
+    test_rows: int | None
+    train_test_row_ratio: float | None
+    sampled_rows: int
+    columns: list[ColumnShape]
+    target: TargetShape | None
+    coverage: Literal["full_file", "sampled", "header_only", "none"]
     limitations: list[str]
 
 
@@ -431,6 +458,7 @@ class CompetitionFacts(BaseModel):
 
     metadata: CompetitionMetadata
     files: FileManifest
+    dataset_shape: DatasetShape | None = None
     notebooks: list[NotebookFacts]
     code_aggregates: CodeAggregates | None = None
     public_leaderboard: PublicLeaderboard = Field(

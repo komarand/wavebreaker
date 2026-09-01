@@ -190,7 +190,7 @@ def _facts() -> CompetitionFacts:
         ),
         files=FileManifest(
             files=[],
-            train_test_size_ratio=None,
+            train_test_bytes_ratio=None,
             sample_submission_columns=[],
             sample_submission_source="unavailable",
             limitations=[],

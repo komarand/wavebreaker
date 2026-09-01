@@ -324,12 +324,25 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
         if metadata.is_code_competition is False
         else "unavailable"
     )
-    ratio = facts.files.train_test_size_ratio
+    bytes_ratio = facts.files.train_test_bytes_ratio
+    row_ratio = (
+        facts.dataset_shape.train_test_row_ratio
+        if facts.dataset_shape is not None
+        else None
+    )
     clusters = {notebook.lineage_cluster_id for notebook in facts.notebooks}
     print(f"facts: {facts_path}")
     print(f"metric: {metadata.metric_name or 'unavailable'}")
     print(f"code competition: {code_competition}")
-    print(f"train/test ratio: {ratio if ratio is not None else 'unavailable'}")
+    print(
+        "train/test bytes ratio: "
+        f"{bytes_ratio if bytes_ratio is not None else 'unavailable'}"
+    )
+    print(
+        "train/test row ratio: "
+        f"{row_ratio if row_ratio is not None else 'unavailable'}"
+    )
+    _print_dataset_shape(facts)
     sample_columns = ", ".join(facts.files.sample_submission_columns) or "unavailable"
     print(f"sample submission columns: {sample_columns}")
     print(f"sample submission status: {facts.files.sample_submission_status}")
@@ -537,6 +550,40 @@ def _print_facts_summary(facts: CompetitionFacts, facts_path: Path) -> None:
         print(f"discussion error: {facts.discussion_collection_error}")
     for limitation in facts.limitations:
         print(f"limitation: {limitation}")
+
+
+def _print_dataset_shape(facts: CompetitionFacts) -> None:
+    shape = facts.dataset_shape
+    if shape is None or shape.status == "unavailable":
+        print("dataset shape: unavailable")
+        return
+
+    train_rows = shape.train_rows if shape.train_rows is not None else "unavailable"
+    test_rows = shape.test_rows if shape.test_rows is not None else "unavailable"
+    summary = (
+        f"dataset shape: train {train_rows} rows, test {test_rows} rows, "
+        f"{len(shape.columns)} columns"
+    )
+    if shape.target is not None:
+        target = shape.target
+        if target.is_binary_in_sample is True:
+            target_kind = "binary"
+        elif target.is_binary_in_sample is False:
+            target_kind = f"{target.distinct_in_sample} values"
+        else:
+            target_kind = "type unavailable"
+        counts = ""
+        if target.class_counts_in_sample:
+            counts = (
+                ", "
+                + "/".join(
+                    str(count)
+                    for _, count in sorted(target.class_counts_in_sample.items())
+                )
+                + " in sample"
+            )
+        summary += f", target {target.column} ({target_kind}{counts})"
+    print(summary)
 
 
 def _splitter_distribution(facts: CompetitionFacts) -> Counter[str]:

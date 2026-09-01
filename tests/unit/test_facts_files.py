@@ -149,7 +149,7 @@ def test_full_fixture_maps_files_ratio_and_api_columns_without_download() -> Non
         "submission",
         "auxiliary",
     ]
-    assert manifest.train_test_size_ratio == 3.0
+    assert manifest.train_test_bytes_ratio == 3.0
     assert manifest.sample_submission_columns == ["id", "target"]
     assert manifest.sample_submission_source == "api"
     assert manifest.sample_submission_status == "api"
@@ -205,7 +205,7 @@ def test_kaggle_2_file_response_paginates_with_next_page_token() -> None:
         "test.csv",
         "sample_submission.csv",
     ]
-    assert manifest.train_test_size_ratio == 2.0
+    assert manifest.train_test_bytes_ratio == 2.0
 
 
 def test_download_reads_sample_header_and_never_downloads_train_or_test() -> None:
@@ -329,7 +329,7 @@ def test_ratio_is_none_when_train_or_test_is_missing() -> None:
 
     manifest = fetch_file_manifest("example-competition", max_sample_sub_bytes=100)
 
-    assert manifest.train_test_size_ratio is None
+    assert manifest.train_test_bytes_ratio is None
 
 
 def test_sample_at_download_limit_is_not_downloaded() -> None:
@@ -354,7 +354,7 @@ def test_listing_403_is_non_fatal_and_recorded_as_limitation() -> None:
     manifest = fetch_file_manifest("restricted-competition", max_sample_sub_bytes=100)
 
     assert manifest.files == []
-    assert manifest.train_test_size_ratio is None
+    assert manifest.train_test_bytes_ratio is None
     assert manifest.sample_submission_columns == []
     assert manifest.sample_submission_source == "unavailable"
     assert manifest.sample_submission_status == "download_forbidden"

@@ -55,7 +55,7 @@ def fetch_file_manifest(
         )
         return FileManifest(
             files=[],
-            train_test_size_ratio=None,
+            train_test_bytes_ratio=None,
             sample_submission_columns=[],
             sample_submission_source=_sample_submission_source("download_forbidden"),
             sample_submission_status="download_forbidden",
@@ -86,7 +86,7 @@ def fetch_file_manifest(
         file_records.append((file_info, raw_file))
 
     files = [file_info for file_info, _ in file_records]
-    ratio = _train_test_size_ratio(files)
+    ratio = _train_test_bytes_ratio(files)
     sample_candidates = [
         (file_info, raw_file)
         for file_info, raw_file in file_records
@@ -151,7 +151,7 @@ def fetch_file_manifest(
 
     return FileManifest(
         files=files,
-        train_test_size_ratio=ratio,
+        train_test_bytes_ratio=ratio,
         sample_submission_columns=sample_columns,
         sample_submission_source=_sample_submission_source(sample_status),
         sample_submission_status=sample_status,
@@ -218,7 +218,7 @@ def _list_competition_files(api: Any, slug: str) -> list[Any]:
     return files
 
 
-def _train_test_size_ratio(files: list[FileInfo]) -> float | None:
+def _train_test_bytes_ratio(files: list[FileInfo]) -> float | None:
     train_files = [file for file in files if file.role_hint == "train"]
     test_files = [file for file in files if file.role_hint == "test"]
     if not train_files or not test_files:

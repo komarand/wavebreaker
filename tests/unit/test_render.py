@@ -10,11 +10,13 @@ from kaggle_researcher.facts.models import (
     CompetitionFacts,
     CompetitionMetadata,
     CvLbPair,
+    DatasetShape,
     DiscussionFacts,
     FileInfo,
     FileManifest,
     LeaderboardStability,
     NotebookFacts,
+    TargetShape,
     UserConstraints,
 )
 from kaggle_researcher.research_scout_schemas import EdaTask, ResearchHypothesis
@@ -30,7 +32,8 @@ def test_render_facts_section_works_without_a_brief() -> None:
     assert "| Submissions per day | 5 |" in markdown
     assert "| Maximum team size | 4 |" in markdown
     assert "2026-12-01T12:00:00+00:00" in markdown
-    assert "| Train/test size ratio | 2.5 |" in markdown
+    assert "| Train/test bytes ratio | 2.5 |" in markdown
+    assert "| Train/test row ratio | 2.131579 |" in markdown
     assert "id, target" in markdown
 
 
@@ -281,9 +284,25 @@ def _facts() -> CompetitionFacts:
         ),
         files=FileManifest(
             files=[FileInfo(name="train.csv", size_bytes=100, role_hint="train")],
-            train_test_size_ratio=2.5,
+            train_test_bytes_ratio=2.5,
             sample_submission_columns=["id", "target"],
             sample_submission_source="api",
+            limitations=[],
+        ),
+        dataset_shape=DatasetShape(
+            status="read",
+            train_rows=891,
+            test_rows=418,
+            train_test_row_ratio=2.131579,
+            sampled_rows=891,
+            columns=[],
+            target=TargetShape(
+                column="target",
+                distinct_in_sample=2,
+                class_counts_in_sample={"0": 342, "1": 549},
+                is_binary_in_sample=True,
+            ),
+            coverage="full_file",
             limitations=[],
         ),
         notebooks=notebooks,

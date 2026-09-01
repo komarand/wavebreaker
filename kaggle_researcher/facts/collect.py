@@ -11,6 +11,8 @@ from typing import Any
 from tqdm.auto import tqdm
 
 from kaggle_researcher.config import (
+    get_dataset_sample_rows,
+    get_max_dataset_read_bytes,
     get_max_similar_verifications,
     get_notebook_concurrency,
 )
@@ -31,6 +33,7 @@ from kaggle_researcher.facts.discussions import (
     fetch_competition_discussions,
     fetch_winner_writeups,
 )
+from kaggle_researcher.facts.dataset_shape import read_dataset_shape
 from kaggle_researcher.facts.files import fetch_file_manifest
 from kaggle_researcher.facts.models import (
     CompetitionFacts,
@@ -80,6 +83,8 @@ def collect_facts(
     writeups_per_competition: int = 10,
     notebook_concurrency: int | None = None,
     max_similar_verifications: int | None = None,
+    max_dataset_read_bytes: int | None = None,
+    dataset_sample_rows: int | None = None,
 ) -> CompetitionFacts:
     if writeups_per_competition <= 0:
         raise ValueError("writeups_per_competition must be a positive integer")
@@ -98,11 +103,30 @@ def collect_facts(
         collection_errors.append(_stage_error("file manifest", exc))
         files = FileManifest(
             files=[],
-            train_test_size_ratio=None,
+            train_test_bytes_ratio=None,
             sample_submission_columns=[],
             sample_submission_source="unavailable",
             limitations=["File manifest collection failed."],
         )
+
+    dataset_read_limit = (
+        get_max_dataset_read_bytes()
+        if max_dataset_read_bytes is None
+        else max_dataset_read_bytes
+    )
+    sample_row_limit = (
+        get_dataset_sample_rows() if dataset_sample_rows is None else dataset_sample_rows
+    )
+    try:
+        dataset_shape = read_dataset_shape(
+            slug,
+            files,
+            max_bytes=dataset_read_limit,
+            sample_rows=sample_row_limit,
+        )
+    except Exception as exc:
+        collection_errors.append(_stage_error("dataset shape", exc))
+        dataset_shape = None
 
     concurrency = (
         get_notebook_concurrency() if notebook_concurrency is None else notebook_concurrency
@@ -265,6 +289,7 @@ def collect_facts(
         collected_at=datetime.now(timezone.utc),
         metadata=metadata,
         files=files,
+        dataset_shape=dataset_shape,
         notebooks=notebooks,
         code_aggregates=code_aggregates,
         public_leaderboard=public_leaderboard,

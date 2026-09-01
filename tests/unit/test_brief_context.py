@@ -15,6 +15,7 @@ from kaggle_researcher.facts.models import (
     CompetitionFacts,
     CompetitionMetadata,
     CvLbPair,
+    DatasetShape,
     DatasetReference,
     DiscussionFacts,
     FileManifest,
@@ -96,6 +97,28 @@ def test_code_aggregates_are_included_in_trusted_official_context() -> None:
     assert '"kwargs_basis":"cluster_median_of_public_notebooks"' in packed.text
     assert '"kwargs_distribution"' in packed.text
     assert '"typical_kwargs"' not in packed.text
+
+
+def test_dataset_shape_is_included_whole_in_trusted_official_context() -> None:
+    facts = _facts()
+    facts.dataset_shape = DatasetShape(
+        status="read",
+        train_rows=891,
+        test_rows=418,
+        train_test_row_ratio=2.131579,
+        sampled_rows=891,
+        columns=[],
+        target=None,
+        coverage="full_file",
+        limitations=[],
+    )
+
+    packed = pack_brief_context(facts, 10_000)
+
+    assert '"dataset_shape":{' in packed.text
+    assert '"status":"read"' in packed.text
+    assert '"train_rows":891' in packed.text
+    assert '"train_test_row_ratio":2.131579' in packed.text
 
 
 def test_score_diagnostics_stay_in_facts_but_not_context_and_cv_lb_remains() -> None:
@@ -971,7 +994,7 @@ def _facts(
         ),
         files=FileManifest(
             files=[],
-            train_test_size_ratio=2.0,
+            train_test_bytes_ratio=2.0,
             sample_submission_columns=["id", "target"],
             sample_submission_source=sample_submission_source,
             limitations=[],

@@ -18,6 +18,8 @@ B5_CONFIG_ENV_VARS = (
     "WRITEUPS_PER_COMPETITION",
     "MAX_CONTEXT_TOKENS",
     "MAX_SAMPLE_SUB_BYTES",
+    "MAX_DATASET_READ_BYTES",
+    "DATASET_SAMPLE_ROWS",
     "META_KAGGLE_DIR",
     "RUN_BUDGET_TOKENS",
     "KAGGLE_API_TOKEN",
@@ -158,6 +160,8 @@ def test_b5_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.writeups_per_competition == 10
     assert settings.max_context_tokens == 200_000
     assert settings.max_sample_sub_bytes == 50_000_000
+    assert settings.max_dataset_read_bytes == 100_000_000
+    assert settings.dataset_sample_rows == 1000
     assert settings.meta_kaggle_dir is None
     assert settings.run_budget_tokens is None
     assert settings.kaggle_api_token is None
@@ -179,6 +183,8 @@ def test_b5_config_env_overrides_and_legacy_kaggle_fallback(
     monkeypatch.setenv("WRITEUPS_PER_COMPETITION", "12")
     monkeypatch.setenv("MAX_CONTEXT_TOKENS", "90000")
     monkeypatch.setenv("MAX_SAMPLE_SUB_BYTES", "4000000")
+    monkeypatch.setenv("MAX_DATASET_READ_BYTES", "8000000")
+    monkeypatch.setenv("DATASET_SAMPLE_ROWS", "250")
     monkeypatch.setenv("META_KAGGLE_DIR", "./meta-kaggle")
     monkeypatch.setenv("RUN_BUDGET_TOKENS", "150000")
     monkeypatch.setenv("KAGGLE_API_TOKEN", "api-token")
@@ -197,6 +203,8 @@ def test_b5_config_env_overrides_and_legacy_kaggle_fallback(
     assert settings.writeups_per_competition == 12
     assert settings.max_context_tokens == 90_000
     assert settings.max_sample_sub_bytes == 4_000_000
+    assert settings.max_dataset_read_bytes == 8_000_000
+    assert settings.dataset_sample_rows == 250
     assert settings.meta_kaggle_dir == "./meta-kaggle"
     assert settings.run_budget_tokens == 150_000
     assert settings.kaggle_api_token == "api-token"
@@ -211,6 +219,8 @@ def test_b5_config_env_overrides_and_legacy_kaggle_fallback(
         "NOTEBOOK_CONCURRENCY",
         "MAX_DISCUSSIONS",
         "WRITEUPS_PER_COMPETITION",
+        "MAX_DATASET_READ_BYTES",
+        "DATASET_SAMPLE_ROWS",
         "RUN_BUDGET_TOKENS",
     ],
 )

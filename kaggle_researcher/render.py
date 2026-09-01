@@ -30,7 +30,13 @@ def render_facts_section(facts: CompetitionFacts) -> str:
         ("Submissions per day", metadata.submissions_per_day),
         ("Maximum team size", metadata.max_team_size),
         ("Deadline", _format_datetime(metadata.deadline)),
-        ("Train/test size ratio", facts.files.train_test_size_ratio),
+        ("Train/test bytes ratio", facts.files.train_test_bytes_ratio),
+        (
+            "Train/test row ratio",
+            facts.dataset_shape.train_test_row_ratio
+            if facts.dataset_shape is not None
+            else None,
+        ),
         (
             "Sample submission columns",
             _format_sequence(facts.files.sample_submission_columns),

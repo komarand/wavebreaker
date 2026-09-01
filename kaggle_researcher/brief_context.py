@@ -279,6 +279,11 @@ def _official_facts_unit(facts: CompetitionFacts) -> _ContextUnit:
         "collected_at": facts.collected_at.isoformat(),
         "competition_id": facts.competition_id,
         "files": facts.files.model_dump(mode="json"),
+        "dataset_shape": (
+            facts.dataset_shape.model_dump(mode="json")
+            if facts.dataset_shape is not None
+            else None
+        ),
         "metadata": facts.metadata.model_dump(mode="json"),
         "public_leaderboard_shape": (
             facts.public_leaderboard.shape.model_dump(mode="json")

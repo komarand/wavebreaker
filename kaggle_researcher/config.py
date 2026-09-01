@@ -11,6 +11,8 @@ DEFAULT_MAX_EMBED_BATCH_SIZE = 8
 DEFAULT_WRITEUPS_PER_COMPETITION = 10
 DEFAULT_NOTEBOOK_CONCURRENCY = 2
 DEFAULT_MAX_SAMPLE_SUB_BYTES = 50_000_000
+DEFAULT_MAX_DATASET_READ_BYTES = 100_000_000
+DEFAULT_DATASET_SAMPLE_ROWS = 1000
 DEFAULT_MAX_SIMILAR_VERIFICATIONS = 10
 
 load_dotenv(".env")
@@ -39,6 +41,8 @@ class Settings:
     writeups_per_competition: int = DEFAULT_WRITEUPS_PER_COMPETITION
     max_context_tokens: int = 200_000
     max_sample_sub_bytes: int = DEFAULT_MAX_SAMPLE_SUB_BYTES
+    max_dataset_read_bytes: int = DEFAULT_MAX_DATASET_READ_BYTES
+    dataset_sample_rows: int = DEFAULT_DATASET_SAMPLE_ROWS
     max_similar_verifications: int = DEFAULT_MAX_SIMILAR_VERIFICATIONS
     meta_kaggle_dir: str | None = None
     run_budget_tokens: int | None = None
@@ -79,6 +83,8 @@ def load_config() -> Settings:
             "MAX_SAMPLE_SUB_BYTES",
             DEFAULT_MAX_SAMPLE_SUB_BYTES,
         ),
+        max_dataset_read_bytes=get_max_dataset_read_bytes(),
+        dataset_sample_rows=get_dataset_sample_rows(),
         max_similar_verifications=get_max_similar_verifications(),
         meta_kaggle_dir=os.getenv("META_KAGGLE_DIR"),
         run_budget_tokens=_get_optional_positive_int_env("RUN_BUDGET_TOKENS"),
@@ -110,6 +116,22 @@ def get_max_similar_verifications() -> int:
     return _get_positive_int_env(
         "MAX_SIMILAR_VERIFICATIONS",
         DEFAULT_MAX_SIMILAR_VERIFICATIONS,
+    )
+
+
+def get_max_dataset_read_bytes() -> int:
+    """Return the bounded train/test read limit without requiring model credentials."""
+    return _get_positive_int_env(
+        "MAX_DATASET_READ_BYTES",
+        DEFAULT_MAX_DATASET_READ_BYTES,
+    )
+
+
+def get_dataset_sample_rows() -> int:
+    """Return the train sample size without requiring model credentials."""
+    return _get_positive_int_env(
+        "DATASET_SAMPLE_ROWS",
+        DEFAULT_DATASET_SAMPLE_ROWS,
     )
 
 

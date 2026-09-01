@@ -54,6 +54,11 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
     )
     monkeypatch.setattr(
         collect,
+        "read_dataset_shape",
+        lambda slug, manifest, **kwargs: calls.append("dataset_shape") or None,
+    )
+    monkeypatch.setattr(
+        collect,
         "list_competition_notebooks",
         lambda slug, limit: calls.append("list_notebooks") or records,
     )
@@ -127,6 +132,7 @@ def test_collect_facts_runs_stages_in_order_and_clusters_before_pairs(
     assert calls == [
         "metadata",
         "files",
+        "dataset_shape",
         "list_notebooks",
         "assign:2",
         "leaderboard",
@@ -628,7 +634,7 @@ def _metadata(slug: str) -> CompetitionMetadata:
 def _manifest() -> FileManifest:
     return FileManifest(
         files=[],
-        train_test_size_ratio=2.0,
+        train_test_bytes_ratio=2.0,
         sample_submission_columns=["id", "target"],
         sample_submission_source="api",
         limitations=[],
